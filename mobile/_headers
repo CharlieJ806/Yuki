@@ -1,0 +1,65 @@
+# Cloudflare Pages 自定义响应头
+#
+# 这个文件必须出现在**构建输出目录**里（本项目的 dist-mobile/），
+# 由 mobile/build.js 自动复制过去。
+#
+# 格式：路径模式一行，缩进的 header 行跟在后面。
+# 规则只作用于静态资源，不影响 Pages Functions（本项目没有 Functions）。
+
+# Service Worker 绝不能缓存：否则改了代码，老用户仍跑旧版 SW，
+# 拿到的还是旧资源，表现为「明明更新了却没生效」。
+/sw.js
+  Cache-Control: no-cache, no-store, must-revalidate
+
+# 界面外壳也不宜长缓存：文件名没有内容哈希，
+# 长缓存会让用户长期停留在旧版本。
+/
+  Cache-Control: no-cache, must-revalidate
+/index.html
+  Cache-Control: no-cache, must-revalidate
+/app.js
+  Cache-Control: no-cache, must-revalidate
+/chat.js
+  Cache-Control: no-cache, must-revalidate
+/storage.js
+  Cache-Control: no-cache, must-revalidate
+/style.css
+  Cache-Control: no-cache, must-revalidate
+
+# 借来的 shared 模块同理（它们没有哈希后缀）
+/vendor/*
+  Cache-Control: no-cache, must-revalidate
+
+# 图标与头像**不能长缓存**。
+#
+# 这里踩过一个很隐蔽的坑：原规则是 `/*.png` 统一 7 天缓存，
+# 理由是「图片内容基本不变」。但图标/头像恰恰是会改的 ——
+# 换了一版图标，Cloudflare 边缘节点 7 天内一直发缓存副本
+# （响应头能看到 cf-cache-status: HIT、Age 数千秒），
+# 表现为「文件确实换对了，页面上却还是旧的」，极难排查。
+#
+# 这几个文件都很小（几十 KB），不缓存对性能没有影响。
+/icon-*.png
+  Cache-Control: no-cache, must-revalidate
+/yuki-avatar.png
+  Cache-Control: no-cache, must-revalidate
+
+# 服饰/动作立绘可以长缓存：它们在 URL 上带构建版本串
+# （app.js 里的 __OUTFIT_VER__），换图会换 URL，不存在拿旧图的问题。
+/outfits/*
+  Cache-Control: public, max-age=604800
+/poses/*
+  Cache-Control: public, max-age=604800
+
+# 视频较长，且 URL 也带版本串
+/videos/*
+  Cache-Control: public, max-age=604800
+
+# 其余图片（目前没有）保守处理，别默认长缓存
+/*.png
+  Cache-Control: no-cache, must-revalidate
+
+# 基础安全头
+/*
+  X-Content-Type-Options: nosniff
+  Referrer-Policy: no-referrer

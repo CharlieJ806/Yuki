@@ -1,0 +1,738 @@
+/* 手机端样式 —— 移动优先，兼顾 iOS 安全区 */
+:root {
+  --accent: #14b8a6;
+  --accent-soft: rgba(20, 184, 166, 0.12);
+  --bg: #f6f7f9;
+  --surface: #ffffff;
+  --text: #16181d;
+  --text-2: #6b7280;
+  --text-3: #9ca3af;
+  --border: rgba(0, 0, 0, 0.1);
+  --safe-b: env(safe-area-inset-bottom, 0px);
+  --safe-t: env(safe-area-inset-top, 0px);
+}
+
+* { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+
+/*
+ * `hidden` 必须真的隐藏 —— 这是**整个界面最要紧的一条规则**。
+ *
+ * 浏览器默认的 `[hidden] { display: none }` 优先级极低：
+ * 任何作者样式里写了 `display` 的选择器都会盖过它。
+ * 本项目里 .sheet / .reveal / .lightbox 都写了 `display: flex|grid`，
+ * 于是 `hidden` 完全失效 —— 弹窗和图鉴**从打开页面起就一直"显示"**，
+ * 空着、带 `inset:0` 遮罩，把所有点击都吃掉。
+ *
+ * 表现极具迷惑性：**按钮全都"没反应"**（其实是被透明遮罩拦了），
+ * 而查 DOM 属性 `el.hidden === true` 一切正常 ——
+ * 因为坏的是**计算样式**，不是属性。排查时务必看 computed display，
+ * 不要只看 hidden。
+ *
+ * !important 在这里是必要的：这些浮层的可见性全靠 hidden 控制，
+ * 漏掉任何一条都会重演上面这一幕。
+ */
+[hidden] { display: none !important; }
+
+html, body {
+  margin: 0;
+  height: 100%;
+  overscroll-behavior: none;
+}
+
+body {
+  font: 15px/1.55 -apple-system, BlinkMacSystemFont, "PingFang SC", "Microsoft YaHei", sans-serif;
+  background: var(--bg);
+  color: var(--text);
+}
+
+#app {
+  display: flex;
+  flex-direction: column;
+  height: 100dvh;      /* dvh 让移动端地址栏收起/展开时布局不跳 */
+}
+
+/* ---------- 顶栏 ---------- */
+.topbar {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: calc(var(--safe-t) + 8px) 10px 8px;
+  background: var(--surface);
+  border-bottom: 1px solid var(--border);
+}
+.title { flex: 1; display: flex; align-items: center; gap: 9px; min-width: 0; }
+.avatar { width: 30px; height: 30px; border-radius: 50%; object-fit: cover; background: var(--accent-soft); }
+.title-text { min-width: 0; }
+.name { margin: 0; font-size: 14px; font-weight: 700; }
+.sub {
+  margin: 0;
+  font-size: 11px;
+  color: var(--text-3);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+/*
+ * 图标按钮按移动端最小可点区（44x44）来。
+ *
+ * 原来是 38x38 —— 在手机上很难点中，尤其是设置面板的 ✕：
+ * 面板占屏 88%，留给「点空白关闭」的只有顶部一条窄缝，
+ * 于是「关不掉」主要是**点不中**，而不是逻辑坏了。
+ * 视觉尺寸保持克制，用 padding 把热区撑到 44。
+ */
+.icon-btn {
+  flex: 0 0 auto;
+  width: 44px;
+  height: 44px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: none;
+  border-radius: 10px;
+  background: transparent;
+  color: var(--text-2);
+  font-size: 18px;
+  line-height: 1;
+  /* 视觉上不用那么大，但热区必须够 */
+  padding: 0;
+}
+.icon-btn:active { background: rgba(0, 0, 0, 0.06); }
+
+/* ---------- 消息流 ---------- */
+.msgs {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
+  padding: 12px 12px 4px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.empty { margin: auto; color: var(--text-3); font-size: 13.5px; }
+
+.msg { display: flex; flex-direction: column; align-items: flex-start; max-width: 86%; }
+.msg.user { align-self: flex-end; align-items: flex-end; }
+
+.bubble {
+  padding: 9px 12px;
+  border-radius: 15px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  /* 长英文/URL 不撑破气泡 */
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+}
+.msg.user .bubble {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #fff;
+}
+.msg.error .bubble { background: #fef2f2; border-color: #fecaca; color: #b91c1c; }
+.msg .time { margin-top: 3px; font-size: 10.5px; color: var(--text-3); }
+
+.bubble-images { display: flex; flex-wrap: wrap; gap: 5px; margin-bottom: 5px; }
+.bubble-images img {
+  max-width: 150px;
+  max-height: 150px;
+  border-radius: 10px;
+  border: 1px solid var(--border);
+}
+
+/* 打字指示 */
+.typing { display: flex; gap: 4px; padding: 12px; }
+.typing i {
+  width: 6px; height: 6px; border-radius: 50%;
+  background: var(--text-3);
+  animation: blink 1.2s infinite ease-in-out;
+}
+.typing i:nth-child(2) { animation-delay: 0.2s; }
+.typing i:nth-child(3) { animation-delay: 0.4s; }
+@keyframes blink { 0%, 80%, 100% { opacity: 0.3; } 40% { opacity: 1; } }
+
+/* ---------- 待发图片 ---------- */
+.pending {
+  flex: 0 0 auto;
+  display: flex;
+  gap: 6px;
+  padding: 8px 12px 0;
+  overflow-x: auto;
+}
+.pending-item { position: relative; flex: 0 0 auto; }
+.pending-item img {
+  width: 54px; height: 54px;
+  object-fit: cover;
+  border-radius: 10px;
+  border: 1px solid var(--border);
+}
+.pending-del {
+  position: absolute; top: -5px; right: -5px;
+  width: 20px; height: 20px;
+  border: none; border-radius: 50%;
+  background: rgba(0, 0, 0, 0.65);
+  color: #fff;
+  font-size: 11px;
+  line-height: 1;
+}
+
+/* ---------- 输入区 ---------- */
+.composer {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: flex-end;
+  gap: 7px;
+  padding: 8px 10px calc(var(--safe-b) + 8px);
+  background: var(--surface);
+  border-top: 1px solid var(--border);
+}
+#input {
+  flex: 1;
+  min-height: 40px;
+  max-height: 120px;
+  padding: 9px 12px;
+  border-radius: 20px;
+  border: 1px solid var(--border);
+  background: var(--bg);
+  color: var(--text);
+  font: inherit;
+  resize: none;
+}
+#input:focus { outline: none; border-color: var(--accent); }
+.send {
+  flex: 0 0 auto;
+  width: 40px; height: 40px;
+  border: none; border-radius: 50%;
+  background: var(--accent);
+  color: #fff;
+  font-size: 17px;
+  line-height: 1;
+}
+.send:disabled { opacity: 0.4; }
+.send.stop { background: #ef4444; font-size: 13px; }
+
+.err-bar {
+  padding: 6px 12px;
+  background: #fef2f2;
+  color: #b91c1c;
+  font-size: 12px;
+}
+
+/* ---------- 抽屉 / 面板 ---------- */
+.drawer {
+  position: fixed;
+  top: 0; bottom: 0; left: 0;
+  width: min(82vw, 330px);
+  z-index: 30;
+  background: var(--surface);
+  border-right: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  padding-top: var(--safe-t);
+}
+.drawer-head {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 12px 14px;
+  border-bottom: 1px solid var(--border);
+  font-weight: 700;
+}
+.session-list { flex: 1; overflow-y: auto; list-style: none; margin: 0; padding: 6px; }
+.session-item {
+  display: flex; align-items: center; justify-content: space-between;
+  gap: 8px;
+  padding: 11px 12px;
+  border-radius: 11px;
+}
+.session-item.active { background: var(--accent-soft); }
+.session-item .t { font-size: 14px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.session-item .m { font-size: 11px; color: var(--text-3); }
+.session-del { border: none; background: transparent; color: var(--text-3); font-size: 15px; padding: 4px 6px; }
+
+.scrim { position: fixed; inset: 0; z-index: 20; background: rgba(0, 0, 0, 0.35); }
+
+/*
+ * 设置面板：外层撑满全屏（可点空白关闭），内层贴底显示。
+ * 之前外层只占底部一块，没有「面板外」的区域可点，
+ * 关掉只能靠 ✕ —— 而它和抽屉叠加时容易被挡，用户实测「关不掉」。
+ */
+.sheet {
+  position: fixed;
+  inset: 0;
+  z-index: 40;
+  display: flex;
+  flex-direction: column;
+  justify-content: flex-end;
+  background: rgba(0, 0, 0, 0.35);
+  padding-top: var(--safe-t);
+}
+.sheet-inner {
+  /*
+   * 面板别顶到屏幕最上沿。
+   *
+   * 原来 88dvh + 贴底，留给「点空白关闭」的只有很窄一条，
+   * 用户很容易点不中而以为关不掉。留出顶部 12dvh 的空白，
+   * 既是明确的关闭热区，也让「这是弹层」一眼可见。
+   */
+  max-height: 86dvh;
+  background: var(--surface);
+  border-radius: 18px 18px 0 0;
+  display: flex;
+  flex-direction: column;
+  padding-bottom: var(--safe-b);
+}
+.sheet-head {
+  flex: 0 0 auto;
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 14px 16px;
+  border-bottom: 1px solid var(--border);
+  font-weight: 700;
+}
+/*
+ * 面板主体必须能吃满剩余高度（flex:1）才形成滚动容器。
+ * 缺了这条，内容会被 `.sheet-inner` 的 max-height 直接截断 ——
+ * 图鉴有 17 项，超出部分就再也点不到了。
+ */
+.sheet-body { flex: 1; min-height: 0; overflow-y: auto; padding: 14px 16px 20px; }
+
+.field { display: block; margin-bottom: 15px; }
+.field > span { display: block; margin-bottom: 5px; font-size: 12.5px; color: var(--text-2); }
+.field small { display: block; margin-top: 4px; font-size: 11px; color: var(--text-3); line-height: 1.5; }
+.field input, .field select {
+  width: 100%;
+  padding: 10px 11px;
+  border-radius: 11px;
+  border: 1px solid var(--border);
+  background: var(--bg);
+  color: var(--text);
+  font: inherit;
+  /* 16px 可避免 iOS 聚焦时自动放大页面 */
+  font-size: 16px;
+}
+.field .row { display: flex; align-items: center; gap: 8px; }
+.field .row input { flex: 1; }
+
+.sheet-actions { display: flex; gap: 9px; margin-top: 4px; }
+.btn {
+  flex: 1;
+  padding: 11px;
+  border-radius: 12px;
+  border: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--text);
+  font: inherit;
+  font-weight: 600;
+}
+.btn.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+.btn.danger { color: #b91c1c; border-color: #fecaca; }
+
+.test-result { margin: 10px 0 0; font-size: 12px; color: var(--text-2); white-space: pre-wrap; }
+
+.danger-zone {
+  margin-top: 26px;
+  padding-top: 16px;
+  border-top: 1px solid var(--border);
+}
+.danger-zone small { display: block; margin-top: 8px; font-size: 11px; color: var(--text-3); }
+
+/* 大图预览 */
+.lightbox {
+  position: fixed; inset: 0; z-index: 60;
+  display: grid; place-items: center;
+  background: rgba(0, 0, 0, 0.88);
+  padding: 16px;
+}
+.lightbox img { max-width: 100%; max-height: 100%; }
+
+/* ---------- 她的立绘（顶部常驻） ---------- */
+.pet-strip {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  /*
+   * 立绘条要克制：原来 68x84 的图 + 上下 10px 内边距占了约 104px，
+   * 在 844 高的手机上吃掉 12% —— 消息一多就显得逼仄。
+   * 缩到 56x70 后整条约 86px，同时仍能看清她的样子。
+   */
+  padding: 8px 14px;
+  background: linear-gradient(180deg, var(--accent-soft), transparent);
+}
+.pet-img {
+  width: 56px;
+  height: 70px;
+  object-fit: contain;
+  flex: 0 0 auto;
+  /* 和桌面端一致的轻浮动，别像静态贴图 */
+  animation: pet-breathe 3.6s ease-in-out infinite;
+}
+@keyframes pet-breathe {
+  0%, 100% { transform: translateY(0); }
+  50% { transform: translateY(-3px); }
+}
+.pet-meta { min-width: 0; }
+.pet-outfit { margin: 0; font-size: 13px; font-weight: 700; color: rgb(var(--theme-accent, 20 184 166)); }
+.pet-note { margin: 2px 0 0; font-size: 11px; color: var(--text-3); }
+
+/* ---------- 图鉴 ---------- */
+.gallery-tip {
+  margin: 0 0 12px;
+  font-size: 12px;
+  color: var(--text-3);
+  line-height: 1.6;
+}
+.gallery-grid {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 10px;
+}
+.g-item {
+  position: relative;
+  padding: 10px 8px;
+  border-radius: 13px;
+  border: 1px solid var(--border);
+  background: var(--bg);
+  text-align: center;
+}
+.g-item.locked { opacity: 0.55; }
+.g-item img {
+  width: 100%;
+  height: 108px;
+  object-fit: contain;
+  display: block;
+}
+.g-item .g-title {
+  margin: 6px 0 0;
+  font-size: 12px;
+  font-weight: 700;
+}
+.g-item .g-hint {
+  margin: 3px 0 0;
+  font-size: 10.5px;
+  color: var(--text-3);
+  line-height: 1.4;
+}
+/* 未解锁用剪影 + 问号，比直接藏起来更有「可收集」的感觉 */
+.g-item.locked img { filter: brightness(0) opacity(0.25); }
+.g-lock {
+  position: absolute;
+  top: 50%; left: 50%;
+  transform: translate(-50%, -60%);
+  font-size: 22px;
+}
+
+/* ---------- 解锁动画 ---------- */
+.reveal {
+  position: fixed; inset: 0; z-index: 60;
+  display: grid; place-items: center;
+  /*
+   * 遮罩要足够实：这张卡是「她发来的照片」，背景透出图鉴卡片会显得
+   * 她的身体和背后的小图叠在一起（实测截图里很脏）。
+   */
+  background: rgba(0, 0, 0, 0.88);
+  backdrop-filter: blur(6px);
+  padding: 22px;
+}
+.reveal-card {
+  width: 100%;
+  max-width: 330px;
+  padding: 20px 18px 18px;
+  border-radius: 18px;
+  background: var(--surface);
+  text-align: center;
+  animation: reveal-pop 0.32s cubic-bezier(0.2, 0.9, 0.3, 1.3);
+  /*
+   * 必须自己形成层叠上下文（position + z-index），否则卡片内的元素都是
+   * static，会跟图鉴卡片里同样是 static 的 .g-title/.g-hint 抢绘制顺序 ——
+   * 立绘是透明 PNG，那些文字就从她身体里透出来（实测：腰上浮着「穿红外套」）。
+   * 单独给 <img> 加背景盖不住，因为文字是在**图之上**被绘制的。
+   */
+  position: relative;
+  z-index: 1;
+}
+@keyframes reveal-pop {
+  from { opacity: 0; transform: scale(0.9) translateY(12px); }
+  to   { opacity: 1; transform: scale(1) translateY(0); }
+}
+.reveal-badge {
+  margin: 0 0 10px;
+  font-size: 12px;
+  font-weight: 700;
+  color: rgb(var(--theme-accent, 20 184 166));
+}
+.reveal-img {
+  width: 100%;
+  max-height: 210px;
+  object-fit: contain;
+  /*
+   * 立绘必须有不透明背景。
+   * PNG 带透明通道，背后（图鉴卡片）的文字会从她的身体里透出来 ——
+   * 实测截图里能看到腰部浮着「穿红外套」几个字，很脏。
+   * 给图片本身一个和卡片一致的底色即可遮住。
+   */
+  background: var(--surface);
+}
+.reveal-title { margin: 10px 0 0; font-size: 15px; font-weight: 700; }
+.reveal-line {
+  margin: 6px 0 16px;
+  font-size: 13px;
+  color: var(--text-2);
+  line-height: 1.6;
+}
+
+/* 开关型字段：勾选框和文字同一行 */
+.switch-field {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+.switch-field > span { margin-bottom: 0; flex: 1; }
+.switch-field > input[type="checkbox"] {
+  width: 20px; height: 20px;
+  margin: 0;
+  accent-color: rgb(var(--theme-accent, 20 184 166));
+}
+.switch-field > small { flex: 0 0 100%; margin-top: 0; }
+
+/* ---------- 视频（图鉴分组 / 解锁播放） ---------- */
+
+/*
+ * 分组标题占满一整行。
+ * 用 grid-column: 1 / -1 而不是另起容器 —— 图鉴是 2 列网格，
+ * 分组标题插在同一个网格流里，避免多一层 DOM 和额外的边距计算。
+ */
+.g-group {
+  grid-column: 1 / -1;
+  margin: 6px 0 0;
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--text-2);
+}
+.g-group:first-child { margin-top: 0; }
+.g-group b {
+  color: rgb(var(--theme-accent, 20 184 166));
+  font-weight: 700;
+}
+
+/* 视频封面是 4:3 或 3:4 的实拍截帧，用 cover 填满卡片更整齐 */
+.g-item.g-video img { height: 120px; object-fit: cover; border-radius: 9px; }
+
+/* 播放角标：让「这是视频」一眼可辨，而不是静态封面 */
+.g-play {
+  position: absolute;
+  top: 50%; left: 50%;
+  transform: translate(-50%, -70%);
+  width: 34px; height: 34px;
+  display: flex; align-items: center; justify-content: center;
+  border-radius: 50%;
+  background: rgba(0, 0, 0, 0.45);
+  color: #fff;
+  font-size: 13px;
+  padding-left: 2px; /* ▶ 视觉重心偏左，右移一点才居中 */
+  pointer-events: none;
+}
+
+/* 解锁弹窗里的视频 */
+.reveal-video {
+  width: 100%;
+  max-height: 320px;
+  border-radius: 12px;
+  background: #000;
+  display: block;
+}
+/* 竖屏视频（720x960）用 contain 才不会把人截掉 */
+.reveal-video[data-portrait='1'] { max-height: 380px; object-fit: contain; }
+
+/* ---------- 备份区（设置面板） ---------- */
+.backup-zone {
+  margin-top: 18px;
+  padding: 13px 14px;
+  border-radius: 13px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+}
+.zone-title {
+  margin: 0 0 6px;
+  font-size: 12.5px;
+  font-weight: 700;
+  color: var(--text-2);
+}
+.zone-note {
+  margin: 0 0 11px;
+  font-size: 11.5px;
+  line-height: 1.6;
+  color: var(--text-3);
+}
+.zone-actions {
+  display: flex;
+  gap: 9px;
+}
+.zone-actions .btn { flex: 1; }
+
+.danger-zone {
+  margin-top: 12px;
+  padding: 13px 14px;
+  border-radius: 13px;
+  border: 1px dashed var(--border);
+}
+
+/* ---------- 亲密度 ---------- */
+.affinity {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  margin-top: 5px;
+}
+.affinity-bar {
+  flex: 0 0 74px;
+  height: 5px;
+  border-radius: 3px;
+  background: rgba(0, 0, 0, 0.09);
+  overflow: hidden;
+}
+.affinity-bar > i {
+  display: block;
+  height: 100%;
+  width: 0;
+  border-radius: 3px;
+  background: rgb(var(--theme-accent, 20 184 166));
+  transition: width 0.45s ease;
+}
+/* 到顶后换个更暖的色调，一眼看出「已经满了」 */
+.affinity-bar > i[data-max='1'] { background: #f59e0b; }
+.affinity-text {
+  font-size: 10.5px;
+  color: var(--text-3);
+  white-space: nowrap;
+}
+
+/* ---------- 触发规则一览 ---------- */
+.rules {
+  margin-bottom: 12px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--bg);
+}
+.rules > summary {
+  padding: 11px 13px;
+  font-size: 12.5px;
+  font-weight: 700;
+  color: var(--text-2);
+  cursor: pointer;
+  list-style: none;
+}
+.rules > summary::-webkit-details-marker { display: none; }
+/* 自绘三角：默认标记在不同浏览器里位置不一致 */
+.rules > summary::after {
+  content: '▾';
+  float: right;
+  color: var(--text-3);
+  transition: transform 0.2s;
+}
+.rules[open] > summary::after { transform: rotate(180deg); }
+.rules-body {
+  max-height: 260px;
+  overflow-y: auto;
+  padding: 0 13px 12px;
+}
+.rule-group {
+  margin: 10px 0 6px;
+  font-size: 11.5px;
+  font-weight: 700;
+  color: rgb(var(--theme-accent, 20 184 166));
+}
+.rule-row {
+  padding: 6px 0;
+  border-top: 1px solid var(--border);
+}
+.rule-title { margin: 0; font-size: 12px; font-weight: 600; }
+.rule-how {
+  margin: 3px 0 0;
+  font-size: 10.5px;
+  line-height: 1.7;
+  color: var(--text-3);
+}
+.rule-how code {
+  display: inline-block;
+  padding: 0 4px;
+  margin: 0 2px 2px 0;
+  border-radius: 4px;
+  background: rgba(0, 0, 0, 0.05);
+  font-size: 10px;
+  font-family: ui-monospace, monospace;
+}
+.rule-how em { font-style: normal; color: var(--text-2); font-weight: 600; }
+.rule-foot {
+  margin: 12px 0 0;
+  padding-top: 9px;
+  border-top: 1px dashed var(--border);
+  font-size: 10.5px;
+  line-height: 1.7;
+  color: var(--text-3);
+}
+.rule-foot code {
+  background: rgba(0, 0, 0, 0.05);
+  border-radius: 3px;
+  padding: 0 3px;
+  font-family: ui-monospace, monospace;
+}
+
+/* ---------- 换装 ---------- */
+.wardrobe-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 10px;
+}
+.w-item {
+  position: relative;
+  padding: 8px 6px 7px;
+  border-radius: 12px;
+  border: 1px solid var(--border);
+  background: var(--bg);
+  cursor: pointer;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 5px;
+}
+/* 当前穿着：描边加粗 + 主色，一眼看出选了哪套 */
+.w-item.on {
+  border-color: rgb(var(--theme-accent, 20 184 166));
+  border-width: 2px;
+  padding: 7px 5px 6px;
+  background: rgba(20, 184, 166, 0.07);
+}
+.w-item img { width: 100%; height: 96px; object-fit: contain; }
+.w-emoji { font-size: 30px; line-height: 96px; }
+.w-label {
+  font-size: 11px;
+  color: var(--text-2);
+  text-align: center;
+  line-height: 1.3;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 100%;
+}
+.w-item.on .w-label { color: rgb(var(--theme-accent, 20 184 166)); font-weight: 700; }
+
+/* ---------- 未配置提示条 ---------- */
+.setup-hint {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 8px 12px 0;
+  padding: 10px 12px;
+  border-radius: 11px;
+  border: 1px solid rgba(251, 191, 36, 0.45);
+  background: rgba(251, 191, 36, 0.13);
+  text-align: left;
+  cursor: pointer;
+  font-size: 12.5px;
+  color: #92400e;
+}
+.setup-hint:active { background: rgba(251, 191, 36, 0.22); }
+.setup-icon { flex: 0 0 auto; font-size: 14px; }
+.setup-text { flex: 1; }
+.setup-arrow { flex: 0 0 auto; color: #b45309; font-size: 15px; }

@@ -1,0 +1,274 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, maximum-scale=1" />
+<meta name="theme-color" content="#14b8a6" />
+<meta name="apple-mobile-web-app-capable" content="yes" />
+<meta name="apple-mobile-web-app-status-bar-style" content="default" />
+<meta name="apple-mobile-web-app-title" content="Yuki" />
+<link rel="manifest" href="manifest.webmanifest" />
+<!--
+  favicon 显式声明。
+  之前只靠 manifest 里的 icons —— 那是给「安装成 PWA」用的，
+  浏览器标签页/书签的 favicon 需要 <link rel="icon">，缺了会去请求
+  /favicon.ico（我们没有这个文件），于是显示成空白或默认图标。
+  带 ?v= 版本串：CDN 会把 png 缓存住，换图标后不加参数拿到的还是旧的。
+-->
+<link rel="icon" type="image/png" sizes="192x192" href="icon-192.png?v=__ASSET_VER__" />
+<link rel="apple-touch-icon" href="icon-192.png?v=__ASSET_VER__" />
+<title>Yuki</title>
+<link rel="stylesheet" href="style.css" />
+</head>
+<body>
+<div id="app">
+  <!-- 顶栏 -->
+  <header class="topbar">
+    <button class="icon-btn" id="btn-menu" aria-label="会话列表">☰</button>
+    <div class="title">
+      <img class="avatar" src="yuki-avatar.png" alt="" />
+      <div class="title-text">
+        <p class="name" id="persona-name">Yuki</p>
+        <p class="sub" id="status-line">…</p>
+      </div>
+    </div>
+    <!--
+      换装与图鉴的图标必须一眼可分。
+      原来用 👚(换装) 和 👗(图鉴) —— 手机上两个都是「裙子」，
+      看着像同一个按钮，用户以为「有一个没用」。
+      换装用衣架、图鉴用相册，语义和形状都拉开距离。
+    -->
+    <button class="icon-btn" id="btn-wardrobe" aria-label="换装">🧥</button>
+    <button class="icon-btn" id="btn-gallery" aria-label="图鉴">🖼️</button>
+    <button class="icon-btn" id="btn-settings" aria-label="设置">⚙</button>
+  </header>
+
+  <!-- 她的立绘：常驻顶部，随时间和解锁进度轮换 -->
+  <div class="pet-strip" id="pet-strip">
+    <img class="pet-img" id="pet-img" alt="Yuki" />
+    <div class="pet-meta">
+      <p class="pet-outfit" id="pet-outfit">…</p>
+      <p class="pet-note" id="pet-note"></p>
+      <!--
+        亲密度进度条。
+        之前手机端完全看不到关系进展 —— 只有一句「用已聊条数当代理」的注释，
+        而图鉴的条件解锁（如睡裙要 23 点后）又依赖它，用户无从判断自己到哪了。
+      -->
+      <div class="affinity" id="affinity">
+        <div class="affinity-bar"><i id="affinity-fill"></i></div>
+        <span class="affinity-text" id="affinity-text"></span>
+      </div>
+    </div>
+  </div>
+
+  <!--
+    未配置提示条。
+    之前是「没填 API Key 就自动弹出设置面板」—— 面板占屏 86%，
+    把顶部按钮全挡住，用户以为图标坏了（实测报过「换装点了没用」）。
+    改成一条**不挡操作**的提示，点它才打开设置。
+  -->
+  <button class="setup-hint" id="setup-hint" hidden>
+    <span class="setup-icon">⚙️</span>
+    <span class="setup-text">还没配置 API Key，点这里设置</span>
+    <span class="setup-arrow">›</span>
+  </button>
+
+  <!-- 消息流 -->
+  <main class="msgs" id="msgs">
+    <p class="empty" id="empty-hint">还没有对话，说点什么吧</p>
+  </main>
+
+  <!-- 待发送图片 -->
+  <div class="pending" id="pending" hidden></div>
+
+  <!-- 输入区 -->
+  <footer class="composer">
+    <button class="icon-btn" id="btn-attach" aria-label="发图片">📎</button>
+    <textarea id="input" rows="1" placeholder="和 Yuki 说点什么…" enterkeyhint="send"></textarea>
+    <button class="send" id="btn-send" aria-label="发送">↑</button>
+    <button class="send stop" id="btn-stop" aria-label="停止" hidden>■</button>
+  </footer>
+  <input type="file" id="file" accept="image/jpeg,image/png,image/gif,image/webp" multiple hidden />
+</div>
+
+<!-- 会话列表抽屉 -->
+<aside class="drawer" id="drawer" hidden>
+  <div class="drawer-head">
+    <span>对话</span>
+    <div>
+      <button class="icon-btn" id="btn-new" aria-label="新建">＋</button>
+      <button class="icon-btn" id="btn-close-drawer" aria-label="关闭">✕</button>
+    </div>
+  </div>
+  <ul class="session-list" id="session-list"></ul>
+</aside>
+<div class="scrim" id="scrim" hidden></div>
+
+<!-- 设置面板：外层全屏（点空白关闭），内层贴底 -->
+<section class="sheet" id="settings" hidden>
+  <div class="sheet-inner">
+  <div class="sheet-head">
+    <span>设置</span>
+    <button class="icon-btn" id="btn-close-settings" aria-label="关闭">✕</button>
+  </div>
+  <div class="sheet-body">
+    <label class="field">
+      <span>服务商</span>
+      <select id="f-provider"></select>
+      <small>选「自定义」可填任意 OpenAI 兼容地址</small>
+    </label>
+    <label class="field">
+      <span>接口地址</span>
+      <input id="f-baseUrl" type="url" placeholder="https://api.deepseek.com" autocapitalize="off" />
+    </label>
+    <label class="field">
+      <span>API Key</span>
+      <input id="f-apiKey" type="password" placeholder="sk-..." autocapitalize="off" />
+      <small>只存在这台手机本地，不会上传到任何服务器</small>
+    </label>
+    <label class="field">
+      <span>模型</span>
+      <input id="f-model" type="text" placeholder="deepseek-flash" autocapitalize="off" />
+      <small id="model-hint">要让她看图就填 deepseek-flash（原生多模态）</small>
+    </label>
+
+    <!-- OpenRouter 专属：路由偏好（别的服务商不认这些字段，就不显示） -->
+    <div id="or-options" hidden>
+      <label class="field switch-field">
+        <span>只用零保留端点</span>
+        <input id="f-zdr" type="checkbox" />
+        <small>
+          只路由到「不保留请求」的 provider。这是隐私控制，不是免审核 ——
+          有没有内容策略由上游模型和 provider 决定。
+        </small>
+      </label>
+      <label class="field">
+        <span>路由偏好</span>
+        <select id="f-routeSort">
+          <option value="">默认（按价格加权）</option>
+          <option value="price">最省</option>
+          <option value="throughput">最快</option>
+          <option value="latency">延迟最低</option>
+        </select>
+        <small>同一模型多家 provider 时怎么挑</small>
+      </label>
+    </div>
+    <label class="field">
+      <span>角色设定</span>
+      <select id="f-persona"></select>
+    </label>
+    <label class="field">
+      <span>工作时间</span>
+      <div class="row">
+        <input id="f-workStart" type="time" />
+        <span>–</span>
+        <input id="f-workEnd" type="time" />
+      </div>
+    </label>
+    <label class="field">
+      <span>上下文条数</span>
+      <input id="f-maxHistory" type="number" min="2" max="400" />
+    </label>
+    <label class="field switch-field">
+      <span>聊天解锁装扮/视频</span>
+      <input id="f-petStories" type="checkbox" />
+      <small>聊到相关话题时她会主动发照片、视频，解锁新内容。关掉可省去判断用的 token。</small>
+    </label>
+    <label class="field switch-field">
+      <span>发送后收起键盘</span>
+      <input id="f-collapse" type="checkbox" />
+      <small>发完自动收起，方便看回复。想连续快速发言时可关掉。</small>
+    </label>
+    <div class="sheet-actions">
+      <button class="btn primary" id="btn-save-settings">保存</button>
+      <button class="btn" id="btn-test">测试连接</button>
+    </div>
+    <p class="test-result" id="test-result"></p>
+    <!--
+      备份放在「危险操作」之前，而且视觉上不弱化：
+      清站点数据会连对话一起端掉（IndexedDB 和 SW 同源），
+      所以先备份是这类操作的前置条件，不是可选项。
+    -->
+    <div class="backup-zone">
+      <p class="zone-title">备份</p>
+      <p class="zone-note" id="backup-note">
+        对话和她的记忆都存在这台设备上。清除浏览器数据会一并删除，
+        建议先导出一份。
+      </p>
+      <div class="zone-actions">
+        <button class="btn" id="btn-export">导出备份</button>
+        <button class="btn" id="btn-import">导入备份</button>
+      </div>
+    </div>
+    <div class="danger-zone">
+      <p class="zone-title">危险操作</p>
+      <button class="btn danger" id="btn-wipe">清空本机数据</button>
+      <small id="usage-line"></small>
+    </div>
+  </div>
+  </div>
+</section>
+
+<!-- 图鉴 -->
+<section class="sheet" id="gallery" hidden>
+  <div class="sheet-inner">
+    <div class="sheet-head">
+      <span>图鉴 <small id="gallery-count"></small></span>
+      <button class="icon-btn" id="btn-close-gallery" aria-label="关闭">✕</button>
+    </div>
+    <div class="sheet-body">
+      <p class="gallery-tip" id="gallery-tip"></p>
+      <!--
+        触发规则查看。
+        规则本身写在源码里（src/shared/outfitStories.js / videoStories.js），
+        但这个入口让用户**不用翻代码**就知道「聊什么能解锁什么」——
+        否则图鉴只能显示一句模糊的线索，条件类（如 23 点后）更是完全看不出。
+      -->
+      <details class="rules" id="rules">
+        <summary>触发规则一览</summary>
+        <div class="rules-body" id="rules-body"></div>
+      </details>
+      <div class="gallery-grid" id="gallery-grid"></div>
+    </div>
+  </div>
+</section>
+
+<!--
+  换装：只列已解锁的。
+  手机端此前只能让立绘自动轮换，没法指定穿哪套 ——
+  用户在图鉴里看到心仪的衣服却穿不上，这个入口补上。
+-->
+<section class="sheet" id="wardrobe" hidden>
+  <div class="sheet-inner">
+    <div class="sheet-head">
+      <span>换装 <small id="wardrobe-count"></small></span>
+      <button class="icon-btn" id="btn-close-wardrobe" aria-label="关闭">✕</button>
+    </div>
+    <div class="sheet-body">
+      <p class="gallery-tip" id="wardrobe-tip"></p>
+      <div class="wardrobe-grid" id="wardrobe-grid"></div>
+    </div>
+  </div>
+</section>
+
+<!-- 解锁：模拟她发来照片 / 视频 -->
+<div class="reveal" id="reveal" hidden>
+  <div class="reveal-card">
+    <p class="reveal-badge" id="reveal-badge">✨ 解锁新装扮</p>
+    <img class="reveal-img" id="reveal-img" alt="" />
+    <!--
+      视频独立于 img 存在：两者互斥显示（照片 / 视频），
+      共用一个卡片比做两个弹窗省事，也不会出现「两个都能弹」的竞态。
+      带 controls：用户明确要求保留声音，而 iOS 不允许带声自动播放，
+      所以必须给播放控件让他主动点。
+    -->
+    <video class="reveal-video" id="reveal-video" playsinline controls preload="metadata" hidden></video>
+    <p class="reveal-title" id="reveal-title"></p>
+    <p class="reveal-line" id="reveal-line"></p>
+    <button class="btn primary" id="btn-reveal-ok">收下</button>
+  </div>
+</div>
+
+<script type="module" src="app.js"></script>
+</body>
+</html>

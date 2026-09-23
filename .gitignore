@@ -1,0 +1,19 @@
+node_modules/
+dist/
+dist-mobile/
+*.log
+.DS_Store
+.vite/
+
+# 打包产物（322MB，不该进仓库；由 npm run pack 本地生成）
+release/
+
+# 临时/缓存
+.tmp-yuki/
+*.tmp
+# 无头浏览器验证时用的临时 profile
+.tmp-chrome-profile/
+
+# 本地环境
+.env
+.env.*

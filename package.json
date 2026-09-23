@@ -1,0 +1,32 @@
+{
+  "name": "desk-pet",
+  "version": "0.1.0",
+  "private": true,
+  "description": "上班摸鱼桌宠 —— 桌面悬浮小挂件 + 打卡 + 摸鱼收入统计",
+  "type": "module",
+  "main": "src/main/index.js",
+  "scripts": {
+    "dev": "node scripts/dev.js",
+    "dev:3d": "node scripts/dev-3d.js --open",
+    "build": "vite build",
+    "start": "npm run build && electron .",
+    "pack": "node scripts/build.js",
+    "smoke": "node scripts/smoke.js",
+    "test:chat": "node scripts/chat-test.js",
+    "test": "node scripts/smoke.js && node scripts/chat-test.js"
+  },
+  "dependencies": {
+    "three": "^0.180.0",
+    "vue": "^3.5.13"
+  },
+  "devDependencies": {
+    "@electron/packager": "^20.3.0",
+    "@vitejs/plugin-vue": "^5.2.1",
+    "electron": "^38.8.6",
+    "undici": "^8.11.0",
+    "vite": "^6.0.7"
+  },
+  "allowScripts": {
+    "esbuild@0.25.12": true
+  }
+}

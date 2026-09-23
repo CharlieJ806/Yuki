@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>摸鱼桌宠</title>
+    <style>
+      html,
+      body {
+        margin: 0;
+        padding: 0;
+        width: 100%;
+        height: 100%;
+        overflow: hidden;
+        background: transparent;
+        font-family: -apple-system, 'Segoe UI', 'Microsoft YaHei', system-ui, sans-serif;
+      }
+
+      /* #app 必须撑满，否则内部 height:100% 的布局会塌成内容高度，
+         桌宠就跑到窗口顶部、下方留出一大片点不到的透明死区（无法拖动）。 */
+      #app {
+        width: 100%;
+        height: 100%;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="app"></div>
+    <script type="module" src="./src/main.js"></script>
+  </body>
+</html>

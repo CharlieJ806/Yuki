@@ -1,0 +1,266 @@
+{
+  "outfit-cosplay": {
+    "source": "cosplay.png",
+    "size": "179x300",
+    "bg": "srgb(255,255,255)",
+    "kind": "outfit"
+  },
+  "outfit-jk": {
+    "source": "jk.png",
+    "size": "143x300",
+    "bg": "srgb(255,255,255)",
+    "kind": "outfit"
+  },
+  "outfit-ol": {
+    "source": "ol制服.png",
+    "size": "300x300",
+    "bg": "srgb(42,40,61)",
+    "kind": "outfit-scene"
+  },
+  "outfit-casual-red": {
+    "source": "便服 (2).png",
+    "size": "178x300",
+    "bg": "srgb(255,255,255)",
+    "kind": "outfit"
+  },
+  "outfit-casual-lace": {
+    "source": "便服 (3).png",
+    "size": "179x300",
+    "bg": "srgb(255,255,255)",
+    "kind": "outfit"
+  },
+  "outfit-casual-mono": {
+    "source": "便服 (4).png",
+    "size": "179x300",
+    "bg": "srgb(255,255,255)",
+    "kind": "outfit"
+  },
+  "outfit-casual-dark": {
+    "source": "便服 (5).png",
+    "size": "179x300",
+    "bg": "srgb(255,255,255)",
+    "kind": "outfit"
+  },
+  "outfit-casual": {
+    "source": "便服.png",
+    "size": "179x300",
+    "bg": "srgb(255,255,255)",
+    "kind": "outfit"
+  },
+  "outfit-nun": {
+    "source": "修女.png",
+    "size": "181x300",
+    "bg": "srgb(255,255,255)",
+    "kind": "outfit"
+  },
+  "outfit-idol": {
+    "source": "偶像风格.png",
+    "size": "179x300",
+    "bg": "srgb(255,255,255)",
+    "kind": "outfit"
+  },
+  "snack": {
+    "source": "吃零食.png",
+    "size": "178x300",
+    "bg": "srgb(254,255,250)",
+    "kind": "action"
+  },
+  "outfit-camisole": {
+    "source": "吊带.png",
+    "size": "179x300",
+    "bg": "srgb(255,255,255)",
+    "kind": "outfit"
+  },
+  "outfit-maid": {
+    "source": "女仆.png",
+    "size": "185x300",
+    "bg": "srgb(255,255,255)",
+    "kind": "outfit"
+  },
+  "outfit-maid-two": {
+    "source": "女仆装.png",
+    "size": "179x300",
+    "bg": "srgb(255,255,255)",
+    "kind": "outfit"
+  },
+  "outfit-interview": {
+    "source": "实习面试.png",
+    "size": "300x300",
+    "bg": "srgb(254,248,236)",
+    "kind": "outfit-scene"
+  },
+  "shy": {
+    "source": "害羞脸红，手放脸边或捂脸.png",
+    "size": "168x300",
+    "bg": "srgb(253,255,244)",
+    "kind": "action"
+  },
+  "outfit-stepmom": {
+    "source": "小妈长裙.png",
+    "size": "178x300",
+    "bg": "srgb(255,255,255)",
+    "kind": "outfit"
+  },
+  "outfit-homewear": {
+    "source": "居家清凉睡衣.png",
+    "size": "179x300",
+    "bg": "srgb(255,255,255)",
+    "kind": "outfit"
+  },
+  "think": {
+    "source": "思考，手指抵下巴或歪头.png",
+    "size": "229x300",
+    "bg": "srgb(254,255,250)",
+    "kind": "action"
+  },
+  "surprise": {
+    "source": "惊讶，睁大眼、往后仰.png",
+    "size": "213x300",
+    "bg": "srgb(253,255,242)",
+    "kind": "action"
+  },
+  "music": {
+    "source": "戴耳机.png",
+    "size": "179x300",
+    "bg": "srgb(254,254,254)",
+    "kind": "action"
+  },
+  "yawn": {
+    "source": "打哈欠.png",
+    "size": "178x300",
+    "bg": "srgb(254,254,252)",
+    "kind": "action"
+  },
+  "wave": {
+    "source": "挥手再见.png",
+    "size": "178x300",
+    "bg": "srgb(254,255,249)",
+    "kind": "action"
+  },
+  "pose1": {
+    "source": "握拳.png",
+    "size": "239x300",
+    "bg": "srgb(253,254,246)",
+    "kind": "action"
+  },
+  "outfit-qipao": {
+    "source": "旗袍.png",
+    "size": "151x300",
+    "bg": "srgb(254,255,247)",
+    "kind": "outfit"
+  },
+  "shrug": {
+    "source": "无奈摊手，耸肩叹气.png",
+    "size": "169x300",
+    "bg": "srgb(253,255,242)",
+    "kind": "action"
+  },
+  "outfit-campus-idol": {
+    "source": "校园偶像.png",
+    "size": "300x300",
+    "bg": "srgb(238,168,202)",
+    "kind": "outfit-scene"
+  },
+  "heart": {
+    "source": "比心，双手比心或挥手.png",
+    "size": "168x300",
+    "bg": "srgb(253,254,240)",
+    "kind": "action"
+  },
+  "outfit-swimsuit": {
+    "source": "沙滩泳装.png",
+    "size": "177x300",
+    "bg": "srgb(255,255,255)",
+    "kind": "outfit"
+  },
+  "outfit-campus": {
+    "source": "清纯校园.png",
+    "size": "300x300",
+    "bg": "srgb(255,255,255)",
+    "kind": "outfit-scene"
+  },
+  "angry": {
+    "source": "生气鼓腮，抱臂或瞪眼.png",
+    "size": "188x300",
+    "bg": "srgb(254,254,244)",
+    "kind": "action"
+  },
+  "pose3": {
+    "source": "眨眼.png",
+    "size": "229x300",
+    "bg": "srgb(254,255,249)",
+    "kind": "action"
+  },
+  "outfit-pajamas": {
+    "source": "睡衣 (1).png",
+    "size": "179x300",
+    "bg": "srgb(255,255,255)",
+    "kind": "outfit"
+  },
+  "outfit-pajamas-black": {
+    "source": "睡衣 (2).png",
+    "size": "179x300",
+    "bg": "srgb(255,255,255)",
+    "kind": "outfit"
+  },
+  "outfit-pajamas-pink": {
+    "source": "睡衣 (3).png",
+    "size": "178x300",
+    "bg": "srgb(254,254,254)",
+    "kind": "outfit"
+  },
+  "outfit-pajamas-bodysuit": {
+    "source": "睡衣 (4).png",
+    "size": "178x300",
+    "bg": "srgb(255,255,255)",
+    "kind": "outfit"
+  },
+  "outfit-pajamas-shorts": {
+    "source": "睡衣 (5).png",
+    "size": "179x300",
+    "bg": "srgb(255,255,255)",
+    "kind": "outfit"
+  },
+  "sleep": {
+    "source": "睡觉，闭眼抱膝或趴着.png",
+    "size": "287x300",
+    "bg": "srgb(254,255,247)",
+    "kind": "action"
+  },
+  "thumbsup": {
+    "source": "竖大拇指.png",
+    "size": "179x300",
+    "bg": "srgb(253,254,249)",
+    "kind": "action"
+  },
+  "pose4": {
+    "source": "站姿.png",
+    "size": "182x300",
+    "bg": "srgb(254,254,246)",
+    "kind": "action"
+  },
+  "jump": {
+    "source": "跳起来，双手上举.png",
+    "size": "215x300",
+    "bg": "srgb(254,255,247)",
+    "kind": "action"
+  },
+  "pose2": {
+    "source": "蹦跳.png",
+    "size": "264x300",
+    "bg": "srgb(254,255,237)",
+    "kind": "action"
+  },
+  "coffee": {
+    "source": "递咖啡.png",
+    "size": "179x300",
+    "bg": "srgb(254,254,252)",
+    "kind": "action"
+  },
+  "outfit-longskirt": {
+    "source": "长裙.png",
+    "size": "179x300",
+    "bg": "srgb(255,255,255)",
+    "kind": "outfit"
+  }
+}
