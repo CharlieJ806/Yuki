@@ -32,9 +32,5 @@ export default defineConfig({
   server: {
     port: 5199,
     strictPort: true,
-    fs: {
-      /* 验证台要动态 import 仓库根的 scripts/make-test-glb.js，它在 root 之外 */
-      allow: [resolve(import.meta.dirname)],
-    },
   },
 })

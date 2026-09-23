@@ -3,7 +3,7 @@
  * 桌宠本体：一只会呼吸的摸鱼猫 + 头顶气泡（今日摸鱼收入）+ 右键菜单。
  * 拖拽走主进程 setPosition，避免渲染进程移动窗口时抖动。
  */
-import { computed, defineAsyncComponent, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import {
   state,
   refresh,
@@ -54,14 +54,6 @@ const menuOpen = ref(false)
 const reacting = ref(false)
 const bubbleOpen = ref(true)
 
-/**
- * 3D 查看器按需加载。
- *
- * 静态引入会把 three（约 600KB）打进桌宠窗的初始包，
- * 而绝大多数用户用的是 2D —— 不该为少数人白付这份体积。
- * 这个 defineAsyncComponent 只在 use3D 为真时才真的拉 chunk。
- */
-const Pet3DViewer = defineAsyncComponent(() => import('./Pet3DViewer.vue'))
 /**
  * 缩放值直接来自设置，不再单独存一份 ref。
  *
@@ -179,71 +171,6 @@ const showingOutfit = computed(
 const petImage = computed(() =>
   showingOutfit.value ? outfitFile(currentOutfitSlug.value) : poseImageFile(currentExpression.value),
 )
-
-/**
- * 是否用 3D 模型渲染桌宠。
- *
- * 只有两种情况会走到 2D：
- *   - 设置里选的是 '2d'
- *   - 用户选了 '3d' 但模型文件还没生成（跑过 scripts/meshy-pet.js 才有）
- *
- * 第二种必须回落到 2D 而不是显示空白 —— 否则刚打开开关的用户
- * 会看到桌宠凭空消失，而不知道要先去生成模型。
- */
-const pet3dAvailable = ref(false)
-const use3D = computed(() => state.settings.petRenderMode === '3d' && pet3dAvailable.value)
-
-/** 3D 模型地址；manifest.json 里记了文件名，读不到就按约定名回退 */
-const pet3dSrc = ref('./pet3d/yuki.glb')
-
-/**
- * 探测 3D 模型是否就绪。
- *
- * 不走 IPC：这些文件在 renderer/public/ 下，构建后就是普通静态资源，
- * fetch 一下最直接，也省得为主题模型再开一条 IPC channel。
- *
- * **不能只看 HTTP 状态码**：Vite dev server（以及任何 SPA 回退配置）
- * 对不存在的路径会返回 200 + index.html，HEAD 探测会误判成「模型可用」，
- * 结果桌宠渲染出一块空白。实测踩到过。
- * 所以改成校验文件**头 4 个字节是不是 glTF 魔数** —— 这是 GLB 规范固定的。
- */
-const GLB_MAGIC = 0x46546c67 /* 'glTF' 小端 */
-
-async function probePet3d() {
-  try {
-    const mf = await fetch('./pet3d/manifest.json', { cache: 'no-store' })
-    if (mf.ok && (mf.headers.get('content-type') || '').includes('json')) {
-      const m = await mf.json()
-      if (m?.main) pet3dSrc.value = `./pet3d/${m.main}`
-    }
-  } catch {
-    /* 没有 manifest 就按约定名试 —— 手放一个 yuki.glb 进去也该能用 */
-  }
-
-  try {
-    /*
-     * 只取前 4 字节验魔数。Range 请求能省掉整个模型（可能几 MB）的传输；
-     * 服务端不支持 Range 时会退回 200，那就只读前 4 字节再取消。
-     */
-    const res = await fetch(pet3dSrc.value, { headers: { Range: 'bytes=0-3' } })
-    if (!res.ok || !res.body) {
-      pet3dAvailable.value = false
-    } else {
-      const head = new Uint8Array(await res.arrayBuffer()).subarray(0, 4)
-      const magic = head.length === 4 ? new DataView(head.buffer).getUint32(0, true) : 0
-      pet3dAvailable.value = magic === GLB_MAGIC
-    }
-    if (!pet3dAvailable.value) {
-      console.info('[pet3d] 未找到可用的 3D 模型，继续用 2D 立绘。生成：node scripts/meshy-pet.js')
-    }
-  } catch {
-    pet3dAvailable.value = false
-  }
-}
-
-watch(() => state.settings.petRenderMode, async (mode) => {
-  if (mode === '3d') await probePet3d()
-})
 
 /**
  * 播放别的窗口请求的表情（目前只有补卡成功时蹦一下）。
@@ -757,8 +684,6 @@ onMounted(async () => {
     /* 取不到就按回落逻辑走，不影响显示 */
   }
   await refreshGallery().catch(() => {})
-  /* 3D 模式下要先确认模型文件存在，不存在就静默留在 2D */
-  probePet3d()
   /* 见面即记一笔：保证「连续互动天数」不因为没动手摸而断掉 */
   grantDailyAffinity()
   timer = window.setInterval(refresh, 15_000)
@@ -962,20 +887,7 @@ onBeforeUnmount(() => {
           @dblclick="onPetDoubleClick"
           title="单击互动 · 双击 · 右键菜单 · 拖上面小把手可移动"
         >
-          <!--
-            2D / 3D 二选一。
-            3D 分支下 .pet 仍要保留 no-drag 与所有互动事件 ——
-            手感（点击、双击、右键、拖拽把手）必须和 2D 完全一致，
-            否则「换了模型之后点不动了」。
-          -->
-          <Pet3DViewer
-            v-if="use3D"
-            class="pet-img pet-3d"
-            :src="pet3dSrc"
-            :scale="scale"
-            :idle="state.settings.pet3dIdle"
-          />
-          <img v-else class="pet-img" :src="petImage" alt="Yuki" draggable="false" />
+          <img class="pet-img" :src="petImage" alt="Yuki" draggable="false" />
           <span class="pet-shadow" />
         </div>
       </div>
@@ -1230,21 +1142,6 @@ onBeforeUnmount(() => {
   pointer-events: none;
   -webkit-user-drag: none;
   filter: drop-shadow(0 4px 8px rgba(0, 0, 0, 0.14));
-}
-
-/*
- * 3D 模式下换成 canvas。
- *
- * 差异都在这里收口，模板那侧不用分支：
- *   - drop-shadow 去掉：canvas 上套 filter 会让整个画布走一遍 CPU 合成，
- *     每帧都算，白白吃电（2D 图是静态的，只在换图时算一次）
- *   - pointer-events 交还给 canvas：查看器要用 mousemove 做 alpha 命中测试，
- *     2D 那种「整块穿透给容器」在这里会把事件全吞掉
- */
-.pet-3d {
-  filter: none;
-  pointer-events: auto;
-  object-fit: unset;
 }
 .pet-shadow {
   position: absolute;

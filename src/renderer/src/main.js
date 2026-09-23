@@ -20,14 +20,6 @@ if (route === 'panel') {
 } else if (route === 'chatpet') {
   document.body.classList.add('is-chatpet')
   createApp(ChatPetApp).mount(root)
-} else if (route === 'pet3d') {
-  /*
-   * 3D 可行性验证台，动态 import：
-   * 它会拖进 three.js（约 600KB），静态引入等于让桌宠窗白付这份体积。
-   * 只有真的走 ?route=pet3d 时才拉这个 chunk。
-   */
-  const { default: Pet3DLabView } = await import('./views/Pet3DLabView.vue')
-  createApp(Pet3DLabView).mount(root)
 } else {
   document.body.classList.add('is-pet')
   createApp(PetApp).mount(root)

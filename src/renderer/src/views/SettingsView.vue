@@ -95,19 +95,6 @@ async function onResetAffinity() {
   }
 }
 
-/* ---------- 桌面渲染模式 ---------- */
-
-/**
- * 3D 开关是布尔，设置里存的是 '2d' | '3d'，这里做一层转换。
- * 和 autoOutfit 一样的写法 —— 表单只认它自己那套类型。
- */
-const use3dModel = computed({
-  get: () => form.petRenderMode === '3d',
-  set: (on) => {
-    form.petRenderMode = on ? '3d' : '2d'
-  },
-})
-
 /* ---------- 换装 ---------- */
 
 const outfits = OUTFITS
@@ -381,24 +368,6 @@ const syncStatus = computed(() => ({
       </div>
 
       <div class="grid">
-        <div class="field">
-          <label>桌宠渲染</label>
-          <label class="switch">
-            <input v-model="use3dModel" type="checkbox" />
-            <span>用 3D 模型（骨骼动画），关掉则用 2D 立绘</span>
-          </label>
-          <span class="hint">
-            3D 模型需先跑 <code>node scripts/meshy-pet.js</code> 生成；
-            没生成过会自动回落到 2D。对话窗侧边立绘和手机端始终是 2D。
-          </span>
-        </div>
-        <div v-if="use3dModel" class="field">
-          <label>待机摇摆</label>
-          <label class="switch">
-            <input v-model="form.pet3dIdle" type="checkbox" />
-            <span>让 3D 模型轻微左右摆动，关掉可省一点电</span>
-          </label>
-        </div>
         <div class="field">
           <label>桌宠缩放</label>
           <input v-model.number="form.petScale" type="range" min="0.6" max="2" step="0.1" @change="win.setPetScale(form.petScale)" />

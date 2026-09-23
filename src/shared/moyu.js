@@ -70,18 +70,6 @@ export const DEFAULT_SETTINGS = {
    */
   outfitMode: 'auto',
   outfitSlug: 'casual',
-  /*
-   * 桌宠窗用 2D 立绘还是 3D 模型。
-   *
-   *   '2d' —— 现有立绘切图，44 个表情/服装随便换，零成本
-   *   '3d' —— 加载 resources/pet3d/ 下的 GLB（骨骼 + 动画）
-   *
-   * 默认 2d：3D 模型要靠 scripts/meshy-pet.js 另外生成，没生成过就别开。
-   * 只有桌宠窗读它；对话窗侧边立绘和手机端恒为 2D。
-   */
-  petRenderMode: '2d',
-  /* 3D 模式下是否让模型轻微待机摇摆（关掉可省一点点电） */
-  pet3dIdle: true,
   /* 图鉴故事：聊天中解锁装扮；关掉可省去判断用的 token */
   petStories: true,
   /*

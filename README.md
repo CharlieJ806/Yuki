@@ -60,17 +60,8 @@ npm rebuild electron
 npm run smoke     # 核心算法 + 数据层冒烟测试
 npm test          # 冒烟 + 对话/SSE 测试
 npm run dev       # 开发（Vite HMR + Electron）
-npm run dev:3d    # 3D 验证台（浏览器打开，不启 Electron）
 npm start         # 生产构建并启动
 npm run pack      # 打包 exe 到 release/
-```
-
-生成 3D 桌宠模型（需 Meshy API Key，见「3D 桌宠」一节）：
-
-```bash
-node scripts/meshy-pet.js --dry-run                    # 只看额度与参数
-node scripts/meshy-pet.js                              # 跑完整流程
-node scripts/meshy-pet.js --image resources/pet/yuki-pose1.png --no-rig
 ```
 
 无头验证真实 Electron 窗时开调试端口（默认关闭）：
@@ -86,109 +77,47 @@ node scripts/fake-llm.js 8788     # 起一个流式假接口
 # 然后在「设置 → AI 对话」里把 BaseURL 填 http://127.0.0.1:8788/v1
 ```
 
-## 3D 桌宠（`petRenderMode: '3d'`）
+## 桌宠动画（2D 可动关节）
 
-桌宠窗可用 **3D 模型**（骨骼 + 动画），对话窗侧边立绘与手机端**恒为 2D**。
-在「设置 → 桌宠外观 → 桌宠渲染」切换；3D 模型不存在时会**静默回落 2D**，不会空白。
+桌宠是**纯 2D**：`<img>` 切透明立绘 PNG，没有 3D、没有骨骼。
+想要「动起来」有两个层次，成本差一个数量级，见下。
 
-### 生成模型：`scripts/meshy-pet.js`
+### 现状：动作与服饰是两个正交维度
 
-```bash
-export MESHY_API_KEY=msy_xxx                  # https://www.meshy.ai/api
-export HTTPS_PROXY=http://127.0.0.1:4780      # 本机出网需代理
-node scripts/meshy-pet.js --dry-run           # 先看额度
-node scripts/meshy-pet.js --image resources/pet/yuki-pose1.png
-node scripts/meshy-pet.js --no-anim           # 省 6 信用，用绑骨附赠的动画
-```
+素材只有**整张立绘**（`resources/yuki/*.png` → `prepare-yuki.js` 抠白底去水印
+→ `resources/pet/yuki-<slug>.png`）。当前靠**换图**表达姿势：
 
-Meshy 把这件事拆成三个独立计费的 API（都是 `/openapi/v1/*`），脚本串起来跑：
+- **动作** 18 张（挥手 / 打哈欠 / 睡觉 / 蹦跳…）→ `PET_EXPRESSIONS`
+- **服饰** 20+ 套（便服 / 睡衣 / 旗袍…）→ `OUTFITS`
 
-| 步骤 | 端点 | 额度 |
-|---|---|---|
-| 立绘 → 网格 | `POST /image-to-3d` | 5 信用（无贴图）/ 15（有贴图） |
-| 网格 → 人形骨骼 | `POST /rigging` | 5 信用，**附赠 walking + running 两段动画** |
-| 骨骼 → 动画 | `POST /animations` | 3 信用 / 动作（最多 10 个） |
+两者正交，不能混成一类 —— 服饰图只有一张，当动作图用会让表情全失效
+（这条在 `interactions.js` 里写死了理由，别改回去）。
+自动换装按时间挑，挂机时在池子里轮换。
 
-默认配置（贴图 + 绑骨 + idle/walk）= **26 信用**；`--no-anim` 只要 **20 信用**。
+### 已排除的路线：3D
 
-关键参数选择，都有理由：
+试过 Meshy 图生3D + 自动绑骨 + 动画（三个独立计费 API，26 信用）。
+**结论是不做**，原因是素材与玩法都不匹配：
 
-- **`model_type: 'smart-topology'`**（而非 `standard`）：唯一能按面数直接生成、
-  不走 remesh 的档，也是计费最低的。范围 100–15000 面，默认取 8000。
-  `standard` 默认 3 万面，对常驻悬浮窗太重。
-- **`pose_mode: 'a-pose'`**：绑骨的**硬前提**。官方明确「非正姿的人形绑骨会失败」。
-- **`target_formats: ['glb']`**：不限定的话 OBJ/FBX 会一起生成，白等。
-- **动画用 `action_ids`（复数数组）而非 `action_id`（单数整数）**：官方原文
-  「with action_ids, the task returns one merged file rather than one file per
-  action」—— 一个 GLB 里每条动作各一条 clip，正好配状态机。响应字段是
-  **单数** `animation_glb_url`（不是 `..._urls`）。
-- **`image_url` 直接传 base64 data URI**：不用为跑一次管线去开图床。
-  立绘用 `prepare-yuki.js` 产出的透明版本（几十 KB），原始素材可能几 MB。
+- 现有 44 个 slug 是**独立整图**，3D 化后姿势必须改骨骼动画状态机，
+  换装要从「换 PNG」升级成「材质/UV 切换」或准备 20 套模型 —— 数周工作量
+- 桌宠常驻悬浮，3D 要持续占 GPU；实测 1.7 万面 34fps 尚可，
+  但 Meshy 默认产出的 120 万面模型直接拖死核显
+- 对话窗侧边立绘与手机端本来就该是 2D，3D 只惠及桌宠一个窗口
 
-### 网络：两个实测踩过的坑
+相关代码（`Pet3DViewer.vue` / `Pet3DLabView.vue` / `meshy-pet.js` /
+`dev-3d.js` / `make-test-glb.js` / `three` / `undici` 依赖）已全部移除。
 
-本机出网必须走系统代理（`127.0.0.1:4780`）。Node 侧有两处反直觉行为：
+### 无头验证桌宠窗
 
-1. **`NODE_USE_ENV_PROXY=1` 只在进程启动时被读**，脚本运行中再设无效
-   （实测：启动时设能通，运行时设 `fetch failed`）。所以不能「先设环境变量再 fetch」。
-2. **不能把 undici 的 `ProxyAgent` 挂到全局 `fetch` 上**。全局 fetch 用的是 Node
-   内置那份 undici，npm 装的是另一份，两者 `Dispatcher` 接口版本不同，
-   混用报 `invalid onRequestStart method`。必须全程用 `undici.fetch`。
-
-结论：显式 `new ProxyAgent(...)` + 统一用 `undici.fetch`。
-
-### 渲染层：`Pet3DViewer.vue`
-
-四个硬指标都已实测通过（无头 Chrome + CDP 注入鼠标事件 + 逐像素量取景）：
-
-| 指标 | 实现要点 |
-|---|---|
-| 透明背景 | `WebGLRenderer({alpha:true})` + `setClearAlpha(0)`，容器不能有背景色 |
-| 自动取景 | 按包围盒算相机距离，**横向也要校一次**，否则窄窗裁左右 |
-| 鼠标穿透 | 离屏 canvas 抽 alpha 掩膜，逐像素判定指针是否落在角色上 |
-| 常驻性能 | 按需渲染；实测 17k 面 / 34fps |
-
-**踩过的坑**：
-
-1. **不能让「盒底贴画面底」**。那样模型顶端紧贴画面顶，透视会让实际顶点超出
-   包围盒，顶部必被裁 —— 实测复现。居中 + 1.06 距离余量才对。
-2. **`Box3.setFromObject` 对 SkinnedMesh 取的是绑定姿态边界**，不含骨骼动画
-   当前姿态。取景用它够，但别指望精确到动画极值。
-3. **Vite dev server 对不存在的文件返回 200 + index.html**。用 `HEAD` 探测
-   「模型是否存在」会误判成可用，结果桌宠渲染出空白。改成**校验文件头 4 字节
-   是不是 glTF 魔数**（`0x46546c67`）。
-4. **状态角标默认关**（`showStatus`）。验证台开着便于核对；桌宠窗里会贴着
-   模型底部挂一条黑条。
-5. **3D 下 `.pet` 的 `drop-shadow` 要去掉**。canvas 上套 filter 会让整块画布
-   每帧走 CPU 合成，白吃电（2D 图是静态的，只在换图时算一次）。
-
-### 体积与加载
-
-three.js 约 600KB，**必须动态 import**：
-
-- 桌宠窗主包 **112KB**（不含 three），`Pet3DViewer` 单独成 chunk
-- 打包产物从 188KB（三年前基线）降到 112KB，因为 Vue 的共享 chunk 被拆出去了
-- `?route=pet3d` 与 `petRenderMode:'3d'` 两条路径都只在需要时才拉这个 chunk
-
-构建 target 必须跟 Electron 内置的 Chromium（38 版是 `chrome140`）。
-Vite 默认的 es2020 会挡掉顶层 await，而产物只跑在 Electron 里。
-
-### 验证台（`?route=pet3d`）
+桌宠是透明置顶无边框窗，肉眼不易核对渲染是否正确。主进程留了一个开关：
 
 ```bash
-npm run dev:3d      # 浏览器打开，不启 Electron
+DESK_DEBUG_PORT=9222 npm run dev      # 然后 curl 127.0.0.1:9222/json/list
 ```
 
-把 `.glb` 拖进去逐项对照检查清单。没有外网时点「生成测试模型」，
-用 `scripts/make-test-glb.js` 现场造一个「像 Meshy 产物」的模型
-（骨骼 + 动画 + 贴图 + 非零原点 + 17k 面）先跑通管线。
-它不做成 Node CLI，因为 `GLTFExporter` 编码贴图必须走 canvas。
-
-### 还没验的部分
-
-真实 Meshy 模型的产出质量。API 通路已验证（bogus key 得到干净的
-`HTTP 401: Invalid API key`），但没跑过真实生成。拿到模型后重点看三件事：
-面数是否如约、绑骨是否成功、动画是否作用到骨骼上。
+拿到 CDP 端点后可以量取窗口位置、派发鼠标事件、截图。
+默认关闭，只有显式设了环境变量才生效。
 
 ## 手机版（PWA）
 
