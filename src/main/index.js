@@ -33,6 +33,7 @@ let chatWindow = null
  * 这里不再持有副本。
  */
 let chatPetWindow = null
+let petMenuWindow = null
 let tray = null
 let service = null
 let petState = { x: null, y: null }
@@ -135,6 +136,82 @@ async function createPetWindowImpl() {
   return petWindow
 }
 
+/* ---------- 桌宠右键菜单窗 ----------
+ *
+ * 独立无边框小窗（与桌宠窗解耦）：平时隐藏，右键时定位到光标显示。
+ * 桌宠窗只包住气泡+本体，不再为菜单预留整块不可穿透的桌面区域。
+ * 防溢出：以光标为菜单左上角，按光标所在显示器工作区钳制（右/下缘内收）。
+ * 失焦即藏回——点菜单外任何地方（含桌宠本体）都算关闭，与原生菜单手感一致。
+ */
+
+const PETMENU_SIZE = { width: 340, height: 560 }
+
+function createPetMenuWindow() {
+  const win = new BrowserWindow({
+    width: PETMENU_SIZE.width,
+    height: PETMENU_SIZE.height,
+    frame: false,
+    transparent: true,
+    resizable: false,
+    maximizable: false,
+    minimizable: false,
+    fullscreenable: false,
+    skipTaskbar: true,
+    hasShadow: false,
+    alwaysOnTop: true,
+    show: false,
+    webPreferences: {
+      preload: join(ROOT, 'src', 'preload', 'index.cjs'),
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: false,
+    },
+  })
+  win.setAlwaysOnTop(true, 'floating')
+  loadRenderer(win, 'petmenu')
+  win.on('blur', () => {
+    if (petMenuWindow && !petMenuWindow.isDestroyed()) petMenuWindow.hide()
+  })
+  win.on('closed', () => {
+    petMenuWindow = null
+  })
+  return win
+}
+
+function showPetMenuWindow() {
+  if (!petMenuWindow || petMenuWindow.isDestroyed()) {
+    petMenuWindow = createPetMenuWindow()
+  }
+  const cur = screen.getCursorScreenPoint()
+  const { workArea } = screen.getDisplayNearestPoint(cur)
+  const { width: w, height: h } = PETMENU_SIZE
+  const x = Math.max(workArea.x, Math.min(cur.x, workArea.x + workArea.width - w))
+  const y = Math.max(workArea.y, Math.min(cur.y, workArea.y + workArea.height - h))
+  petMenuWindow.setPosition(x, y)
+  /* 首次显示等页面就绪，避免闪一帧透明空窗；用户在加载完成前已失焦/关闭的
+     话以 __menuPending 作废该次显示。之后常驻隐藏、即点即现。 */
+  if (petMenuWindow.__menuReady) {
+    petMenuWindow.show()
+    petMenuWindow.focus()
+    return
+  }
+  petMenuWindow.__menuPending = true
+  petMenuWindow.webContents.once('did-finish-load', () => {
+    if (!petMenuWindow || petMenuWindow.isDestroyed() || !petMenuWindow.__menuPending) return
+    petMenuWindow.__menuReady = true
+    petMenuWindow.__menuPending = false
+    petMenuWindow.show()
+    petMenuWindow.focus()
+  })
+}
+
+function hidePetMenuWindow() {
+  if (petMenuWindow && !petMenuWindow.isDestroyed()) {
+    petMenuWindow.__menuPending = false
+    petMenuWindow.hide()
+  }
+}
+
 function createPanelWindow() {
   if (panelWindow && !panelWindow.isDestroyed()) {
     panelWindow.show()
@@ -177,7 +254,8 @@ function createPanelWindow() {
 function broadcast(event, payload) {
   /* 收尾阶段窗口正在销毁，再发消息没有意义，还可能踩到已关闭的 service */
   if (quitting) return
-  for (const win of [petWindow, panelWindow, chatWindow, chatPetWindow]) {
+  /* petMenuWindow 常驻隐藏也要收：菜单面板的亲密度/缩放/换装清单靠广播保持新鲜 */
+  for (const win of [petWindow, panelWindow, chatWindow, chatPetWindow, petMenuWindow]) {
     if (win && !win.isDestroyed()) win.webContents.send('desk:event', { event, payload })
   }
 }
@@ -637,6 +715,20 @@ function registerIpc() {
     /* 拖拽由 -webkit-app-region: drag 交给窗口管理器完成，无需 IPC 参与 */
     'pet:quit': () => {
       app.quit()
+      return true
+    },
+    /* 桌宠右键菜单窗：光标处弹出 + 防溢出；失焦由窗自身 blur 隐藏 */
+    'menu:show': () => {
+      showPetMenuWindow()
+      return true
+    },
+    'menu:hide': () => {
+      hidePetMenuWindow()
+      return true
+    },
+    /* 桌宠窗本地行为指令（气泡开关/退出挥手）：广播给全窗，桌宠窗消费 */
+    'ui:pet': (_e, action) => {
+      service.emit('pet-ui', { action })
       return true
     },
   }

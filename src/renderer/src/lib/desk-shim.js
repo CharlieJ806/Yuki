@@ -133,6 +133,12 @@ function installDeskShim() {
       await viaBus('settings:update')({ petAlwaysOnTop: Boolean(flag) })
       return invoke('pet_set_always_on_top', { flag })
     },
+    /* 桌宠右键菜单窗：独立小窗，Rust 定位到光标并钳制防溢出 */
+    showPetMenu: () => invoke('pet_menu_show'),
+    hidePetMenu: () => invoke('pet_menu_hide'),
+    /* 桌宠窗本地行为指令（气泡开关/退出挥手）：经 service 广播回桌宠窗 */
+    petUiCommand: (action) => viaBus('ui:pet')(action),
+
     quit: () => invoke('pet_quit'),
 
     /* 主进程 → 渲染进程 事件：Tauri 全窗广播，payload 结构与 Electron 一致 */

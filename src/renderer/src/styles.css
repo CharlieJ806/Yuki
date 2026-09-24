@@ -49,6 +49,10 @@ body.is-pet {
   user-select: none;
 }
 
+body.is-petmenu {
+  background: transparent;
+}
+
 body.is-chat {
   background: transparent;
 }

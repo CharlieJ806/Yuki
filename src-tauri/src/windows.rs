@@ -15,6 +15,7 @@ pub const PET: &str = "pet";
 pub const PANEL: &str = "panel";
 pub const CHAT: &str = "chat";
 pub const CHATPET: &str = "chatpet";
+pub const PETMENU: &str = "petmenu";
 
 /// 面板逻辑尺寸（不可缩放），与 Electron PANEL_SIZE 一致。
 const PANEL_SIZE: (f64, f64) = (1080.0, 720.0);
@@ -22,6 +23,8 @@ const PANEL_SIZE: (f64, f64) = (1080.0, 720.0);
 const CHAT_SIZE: (f64, f64) = (420.0, 560.0);
 /// 侧边立绘小窗尺寸，与 Electron CHAT_PET_SIZE 一致。
 const CHATPET_SIZE: (f64, f64) = (132.0, 232.0);
+/// 右键菜单窗逻辑尺寸：面板内容宽 ~324 + 两侧留白；高度为内容上限，超出内部滚动。
+const PETMENU_SIZE: (f64, f64) = (340.0, 560.0);
 
 fn get_window(app: &AppHandle, label: &str) -> Option<WebviewWindow> {
     app.get_webview_window(label)
@@ -185,6 +188,86 @@ pub fn pet_alive(app: &AppHandle) -> bool {
 
 pub fn pet_visible(app: &AppHandle) -> bool {
     visible(app, PET)
+}
+
+/* ---------- 桌宠右键菜单窗 ----------
+ *
+ * 独立无边框小窗（与桌宠窗解耦）：平时隐藏，右键时定位到光标显示。
+ * 桌宠窗只包住气泡+本体，不再为菜单预留整块不可穿透的桌面区域。
+ * 失焦即藏回——点菜单外任何地方（含桌宠本体）都算关闭，与原生菜单手感一致。
+ */
+
+/// 常驻隐藏的右键菜单窗。首屏加载完成即 set_shown(false)：HWND 隐藏不会
+/// 联动 WebView2 IsVisible，不同步的话隐藏窗会继续渲染（见 set_shown 注释）。
+pub fn create_petmenu(app: &AppHandle) -> tauri::Result<()> {
+    if get_window(app, PETMENU).is_some() {
+        return Ok(());
+    }
+    let builder = apply_debug_args(
+        WebviewWindowBuilder::new(app, PETMENU, WebviewUrl::App("index.html?route=petmenu".into()))
+            .title("pet-menu")
+            .inner_size(PETMENU_SIZE.0, PETMENU_SIZE.1)
+            .decorations(false)
+            .transparent(true)
+            .resizable(false)
+            .maximizable(false)
+            .minimizable(false)
+            .skip_taskbar(true)
+            .shadow(false)
+            .always_on_top(true)
+            .visible(false),
+    );
+    let a2 = app.clone();
+    let builder = builder.on_page_load(move |_wv, payload| {
+        if payload.event() == PageLoadEvent::Finished {
+            let a = a2.clone();
+            let _ = tauri::async_runtime::spawn(async move {
+                if let Some(w) = a.get_webview_window(PETMENU) {
+                    set_shown(&w, false);
+                }
+            });
+        }
+    });
+    builder.build()?;
+    Ok(())
+}
+
+/// `pet:menuShow` —— 右键菜单弹出到光标处。
+///
+/// 光标物理坐标先换算逻辑像素（与窗口定位同系），再夹进主显示器工作区：
+/// 右/下缘内收防溢出，左/上缘贴边。跨多显示器时以主屏为准（与 chat 钳制同口径）。
+#[tauri::command]
+pub async fn pet_menu_show(app: tauri::AppHandle) -> Result<(), String> {
+    if get_window(&app, PETMENU).is_none() {
+        create_petmenu(&app).map_err(|e| e.to_string())?;
+    }
+    let Some(win) = get_window(&app, PETMENU) else {
+        return Err("菜单窗创建失败".into());
+    };
+    let cur = app.cursor_position().map_err(|e| e.to_string())?;
+    let f = app
+        .primary_monitor()
+        .ok()
+        .flatten()
+        .map(|m| m.scale_factor())
+        .unwrap_or(1.0);
+    let wa = work_area(&app);
+    let (mw, mh) = PETMENU_SIZE;
+    let x = (cur.x as f64 / f).max(wa.x).min(wa.x + wa.w - mw);
+    let y = (cur.y as f64 / f).max(wa.y).min(wa.y + wa.h - mh);
+    let _ = win.set_position(LogicalPosition::new(x.round(), y.round()));
+    set_shown(&win, true);
+    let _ = win.set_focus();
+    Ok(())
+}
+
+/// `pet:menuHide` —— 菜单窗藏回（失焦/Esc/动作完成）。
+#[tauri::command]
+pub async fn pet_menu_hide(app: tauri::AppHandle) -> Result<(), String> {
+    if let Some(win) = get_window(&app, PETMENU) {
+        set_shown(&win, false);
+    }
+    Ok(())
 }
 
 /// 窗口显隐必须同步 webview 显隐：WebView2 的 IsVisible 不联动 HWND 隐藏，

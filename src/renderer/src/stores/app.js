@@ -56,6 +56,8 @@ const store = reactive({
   backfill: null,
   /* 跨窗口表情指令：{ key, holdMs, seq }；面板/对话窗触发，桌宠窗消费 */
   emoteRequest: null,
+  /* 桌宠窗本地行为指令：{ action, seq }；菜单窗触发（气泡开关/退出挥手），桌宠窗消费 */
+  petUiRequest: null,
   /* 对话 */
   chat: {
     status: { ready: false, reason: null, model: '', hasApiKey: false, needsApiKey: true },
@@ -221,6 +223,14 @@ export async function doCheckIn() {
   return result
 }
 
+/**
+ * 桌宠窗本地行为指令（气泡开关/退出挥手）。
+ * 菜单窗发出，经 service 广播给全窗，桌宠窗的 petUiRequest watch 消费。
+ */
+export async function sendPetUi(action) {
+  await call('指令发送失败', () => backend.petUiCommand?.(action), null)
+}
+
 /** 补卡预览：只读，不写库。用户确认前必须能看到「会补哪几天」。 */
 export async function previewBackfill(fromKey) {
   const result = await call('读取待补打卡失败', () => backend.backfillPreview?.(fromKey), null)
@@ -311,6 +321,11 @@ export function initBridge() {
     if (msg.event === 'emote' && msg.payload?.key) {
       store.emoteSeq = (store.emoteSeq ?? 0) + 1
       store.emoteRequest = { key: msg.payload.key, holdMs: msg.payload.holdMs ?? 2600, seq: store.emoteSeq }
+    }
+    /* 菜单窗 → 桌宠窗的本地行为指令（气泡开关/退出挥手），同 emote 的 seq 重放语义 */
+    if (msg.event === 'pet-ui' && msg.payload?.action) {
+      store.petUiSeq = (store.petUiSeq ?? 0) + 1
+      store.petUiRequest = { action: msg.payload.action, seq: store.petUiSeq }
     }
     if (msg.event === 'chat-delta') {
       if (msg.payload.requestId === store.chat.requestId) {

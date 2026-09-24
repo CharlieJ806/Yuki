@@ -88,6 +88,12 @@ contextBridge.exposeInMainWorld('desk', {
   setPetAlwaysOnTop: (flag) => invoke('pet:setAlwaysOnTop', flag),
   quit: () => invoke('pet:quit'),
 
+  /* 桌宠右键菜单窗：独立小窗，主进程定位到光标并钳制防溢出 */
+  showPetMenu: () => invoke('menu:show'),
+  hidePetMenu: () => invoke('menu:hide'),
+  /* 桌宠窗本地行为指令（气泡开关/退出挥手）：经 service 广播回桌宠窗 */
+  petUiCommand: (action) => invoke('ui:pet', action),
+
   /* 主进程 → 渲染进程 事件 */
   onEvent: (fn) => {
     const listener = (_e, msg) => fn(msg)

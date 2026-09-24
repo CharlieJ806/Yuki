@@ -460,7 +460,7 @@ try {
       const entries = {
         '对话窗': 'src/renderer/src/chat/ChatApp.vue',
         '对话旁立绘窗': 'src/renderer/src/chat/ChatPetApp.vue',
-        '桌宠右键菜单': 'src/renderer/src/pet/PetApp.vue',
+        '桌宠右键菜单窗': 'src/renderer/src/pet/MenuApp.vue',
         '设置页': 'src/renderer/src/views/SettingsView.vue',
       }
       const entriesMissing = []
@@ -491,11 +491,12 @@ try {
         'src/renderer/src/chat/ChatApp.vue',
         'src/renderer/src/chat/ChatPetApp.vue',
         'src/renderer/src/pet/PetApp.vue',
+        'src/renderer/src/pet/MenuApp.vue',
         'src/renderer/src/views/SettingsView.vue',
         'src/renderer/src/views/RecordsView.vue',
       ]
       /* 这些函数都从 stores/app.js 导出，组件里用就必须导入 */
-      const mustImport = ['saveSettings', 'resetSettings', 'doCheckIn', 'addAffinity', 'openChatWindow']
+      const mustImport = ['saveSettings', 'resetSettings', 'doCheckIn', 'addAffinity', 'openChatWindow', 'sendPetUi']
 
       const badRefs = []
       for (const rel of files) {

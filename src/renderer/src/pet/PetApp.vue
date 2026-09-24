@@ -1,17 +1,15 @@
 <script setup>
 /**
- * 桌宠本体：一只会呼吸的摸鱼猫 + 头顶气泡（今日摸鱼收入）+ 右键菜单。
+ * 桌宠本体：一只会呼吸的摸鱼猫 + 头顶气泡（今日摸鱼收入）。
+ * 右键菜单在独立小窗打开（showMenu → 两种壳各自的窗口实现）。
  * 拖拽走主进程 setPosition，避免渲染进程移动窗口时抖动。
  */
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import {
   state,
   refresh,
-  doCheckIn,
   initBridge,
-  openChatWindow,
   addAffinity,
-  saveSettings,
   refresh as refreshState,
   refreshGallery,
   refreshSessionAffinity,
@@ -24,7 +22,6 @@ import {
   EMOTE_FOR,
   TIRED_POSES,
   AFFINITY_GAIN,
-  OUTFITS,
   OUTFIT_SLUGS,
   DEFAULT_OUTFIT,
   affinityLevel,
@@ -36,7 +33,6 @@ import {
   linesFor,
   outfitFile,
   outfitForTime,
-  outfitInfo,
   pickLine,
   poseImageFile,
   IDLE_JITTER_MIN,
@@ -50,7 +46,6 @@ import {
  */
 
 const settingsOpen = ref(false)
-const menuOpen = ref(false)
 const reacting = ref(false)
 const bubbleOpen = ref(true)
 
@@ -145,10 +140,10 @@ const currentOutfitSlug = computed(() => {
   /*
    * 未解锁的一律回落到默认。
    *
-   * 守卫放这里而不是只放在菜单的 setOutfit 里：换装写的是 settings，
+   * 守卫放这里而不是只放在菜单窗的换装入口里：换装写的是 settings，
    * 而 settings 的写入口不止一个（设置页、IPC、将来的重置）。
    * 在**展示用的求值点**挡一道，才是真正绕不过去的。
-   * 实测过：只在 setOutfit 里挡时，直接调 updateSettings 就能穿上未解锁的。
+   * 实测过：只在换装入口挡时，直接调 updateSettings 就能穿上未解锁的。
    */
   if (!unlockedOutfits.value.has(s)) return DEFAULT_OUTFIT
   return s
@@ -286,7 +281,6 @@ function onPetLeave() {
 
 function onPointerDown(e) {
   if (e.button !== 0) return
-  menuOpen.value = false
   movedByDrag = false
   dragging.value = true
   window.setTimeout(() => (dragging.value = false), 200)
@@ -417,7 +411,7 @@ async function speakIdleLine() {
   try {
     const res = await window.desk.chatChatterLine?.()
     /* 请求期间用户已经互动过，这次就别插话了 */
-    if (speech.value || menuOpen.value) return ''
+    if (speech.value) return ''
     /*
      * 接口没配、近两天没聊天、生成失败 —— 一律回到台词库，
      * 挂机冒泡不该因为接口抖动就整个哑掉。
@@ -451,10 +445,10 @@ function scheduleIdleChatter() {
   const hi = Math.max(lo, base * IDLE_JITTER_MAX)
   const delay = lo + Math.random() * (hi - lo)
   idleTimer = window.setTimeout(async () => {
-    if (!speech.value && !menuOpen.value) {
+    if (!speech.value) {
       const line = await speakIdleLine()
       /* 等接口期间用户可能已经互动，再确认一次 */
-      if (line && !speech.value && !menuOpen.value) say(line, EMOTE_FOR.idleChatter, 5000)
+      if (line && !speech.value) say(line, EMOTE_FOR.idleChatter, 5000)
     }
     scheduleIdleChatter()
   }, delay)
@@ -463,7 +457,7 @@ function scheduleIdleChatter() {
 /** 情境台词：每个场景一天只主动说一次，否则会烦 */
 function maybeContextLine(now = new Date()) {
   if (!state.settings.petContextLines) return
-  if (speech.value || menuOpen.value) return
+  if (speech.value) return
   const scene = contextualScene(
     { ...state.snapshot, workStart: state.settings.workStart, workEnd: state.settings.workEnd },
     now,
@@ -480,7 +474,7 @@ function startSedentaryTimer() {
   sedentaryTimer = window.setInterval(() => {
     if (!state.settings.petSedentary) return
     if (!state.snapshot.isWorkingNow) return
-    if (speech.value || menuOpen.value) return
+    if (speech.value) return
     say(pickLine([...COFFEE_LINES, ...linesFor('sedentary', voice.value)], lastLine, Math.random), EMOTE_FOR.sedentary, 5000)
   }, SEDENTARY_INTERVAL_MS)
 }
@@ -544,8 +538,7 @@ function startSnackTimer() {
       state.settings.petInteractions &&
       state.snapshot.isWorkingNow &&
       !speech.value &&
-      !emote.value &&
-      !menuOpen.value
+      !emote.value
     ) {
       emote.value = 'snack'
       const hold = 6000 + Math.random() * 6000
@@ -560,111 +553,23 @@ function startSnackTimer() {
 
 /** 退出前挥个手 */
 async function quitWithWave() {
-  menuOpen.value = false
   speech.value = '那我先走啦，回头见 👋'
   setEmote(EMOTE_FOR.quitting, 1200)
   /* 留出挥手和台词的时间再退，否则用户看不到 */
   window.setTimeout(() => window.desk?.quit?.(), 1200)
 }
 
-/* ---------- 菜单 ---------- */
+/* ---------- 右键菜单 ---------- */
 
-function toggleMenu(e) {
-  e.preventDefault()
-  e.stopPropagation()
-  menuOpen.value = !menuOpen.value
+/** 菜单在独立小窗打开（两种壳同构）：Tauri 走 Rust 命令，Electron 走主进程窗口 */
+function showMenu() {
+  window.desk?.showPetMenu?.()
 }
 
-async function menuCheckIn() {
-  menuOpen.value = false
-  const result = await doCheckIn()
-  if (result?.created) {
-    reacting.value = true
-    window.setTimeout(() => (reacting.value = false), 700)
-  }
-}
-
-function menuToggleBubble() {
-  bubbleOpen.value = !bubbleOpen.value
-  menuOpen.value = false
-}
-
-async function menuScale(delta) {
-  /* scale 是 computed，只读；算好目标值交给主进程，它会写回设置并同步窗口尺寸 */
-  const next = Math.max(0.6, Math.min(2, Number((scale.value + delta).toFixed(2))))
-  await window.desk?.setPetScale?.(next)
-  await refresh()
-}
-
-async function menuResetScale() {
-  await window.desk?.setPetScale?.(1)
-  await refresh()
-  menuOpen.value = false
-}
-
-function menuOpenPanel() {
-  menuOpen.value = false
-  window.desk?.openPanel?.()
-}
-
-/* ---------- 换装菜单 ---------- */
-
-/*
- * 换装清单**只列已解锁的**。
- *
- * 之前直接列 OUTFITS（全部 26 套）—— 那等于绕过图鉴：
- * 右键随手就能穿上还没解锁的衣服，图鉴的进度、条件、故事全失去意义。
- * 现在未解锁的不出现，用户想穿某套只能靠聊天解锁。
- *
- * 「跟随时间」是自动模式，不受解锁限制（它自己会从已解锁池里挑）。
- */
-const outfits = computed(() => {
-  const unlocked = new Set(state.gallery?.outfit?.unlocked ?? [])
-  return OUTFITS.filter((o) => unlocked.has(o.slug))
-})
-
-/** 解锁进度，显示在菜单里让用户知道「还有多少没解锁」 */
-const outfitProgress = computed(() => {
-  const g = state.gallery?.outfit
-  if (!g) return ''
-  return `${g.unlockedCount}/${g.total}`
-})
-
-const outfitLabel = computed(() => {
-  if (state.settings.outfitMode !== 'fixed') return `${outfitInfo(currentOutfitSlug.value).label}·自动`
-  return outfitInfo(currentOutfitSlug.value).label
-})
-
-/**
- * 选一套衣服：传 slug 切「固定」，传 null 回到「跟随时间」。
- * 写进 settings 而不是本地 state —— 桌宠立绘、对话窗立绘、设置页都读同一份。
- */
-async function setOutfit(slug) {
-  menuOpen.value = false
-  if (slug === null) {
-    await saveSettings({ outfitMode: 'auto' })
-    return
-  }
-  /*
-   * 再挡一道：即使菜单没列出来，也不能通过其它途径穿上未解锁的。
-   * 换装是 settings 写操作，调用点可能变多，守卫放在这里更稳。
-   */
-  const unlocked = new Set(state.gallery?.outfit?.unlocked ?? [])
-  if (!unlocked.has(slug)) return
-  await saveSettings({ outfitMode: 'fixed', outfitSlug: slug })
-}
-
-async function menuChat() {
-  menuOpen.value = false
-  await openChatWindow()
-}
-
-function menuQuit() {
-  quitWithWave()
-}
-
-function windowBlurClose() {
-  menuOpen.value = false
+/** 消费菜单窗转来的桌宠本地行为指令（气泡开关/退出挥手） */
+function onPetUi(action) {
+  if (action === 'toggle-bubble') bubbleOpen.value = !bubbleOpen.value
+  if (action === 'quit-wave') quitWithWave()
 }
 
 onMounted(async () => {
@@ -687,11 +592,12 @@ onMounted(async () => {
   /* 见面即记一笔：保证「连续互动天数」不因为没动手摸而断掉 */
   grantDailyAffinity()
   timer = window.setInterval(refresh, 15_000)
-  window.addEventListener('blur', windowBlurClose)
   /* 自动换装要跨过时段边界，每分钟对一次时间 */
   outfitClockTimer = window.setInterval(() => (clockTick.value = Date.now()), 60_000)
   /* 消费跨窗口的表情指令（例如面板里点了补卡） */
   watch(() => state.emoteRequest?.seq, playRequestedEmote, { immediate: true })
+  /* 消费菜单窗转来的桌宠本地行为指令（气泡开关/退出挥手） */
+  watch(() => state.petUiRequest?.seq, () => onPetUi(state.petUiRequest?.action), { immediate: true })
 
   /* 互动相关定时器 */
   scheduleIdleChatter()
@@ -714,124 +620,12 @@ onBeforeUnmount(() => {
   if (idlePoseTimer) window.clearTimeout(idlePoseTimer)
   if (snackTimer) window.clearTimeout(snackTimer)
   if (outfitClockTimer) window.clearInterval(outfitClockTimer)
-  window.removeEventListener('blur', windowBlurClose)
 })
 </script>
 
 <template>
-  <div class="pet-root" :style="{ '--pet-scale': scale }" @contextmenu="toggleMenu">
-    <!-- 菜单：从桌宠上方展开，整体落在窗口内，不会被裁掉 -->
-    <transition name="fade">
-      <div v-if="menuOpen" class="menu" @mousedown.stop>
-        <p class="menu-head">Yuki · {{ affinity.level.name }}</p>
-
-        <button class="menu-item" :disabled="state.checkedInToday" @click="menuCheckIn">
-          <span class="menu-icon">{{ state.checkedInToday ? '✓' : '✅' }}</span>
-          <span class="menu-label">{{ state.checkedInToday ? '今日已打卡' : '立即打卡' }}</span>
-          <span v-if="!state.checkedInToday" class="menu-tag">+1 天</span>
-        </button>
-
-        <button class="menu-item" @click="menuOpenPanel">
-          <span class="menu-icon">📊</span>
-          <span class="menu-label">打开摸鱼面板</span>
-          <span class="menu-tag">{{ state.todayEarnedText }}</span>
-        </button>
-
-        <button class="menu-item" @click="menuChat">
-          <span class="menu-icon">💭</span>
-          <span class="menu-label">对话</span>
-          <span class="menu-tag">AI</span>
-        </button>
-
-        <div class="menu-sep" />
-
-        <!-- 换装：和对话窗共用同一份设置，改哪边都同步 -->
-        <div class="menu-outfit">
-          <div class="mo-head">
-            <span class="mo-label">换装</span>
-            <span class="mo-cur">{{ outfitLabel }}</span>
-          </div>
-          <div class="mo-list">
-            <button
-              class="mo-item"
-              :class="{ active: state.settings.outfitMode === 'auto' }"
-              title="按时间自动换（只用已解锁的）"
-              @click="setOutfit(null)"
-            >
-              🕘
-            </button>
-            <button
-              v-for="o in outfits"
-              :key="o.slug"
-              class="mo-item"
-              :class="{ active: state.settings.outfitMode === 'fixed' && state.settings.outfitSlug === o.slug }"
-              :title="`${o.label} · ${o.hint}`"
-              @click="setOutfit(o.slug)"
-            >
-              {{ o.emoji }}
-            </button>
-          </div>
-        </div>
-
-        <div class="menu-sep" />
-
-        <!-- 亲密度：让「摸头」这类互动有个可见的积累反馈 -->
-        <div class="menu-affinity">
-          <div class="ma-row">
-            <span class="ma-label">亲密度</span>
-            <span class="ma-value tabular">{{ state.affinity?.points ?? 0 }} · {{ affinity.level.name }}</span>
-          </div>
-          <div class="ma-bar">
-            <div class="ma-fill" :style="{ width: affinity.progress + '%' }" />
-          </div>
-          <p class="ma-note">
-            {{ affinity.isMax ? '已经最亲密啦' : `再互动 ${affinity.toNext} 次升级` }}
-            <template v-if="state.affinity?.streakDays > 1"> · 连续 {{ state.affinity.streakDays }} 天</template>
-          </p>
-          <p class="ma-note">
-            今日聊天得分 {{ state.affinity?.chatToday ?? 0 }}/{{ state.meta.affinity?.chatDailyCap ?? 60 }}
-            <template v-if="state.affinity?.chatToday >= (state.meta.affinity?.chatDailyCap ?? 60) && !affinity.isMax">
-              · 明天继续
-            </template>
-          </p>
-        </div>
-
-        <div class="menu-sep" />
-
-        <button class="menu-item" @click="menuToggleBubble">
-          <span class="menu-icon">💬</span>
-          <span class="menu-label">{{ bubbleOpen ? '隐藏气泡' : '显示气泡' }}</span>
-          <span class="menu-tag">{{ bubbleOpen ? '开' : '关' }}</span>
-        </button>
-
-        <div class="menu-sep" />
-
-        <button class="menu-item" @click="menuScale(0.1)">
-          <span class="menu-icon">🔍</span>
-          <span class="menu-label">放大显示</span>
-          <span class="menu-tag tabular">{{ Math.round(scale * 100) }}%</span>
-        </button>
-        <button class="menu-item" @click="menuScale(-0.1)">
-          <span class="menu-icon">🔎</span>
-          <span class="menu-label">缩小显示</span>
-          <span class="menu-tag">最小 60%</span>
-        </button>
-
-        <div class="menu-sep" />
-
-        <button class="menu-item" :disabled="scale === 1" @click="menuResetScale">
-          <span class="menu-icon">↺</span>
-          <span class="menu-label">恢复默认大小</span>
-        </button>
-        <button class="menu-item danger" @click="menuQuit">
-          <span class="menu-icon">✕</span>
-          <span class="menu-label">退出摸鱼桌宠</span>
-        </button>
-
-        <p class="menu-foot">拖我移动 · 单击互动 · 双击气泡刷新</p>
-      </div>
-    </transition>
-
+  <div class="pet-root" :style="{ '--pet-scale': scale }" @contextmenu.prevent="showMenu">
+    <!-- 右键菜单在独立小窗打开（showMenu），本窗只保留气泡与桌宠本体 -->
     <div class="stage">
       <transition name="pop">
         <div v-if="bubbleOpen" class="bubble" :class="{ speaking: Boolean(speech) }" @dblclick="refresh">
@@ -1235,191 +1029,6 @@ onBeforeUnmount(() => {
   }
 }
 
-/* ---------- 右键菜单 ---------- */
-/*
- * 菜单是文档流里的普通块（不再是 absolute），跟随 flex 列排在气泡/桌宠上方，
- * 这样无论菜单多少项都整体落在窗口内，不会被窗口边界裁掉。
- */
-.menu {
-  flex: 0 1 auto;
-  min-height: 0;
-  align-self: stretch;
-  /* 空间不足时自己滚动，而不是把下方的桌宠顶出窗口 */
-  overflow-y: auto;
-  overscroll-behavior: contain;
-  /* 内容超长时给个可见的滚动条，否则用户不知道下面还有东西 */
-  scrollbar-width: thin;
-  scrollbar-color: rgba(0, 0, 0, 0.22) transparent;
-  padding: 6px;
-  border-radius: 13px;
-  background: rgba(255, 255, 255, 0.97);
-  border: 1px solid rgba(0, 0, 0, 0.08);
-  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.22);
-  backdrop-filter: blur(14px);
-  z-index: 10;
-}
-.menu::-webkit-scrollbar {
-  width: 6px;
-}
-.menu::-webkit-scrollbar-thumb {
-  background: rgba(0, 0, 0, 0.2);
-  border-radius: 3px;
-}
-.menu::-webkit-scrollbar-track {
-  background: transparent;
-}
-.menu-head {
-  margin: 2px 0 6px;
-  padding: 0 9px;
-  font-size: 10.5px;
-  font-weight: 700;
-  letter-spacing: 0.04em;
-  color: #9ca3af;
-}
-.menu-foot {
-  margin: 6px 0 1px;
-  padding: 5px 9px 0;
-  border-top: 1px solid rgba(0, 0, 0, 0.06);
-  font-size: 10px;
-  color: #b0b6bf;
-}
-
-.menu-item {
-  display: flex;
-  align-items: center;
-  gap: 9px;
-  width: 100%;
-  padding: 8px 9px;
-  border: none;
-  background: transparent;
-  border-radius: 9px;
-  font-size: 12.5px;
-  color: #16181d;
-  text-align: left;
-  transition: background 0.13s ease;
-}
-.menu-item:hover:not(:disabled) {
-  background: rgba(20, 184, 166, 0.12);
-}
-.menu-item:disabled {
-  color: #9ca3af;
-  cursor: default;
-}
-.menu-item.danger {
-  color: #dc2626;
-}
-.menu-item.danger:hover:not(:disabled) {
-  background: rgba(220, 38, 38, 0.1);
-}
-
-.menu-icon {
-  flex: 0 0 16px;
-  font-size: 12.5px;
-  text-align: center;
-  line-height: 1;
-}
-.menu-label {
-  flex: 1;
-  min-width: 0;
-  white-space: nowrap;
-}
-.menu-tag {
-  flex: 0 0 auto;
-  font-size: 10.5px;
-  color: #9ca3af;
-  white-space: nowrap;
-}
-.menu-item:hover:not(:disabled) .menu-tag {
-  color: rgb(var(--theme-accent));
-}
-.menu-sep {
-  height: 1px;
-  margin: 5px 7px;
-  background: rgba(0, 0, 0, 0.07);
-}
-/* ---------- 菜单里的换装 ---------- */
-.menu-outfit {
-  padding: 6px 9px 7px;
-}
-.mo-head {
-  display: flex;
-  align-items: baseline;
-  justify-content: space-between;
-  margin-bottom: 5px;
-}
-.mo-label {
-  font-size: 10.5px;
-  font-weight: 700;
-  color: var(--text-2);
-}
-.mo-cur {
-  font-size: 10px;
-  color: rgb(var(--theme-accent));
-  font-weight: 700;
-}
-/* 9 套衣服 + 「跟随时间」正好一行放不下，允许换行 */
-.mo-list {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 4px;
-}
-.mo-item {
-  width: 26px;
-  height: 26px;
-  border-radius: 8px;
-  border: 1px solid var(--border);
-  background: var(--bg-subtle);
-  font-size: 13px;
-  line-height: 1;
-  display: grid;
-  place-items: center;
-}
-.mo-item:hover {
-  border-color: rgb(var(--theme-accent) / 0.5);
-}
-.mo-item.active {
-  border-color: rgb(var(--theme-accent));
-  background: var(--theme-accent-soft);
-}
-
-/* ---------- 菜单里的亲密度 ---------- */
-.menu-affinity {
-  padding: 7px 9px 8px;
-}
-.ma-row {
-  display: flex;
-  align-items: baseline;
-  justify-content: space-between;
-  gap: 8px;
-}
-.ma-label {
-  font-size: 11px;
-  color: #6b7280;
-}
-.ma-value {
-  font-size: 10.5px;
-  font-weight: 700;
-  color: #16181d;
-}
-.ma-bar {
-  height: 5px;
-  margin-top: 6px;
-  border-radius: 999px;
-  background: rgba(0, 0, 0, 0.08);
-  overflow: hidden;
-}
-.ma-fill {
-  height: 100%;
-  border-radius: 999px;
-  background: linear-gradient(90deg, #fb7185, #f472b6);
-  transition: width 0.5s ease;
-}
-.ma-note {
-  margin: 5px 0 0;
-  font-size: 9.5px;
-  color: #9ca3af;
-}
-
 .err {
   position: absolute;
   left: 6px;
@@ -1438,13 +1047,5 @@ onBeforeUnmount(() => {
 .pop-leave-to {
   opacity: 0;
   transform: translateY(8px) scale(0.94);
-}
-.fade-enter-active,
-.fade-leave-active {
-  transition: opacity 0.15s ease;
-}
-.fade-enter-from,
-.fade-leave-to {
-  opacity: 0;
 }
 </style>

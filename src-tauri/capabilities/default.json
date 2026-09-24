@@ -6,7 +6,8 @@
     "pet",
     "panel",
     "chat",
-    "chatpet"
+    "chatpet",
+    "petmenu"
   ],
   "permissions": [
     "core:default",

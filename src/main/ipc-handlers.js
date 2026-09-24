@@ -55,6 +55,9 @@ export function createIpcHandlers(service, hooks = {}) {
       return next
     },
 
+    /* 桌宠窗本地行为指令（气泡开关/退出挥手）：菜单窗发出，广播给全窗，桌宠窗消费 */
+    'ui:pet': (action) => service.emit('pet-ui', { action }),
+
     /*
      * 当前活跃会话 —— 桌宠跟它走。
      * 写 meta 持久化；广播经 service.emit 走 onChange 桥（各壳负责真正投递）。

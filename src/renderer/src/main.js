@@ -1,5 +1,5 @@
 /**
- * 渲染入口 —— 同一份构建产物按 ?route=pet|panel|chat|chatpet 挂载不同应用。
+ * 渲染入口 —— 同一份构建产物按 ?route=pet|panel|chat|chatpet|petmenu 挂载不同应用。
  */
 /* 必须是第一个 import：desk-shim 靠副作用装 window.desk，
    stores/app.js 在模块求值时就决定用 desk 还是 mock */
@@ -9,6 +9,7 @@ import PetApp from './pet/PetApp.vue'
 import PanelApp from './panel/PanelApp.vue'
 import ChatApp from './chat/ChatApp.vue'
 import ChatPetApp from './chat/ChatPetApp.vue'
+import MenuApp from './pet/MenuApp.vue'
 import './styles.css'
 
 const route = new URLSearchParams(window.location.search).get('route') || 'pet'
@@ -31,6 +32,10 @@ if (route === 'panel') {
 } else if (route === 'chatpet') {
   document.body.classList.add('is-chatpet')
   createApp(ChatPetApp).mount(root)
+} else if (route === 'petmenu') {
+  /* 桌宠右键菜单窗：常驻隐藏，右键时由壳层定位到光标并显示 */
+  document.body.classList.add('is-petmenu')
+  createApp(MenuApp).mount(root)
 } else {
   document.body.classList.add('is-pet')
   createApp(PetApp).mount(root)

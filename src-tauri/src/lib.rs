@@ -48,6 +48,8 @@ pub fn run() {
             app.manage(http_proxy::HttpPool::new());
             windows::create_pet(app.handle())?;
             tray::create(app.handle())?;
+            /* 桌宠右键菜单窗：常驻隐藏，右键时由 pet_menu_show 定位显示 */
+            windows::create_petmenu(app.handle())?;
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -64,6 +66,8 @@ pub fn run() {
             windows::window_minimize,
             scale::pet_set_scale,
             scale::pet_set_always_on_top,
+            windows::pet_menu_show,
+            windows::pet_menu_hide,
             pet_quit,
             /* rusqlite 桥（仅业务总线宿主使用） */
             db::db_exec,
