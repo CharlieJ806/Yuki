@@ -9,7 +9,7 @@
  */
 import { packager } from '@electron/packager'
 import { execFileSync } from 'node:child_process'
-import { existsSync, mkdirSync, rmSync, writeFileSync, readdirSync, cpSync } from 'node:fs'
+import { copyFileSync, existsSync, mkdirSync, rmSync, writeFileSync, readdirSync, cpSync } from 'node:fs'
 import { rename } from 'node:fs/promises'
 import { basename, dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -248,8 +248,20 @@ for (let attempt = 1; attempt <= MAX_ATTEMPTS && !stagedAppDir; attempt++) {
 console.log(`  -> 暂存 ${stagedAppDir}`)
 
 console.log('  -> 复制到 release/ ...')
-/* OUT_DIR 已在 [2/4] 删掉且之后没有重建，这里不需要再删一次 */
-cpSync(stagedAppDir, OUT_DIR, { recursive: true })
+/* OUT_DIR 已在 [2/4] 删掉且之后没有重建，这里不需要再删一次。
+ * 不用 cpSync：实测本机对「含 200MB 未签名 exe 的整树」跑 cpSync 会被
+ * 实时防护直接终止 node 进程（exit 9、无堆栈）；逐文件 copyFileSync
+ * 反而稳定通过。逐文件还能顺带跳过被锁文件的重试逻辑。 */
+function copyTree(src, dest) {
+  mkdirSync(dest, { recursive: true })
+  for (const entry of readdirSync(src, { withFileTypes: true })) {
+    const s = join(src, entry.name)
+    const d = join(dest, entry.name)
+    if (entry.isDirectory()) copyTree(s, d)
+    else copyFileSync(s, d)
+  }
+}
+copyTree(stagedAppDir, OUT_DIR)
 rmSync(dirname(stagedAppDir), { recursive: true, force: true })
 
 const appDir = OUT_DIR
@@ -262,8 +274,9 @@ const exeCandidates = [join(appDir, `${APP_NAME}.exe`), join(appDir, 'electron.e
 const exePath = exeCandidates.find(existsSync)
 if (!exePath) throw new Error(`未找到可执行文件，已查找: ${exeCandidates.join(', ')}`)
 
-/* 使用说明放到 release 里 */
-cpSync(join(ROOT, 'scripts', 'release-readme.txt'), join(RELEASE, '使用说明.txt'))
+/* 使用说明放到 release 里（copyFileSync 覆盖旧版；cpSync 在本机会被实时
+   防护干扰出假错误，见上方 copyTree 注释） */
+copyFileSync(join(ROOT, 'scripts', 'release-readme.txt'), join(RELEASE, '使用说明.txt'))
 
 console.log(`
 ========================================
