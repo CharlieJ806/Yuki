@@ -40,9 +40,8 @@ impl Default for TraySnapshot {
 /// 不走图标文件：算法与 Electron 版同源，缩略下同样能认出是猫，
 /// 也省掉一道「改图标要重新生成资源」的流程。
 ///
-/// 颜色说明：Electron nativeImage 在 Windows 按 BGRA 解释裸位图，基线
-/// 实际显示的是通道交换色；Tauri 按 RGBA 解释，显示的是代码本意的青色
-/// （ACCENT）。两版图标颜色不同是解释差异，非绘制差异——以青色为准。
+/// 颜色说明：Electron nativeImage 在 Windows 按 BGRA 解释裸位图——基线
+/// 已改为写 B,G,R，屏幕显示同为代码本意的青色（ACCENT），两版同色。
 const S: usize = 32;
 const ACCENT: [u8; 3] = [0x14, 0xb8, 0xa6];
 const DARK: [u8; 3] = [0x0f, 0x2e, 0x2a];

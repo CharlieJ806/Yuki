@@ -293,6 +293,10 @@ function createPanelWindow() {
   })
   loadRenderer(panelWindow, 'panel')
   panelWindow.once('ready-to-show', () => panelWindow.show())
+  /* 托盘「显示/隐藏面板」文案跟随实际状态（桌宠窗 show/hide 同款接线）：
+     togglePanel、window:hidePanel IPC、任务栏操作都汇到 show/hide，一处兜住 */
+  panelWindow.on('show', rebuildTrayMenu)
+  panelWindow.on('hide', rebuildTrayMenu)
   panelWindow.on('closed', () => {
     panelWindow = null
   })
@@ -553,9 +557,11 @@ function trayImage() {
   const set = (x, y, r, g, b, a = 255) => {
     if (x < 0 || y < 0 || x >= S || y >= S) return
     const i = (y * S + x) * 4
-    buf[i] = r
+    /* Windows 的 nativeImage 按 BGRA 解释裸位图：写 B,G,R 让屏幕显示出代码
+       本意的 RGB，与 Tauri 版托盘同色（TAURI_MIGRATION 图标注：以青色为准） */
+    buf[i] = b
     buf[i + 1] = g
-    buf[i + 2] = b
+    buf[i + 2] = r
     buf[i + 3] = a
   }
 

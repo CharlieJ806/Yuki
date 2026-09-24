@@ -22,10 +22,14 @@ import {
 
 const emit = defineEmits(['action', 'close'])
 
-/** 动作统一出口：先上报动作再关菜单，两个宿主的收尾都挂在 close 上 */
+/* 连续调理型动作（缩放/换装/气泡）保持菜单打开——连调几档缩放、试穿几套
+   衣服不该反复右键；「办完即走」的（打卡/面板/对话/退出）才关 */
+const KEEP_OPEN = new Set(['bubble', 'scale', 'scale-reset', 'outfit'])
+
+/** 动作统一出口：先上报动作，再按分类决定是否关菜单，收尾归宿主 */
 function act(payload) {
   emit('action', payload)
-  emit('close')
+  if (!KEEP_OPEN.has(payload.type)) emit('close')
 }
 
 const scale = computed(() => {

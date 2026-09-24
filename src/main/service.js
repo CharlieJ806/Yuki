@@ -618,6 +618,9 @@ export function createService(store, deps = {}) {
     const dateKey = toDateKey(now)
     const { checkin, created } = await store.addCheckin(dateKey)
     if (created) await store.addEvent('checkin.created', { dateKey })
+    /* 打卡成功桌宠蹦一下：与补卡庆祝同款反馈（广播到桌宠窗播放），
+       托盘/面板/菜单所有打卡路径统一受益；重复打卡（created=false）不蹦 */
+    if (created) emit('emote', { key: 'jump', holdMs: 2600 })
     const state = await getState(now)
     emit('state', state)
     return { created, dateKey, checkin, state }
