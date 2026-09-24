@@ -1592,3 +1592,75 @@ body {
 .setup-icon { flex: 0 0 auto; font-size: 14px; }
 .setup-text { flex: 1; }
 .setup-arrow { flex: 0 0 auto; color: #b45309; font-size: 15px; }
+
+/*
+ * 首次打开的「资源下载」界面。
+ *
+ * z-index 70：比弹层(60)还高 —— 它是**首次运行的引导**，
+ * 这时用户还没做任何事，被别的浮层压住反而奇怪。
+ * 但注意它**不阻塞使用**（可以「先用着」），所以不是模态拦截。
+ */
+.dl {
+  position: fixed;
+  inset: 0;
+  z-index: 70;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  padding-bottom: calc(24px + var(--safe-b));
+  background: rgba(22, 24, 29, 0.72);
+  backdrop-filter: blur(6px);
+  -webkit-backdrop-filter: blur(6px);
+}
+
+.dl-card {
+  width: 100%;
+  max-width: 340px;
+  padding: 26px 22px 20px;
+  border-radius: 20px;
+  background: var(--surface);
+  box-shadow: 0 18px 48px rgba(0, 0, 0, 0.28);
+  text-align: center;
+}
+
+.dl-art { font-size: 40px; line-height: 1; }
+.dl-title { margin: 12px 0 8px; font-size: 18px; font-weight: 700; color: var(--text); }
+.dl-desc { margin: 0; font-size: 13px; line-height: 1.6; color: var(--text-2); }
+
+/*
+ * 进度条用 transform: scaleX 而不是 width。
+ * width 会触发布局（每张图完成都重排整页），scaleX 只走合成层 ——
+ * 190 张图连着更新时差别很明显。
+ */
+.dl-bar {
+  margin: 18px 0 8px;
+  height: 6px;
+  border-radius: 99px;
+  background: rgba(0, 0, 0, 0.08);
+  overflow: hidden;
+}
+.dl-fill {
+  display: block;
+  height: 100%;
+  border-radius: 99px;
+  background: var(--accent);
+  transform-origin: left center;
+  transform: scaleX(0);
+  transition: transform 0.18s linear;
+}
+
+.dl-stat {
+  margin: 0;
+  min-height: 17px;
+  font-size: 12px;
+  color: var(--text-3);
+  font-variant-numeric: tabular-nums;
+}
+
+.dl-actions { margin-top: 18px; display: flex; flex-direction: column; gap: 9px; }
+.dl-go { background: var(--accent); border-color: var(--accent); color: #fff; }
+.dl-skip { color: var(--text-2); }
+
+/* 下载中隐藏「全部下载」，避免重复触发 */
+.dl.busy .dl-go { display: none; }

@@ -2688,6 +2688,132 @@ function startPetStripTicker() {
 }
 
 main()
+maybeOfferDownload()
+
+/*
+ * 首次打开的「资源下载」引导。
+ *
+ * ## 为什么要有
+ *
+ * 全部资源 34MB，但首次安装只预缓存 2.6MB 的底子（界面 + 立绘），
+ * 剩下 31MB（照片 / 视频 / 背景）是**用到才下**。于是第一次点开某组
+ * 照片会明显卡一下 —— 用户不知道在下载，只觉得「怎么这么慢」。
+ *
+ * 这里把它变成可见可选的一步：告知体积、显示进度、可以跳过。
+ *
+ * ## 时机
+ *
+ * 要等 SW **真正接管**（`navigator.serviceWorker.controller` 有值）
+ * 才能发消息给它。首次访问时页面不受 SW 控制（它刚装好、还没接管），
+ * 这时 postMessage 收不到 —— 所以等 `controllerchange`。
+ *
+ * 但也不能干等：如果 3 秒内 SW 没接管（旧浏览器、非 https、注册失败），
+ * 就直接不显示这个界面 —— 下载功能依赖 SW，没有 SW 就没有意义。
+ */
+async function maybeOfferDownload() {
+  if (!('serviceWorker' in navigator)) return
+  /* 下过或跳过过就不再打扰 */
+  if (await db.getMeta('downloadAsked')) return
+
+  const sw = await waitForController(3000)
+  if (!sw) return
+
+  const box = $('dl')
+  if (!box) return
+  box.hidden = false
+
+  const fill = $('dl-fill')
+  const stat = $('dl-stat')
+  const desc = $('dl-desc')
+  let started = false
+
+  /*
+   * 只会真正生效一次。
+   *
+   * 必要性：SW 在「全部已缓存」时会**连发 START(total=0) 和 DONE**，
+   * 而这两个分支都要收尾（前者显示「已是最新」，后者是正常完成）。
+   * 没有这个闸门的话，START 分支刚把文案设成「资源已是最新」，
+   * 800ms 后 DONE 的定时器又把它改成「✓ 完成」并覆盖关闭理由。
+   */
+  let finished = false
+  const finish = async (note) => {
+    if (finished) return
+    finished = true
+    await db.setMeta('downloadAsked', Date.now())
+    box.hidden = true
+    if (note) console.log(note)
+  }
+
+  const startDownload = () => {
+    if (started) return
+    started = true
+    box.classList.add('busy')
+
+    /*
+     * 用 MessageChannel 接收进度：SW 的 postMessage 回不到
+     * window（它是给 client 的，不是 window 的 message 事件），
+     * 必须带一个 port 过去。
+     */
+    const chan = new MessageChannel()
+    chan.port1.onmessage = (e) => {
+      const m = e.data
+      if (m.type === 'START') {
+        if (m.total === 0) {
+          fill.style.transform = 'scaleX(1)'
+          desc.textContent = '资源都已经在本地了，不用再下。'
+          stat.textContent = '✓ 已是最新'
+          setTimeout(() => finish('资源已全部在本地'), 600)
+          return
+        }
+        stat.textContent = `准备下载 ${m.total} 个文件…`
+        return
+      }
+      if (m.type === 'PROGRESS') {
+        fill.style.transform = `scaleX(${m.total ? m.done / m.total : 0})`
+        const pct = m.total ? Math.round((m.done / m.total) * 100) : 0
+        stat.textContent = `${pct}%  ·  ${m.done}/${m.total}` + (m.failed ? `  ·  ${m.failed} 个失败` : '')
+        return
+      }
+      if (m.type === 'DONE') {
+        fill.style.transform = 'scaleX(1)'
+        desc.textContent = m.failed
+          ? `完成，有 ${m.failed} 个文件没下成功，下次用到会自己补上。`
+          : '全部下好了，以后打开就不用等。'
+        stat.textContent = '✓ 完成'
+        setTimeout(() => finish('资源下载完成'), 800)
+      }
+    }
+    sw.postMessage({ type: 'DOWNLOAD_ALL' }, [chan.port2])
+  }
+
+  $('dl-go').addEventListener('click', startDownload)
+  $('dl-skip').addEventListener('click', () => finish('用户跳过资源下载'))
+
+  /* 停留在这一页时也可以开始；不自动开始，让用户自己决定 */
+  stat.textContent = '约 34 MB'
+}
+
+/**
+ * 等 Service Worker 接管当前页面。
+ *
+ * 已经接管就立刻返回；否则等 `controllerchange`。超时返回 null。
+ * 用 `navigator.serviceWorker.ready` 不够 —— 它在**注册完成**时就 resolve，
+ * 而那时页面可能还没被接管，postMessage 会石沉大海。
+ */
+function waitForController(timeoutMs) {
+  const swc = navigator.serviceWorker
+  if (swc.controller) return Promise.resolve(swc.controller)
+
+  return new Promise((resolve) => {
+    const timer = setTimeout(() => { swc.removeEventListener('controllerchange', onChange); resolve(null) }, timeoutMs)
+    function onChange() {
+      clearTimeout(timer)
+      swc.removeEventListener('controllerchange', onChange)
+      resolve(swc.controller)
+    }
+    swc.addEventListener('controllerchange', onChange)
+  })
+}
 
 /*
  * 注册 Service Worker，并**主动**检查更新。

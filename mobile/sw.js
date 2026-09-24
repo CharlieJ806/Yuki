@@ -33,7 +33,7 @@ const SHELL = [
   './icon-192.png',
   './icon-512.png',
   /*
-   * 服饰立绘由 build.js 注入（占位符 __OUTFIT_FILES__）。
+   * 服饰立绘由 build.js 注入（见 build.js 的 outfitEntries）。
    * 它们体积占大头但数量固定，预缓存后图鉴和顶部立绘都能离线秒开。
    */
   __OUTFIT_FILES__
@@ -47,6 +47,40 @@ const SHELL = [
    * 它们按需加载，解锁时下过一次自然进缓存。
    */
   __VIDEO_POSTERS__
+]
+
+/*
+ * 全量资源清单（含上面 SHELL 里的，外加**首次安装不预缓存**的照片、视频、
+ * 聊天背景）。给「首次打开的资源下载界面」用。
+ *
+ * 为什么和 SHELL 分开：
+ *   SHELL 是「不装就没法用」的底子（34MB 里的 2.6MB），跟着 install 走，
+ *   装完就能离线开界面。
+ *   而剩下那 31MB（照片/视频/背景）**用到才下** —— 首次安装如果要等全量，
+ *   用户会盯着白屏等几十秒，还可能以为卡死。
+ *
+ * 所以把它做成**用户可见、可跳过**的一次性下载：界面告知要下多少、
+ * 进度多少、可以「先用着，回头再下」。
+ */
+const FULL_LIST = [
+  './',
+  './index.html',
+  './style.css',
+  './app.js',
+  './storage.js',
+  './chat.js',
+  './manifest.webmanifest',
+  './yuki-avatar.png',
+  './icon-192.png',
+  './icon-512.png',
+  __OUTFIT_FILES__
+  __POSE_FILES__
+  __PROFILE_FILES__
+  __VIDEO_POSTERS__
+  __BG_FILES__
+  __PHOTO_FILES__
+  __LIFE_PHOTO_FILES__
+  __VIDEO_FILES__
 ]
 
 self.addEventListener('install', (e) => {
@@ -64,7 +98,54 @@ self.addEventListener('install', (e) => {
  */
 self.addEventListener('message', (e) => {
   if (e.data?.type === 'SKIP_WAITING') self.skipWaiting()
+  if (e.data?.type === 'DOWNLOAD_ALL') downloadAll(e)
 })
+
+/*
+ * 把 FULL_LIST 全量拉进缓存，边下边报进度。
+ *
+ * 设计要点：
+ *   ① **不 await Promise.all** —— 那样只有「全下完」和「全没下」两种状态，
+ *      界面没法显示进度。这里一张一张来，每张完事就 postMessage。
+ *   ② **失败不中断** —— 某张图挂了（弱网、临时 404）不该让剩下 190 张
+ *      全不下。记下失败数，最后一起报给界面。
+ *   ③ **用 cache.add 而不是 fetch+put** —— add 会自己做 Response 校验
+ *      （非 2xx 会 reject），省掉手写 res.ok 判断。
+ *   ④ 已经有缓存的**跳过**（cache.match 命中就不重下）—— 这样「跳过过
+ *      一次、后来又点下载」不会把 30MB 重下一遍。
+ */
+async function downloadAll(e) {
+  const port = e.ports?.[0]
+  const post = (msg) => { try { port?.postMessage(msg) } catch { /* 页面已关 */ } }
+
+  const cache = await caches.open(CACHE)
+
+  /* 先摸清哪些真需要下 —— 界面进度条的分母用「实际要下的数量」，
+     否则跳过部分后进度条会停在半路（分母含已缓存的）。 */
+  const todo = []
+  for (const url of FULL_LIST) {
+    try {
+      if (await cache.match(url)) continue
+    } catch { /* match 失败就当需要下 */ }
+    todo.push(url)
+  }
+
+  post({ type: 'START', total: todo.length })
+
+  let done = 0
+  const failed = []
+  for (const url of todo) {
+    try {
+      await cache.add(url)
+    } catch {
+      failed.push(url)
+    }
+    done++
+    post({ type: 'PROGRESS', done, total: todo.length, failed: failed.length })
+  }
+
+  post({ type: 'DONE', total: todo.length, failed: failed.length })
+}
 
 self.addEventListener('activate', (e) => {
   e.waitUntil(

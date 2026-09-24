@@ -491,6 +491,36 @@
   </div>
 </section>
 
+<!--
+  首次打开的「资源下载」界面。
+
+  为什么要它：全部资源 34MB，但首次安装只预缓存 2.6MB 的底子（界面 + 立绘），
+  剩下 31MB（照片 / 视频 / 背景）是**用到才下**。于是第一次点开某组照片，
+  会明显卡一下 —— 用户不知道是在下载，只觉得「怎么这么慢」。
+
+  这里把「一次下完」变成可见、可选的一步：
+    · 告知要下多少（34MB）
+    · 显示进度
+    · 可以「先用着」跳过 —— 跳过不阻塞，之后再点「全部下载」也不会重下已缓存的
+
+  只在**首次**出现（下完或跳过过就记一笔），不打扰日常使用。
+-->
+<div class="dl" id="dl" hidden>
+  <div class="dl-card">
+    <div class="dl-art" aria-hidden="true">📦</div>
+    <h2 class="dl-title">把资源一次下好</h2>
+    <p class="dl-desc" id="dl-desc">照片、视频和背景共约 34 MB。现在下完，之后打开就不用等。</p>
+
+    <div class="dl-bar"><i class="dl-fill" id="dl-fill"></i></div>
+    <p class="dl-stat" id="dl-stat"></p>
+
+    <div class="dl-actions">
+      <button class="btn dl-go" id="dl-go">全部下载</button>
+      <button class="btn dl-skip" id="dl-skip">先用着</button>
+    </div>
+  </div>
+</div>
+
 <script type="module" src="app.js"></script>
 </body>
 </html>

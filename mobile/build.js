@@ -338,17 +338,56 @@ const poseEntries = actionFiles.map((f) => `  './poses/${f}',`).join('\n')
 const videoPosters = videos.filter((f) => f.endsWith('.jpg')).map((f) => `  './videos/${f}',`).join('\n')
 /* 设定图很小（两张共约 400KB），直接预缓存 —— 设置页离线也要能看 */
 const profileEntries = profiles.map((f) => `  './character/${f}',`).join('\n')
+/*
+ * 全量下载清单（供首次打开的「资源下载」界面用）。
+ *
+ * 和 SHELL 的区别：SHELL 只放「不装就没法用」的底子（2.6MB），
+ * 这里把所有资源都列上（34MB），让用户**一次性下完、之后完全离线**。
+ * 分母、进度、跳过都由前端控制，SW 只负责按清单拉。
+ */
+const bgEntries = petBgs.map((f) => `  './bg/${f}',`).join('\n')
+const photoEntries = photos.map((f) => `  './photos/${f}',`).join('\n')
+const lifeEntries = lifePhotos.map((f) => `  './photos/life/${f}',`).join('\n')
+/*
+ * 视频本体（约 10MB）—— 这里**列进全量清单**，但**不进 SHELL**。
+ * 用户在首次下载界面点了「下载全部」才会拉；跳过的就按需加载。
+ */
+const videoBodies = videos.filter((f) => f.endsWith('.mp4')).map((f) => `  './videos/${f}',`).join('\n')
+
+/*
+ * 全部用 `replaceAll`：这些占位符在 SHELL 和 FULL_LIST 里**各出现一次**
+ * （两个清单都要同样的立绘/照片列表）。用 replace 只会替换第一处，
+ * 剩下那份留在产物里 —— 而它是**语法错误**，整个 SW 直接不注册。
+ */
 let swDeploy = swSrc
   .replace(/__CACHE_VER__/g, OUTFIT_VER)
-  .replace('  __OUTFIT_FILES__', outfitEntries)
-  .replace('  __POSE_FILES__', poseEntries)
-  .replace('  __PROFILE_FILES__', profileEntries)
-  .replace('  __VIDEO_POSTERS__', videoPosters)
+  .replaceAll('  __OUTFIT_FILES__', outfitEntries)
+  .replaceAll('  __POSE_FILES__', poseEntries)
+  .replaceAll('  __PROFILE_FILES__', profileEntries)
+  .replaceAll('  __VIDEO_POSTERS__', videoPosters)
+  .replaceAll('  __BG_FILES__', bgEntries)
+  .replaceAll('  __PHOTO_FILES__', photoEntries)
+  .replaceAll('  __LIFE_PHOTO_FILES__', lifeEntries)
+  .replaceAll('  __VIDEO_FILES__', videoBodies)
 if (swDeploy === swSrc) {
   console.warn('⚠ sw.js 里没有找到占位符，缓存版本不会更新')
 }
+/*
+ * 残留占位符 = 产物里是 `__XXX__` 这种裸标识符，SW 会**语法错误、
+ * 整个不注册**（fetch 拦截、离线、缓存全失效），而且控制台只报一行
+ * 难懂的 "Unexpected identifier"。这里直接拦下来。
+ */
+{
+  const leftover = swDeploy.match(/__[A-Z_]+__/g)
+  if (leftover) {
+    console.error(`✗ sw.js 里残留未替换的占位符: ${[...new Set(leftover)].join(', ')}`)
+    console.error('  检查 build.js 的注入是否覆盖了所有出现位置（SHELL 与 FULL_LIST 各一份）。')
+    process.exit(1)
+  }
+}
 writeFileSync(join(DIST, 'sw.js'), swDeploy, 'utf8')
 console.log(`✓ 注入 Service Worker 版本 ${OUTFIT_VER} + ${outfits.length} 张服饰 / ${actionFiles.length} 张动作 / ${profiles.length} 张设定图预缓存`)
+console.log(`✓ 全量下载清单：${petBgs.length} 背景 / ${photos.length + lifePhotos.length} 照片 / ${videos.filter((f) => f.endsWith('.mp4')).length} 视频`)
 
 console.log(`✓ 打包 ${MODULES.length} 个 shared 模块 → vendor/`)
 
