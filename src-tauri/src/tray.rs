@@ -121,22 +121,21 @@ fn build_menu(app: &AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
         "找回桌宠"
     };
     let pet_item = MenuItemBuilder::with_id("toggle-pet", pet_label).build(app)?;
-    let open_panel = MenuItemBuilder::with_id("open-panel", "打开摸鱼面板").build(app)?;
-    let chat_item = MenuItemBuilder::with_id("open-chat", "AI 对话").build(app)?;
+    /* 面板/桌宠两个动态开关相邻；「打开摸鱼面板」与「显示面板」在面板未
+       前台时完全同义，已并入这一个动态项（Electron rebuildTrayMenu 同构） */
     let panel_label = if windows::panel_visible(app) { "隐藏面板" } else { "显示面板" };
     let panel_item = MenuItemBuilder::with_id("toggle-panel", panel_label).build(app)?;
+    let chat_item = MenuItemBuilder::with_id("open-chat", "AI 对话").build(app)?;
     let show_all = MenuItemBuilder::with_id("show-all", "全部显示（找不到界面时点这里）").build(app)?;
     let quit = MenuItemBuilder::with_id("quit", "退出").build(app)?;
 
     let s1 = PredefinedMenuItem::separator(app)?;
     let s2 = PredefinedMenuItem::separator(app)?;
-    let s3 = PredefinedMenuItem::separator(app)?;
-    let s4 = PredefinedMenuItem::separator(app)?;
     Menu::with_items(
         app,
         &[
-            &earned, &level, &s1, &checkin, &s2, &pet_item, &open_panel, &chat_item, &s3,
-            &panel_item, &s4, &show_all, &quit,
+            &earned, &level, &s1, &checkin, &panel_item, &pet_item, &chat_item, &s2, &show_all,
+            &quit,
         ],
     )
 }
@@ -213,14 +212,11 @@ fn dispatch_action(app: &AppHandle, id: &str) {
         "toggle-pet" => {
             windows::toggle_pet(app);
         }
-        "open-panel" => {
-            let _ = windows::create_panel(app);
+        "toggle-panel" => {
+            windows::toggle_panel(app);
         }
         "open-chat" => {
             windows::open_chat_window(app);
-        }
-        "toggle-panel" => {
-            windows::toggle_panel(app);
         }
         "show-all" => {
             windows::show_everything(app);

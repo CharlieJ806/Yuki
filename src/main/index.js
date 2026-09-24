@@ -648,15 +648,15 @@ async function rebuildTrayMenu() {
       enabled: !state.checkedInToday,
       click: () => service.checkIn(),
     },
+    /* 面板/桌宠两个动态开关相邻；「打开摸鱼面板」与「显示面板」在面板未
+       前台时完全同义，已并入这一个动态项 */
+    { label: panelOpen ? '隐藏面板' : '显示面板', click: () => togglePanel() },
     { type: 'separator' },
     /* 明确写「找回」而不是「显示」，用户找不到时才会想到点它 */
     petVisible
       ? { label: '隐藏桌宠', click: () => togglePet() }
       : { label: petAlive ? '显示桌宠' : '找回桌宠', click: () => togglePet() },
-    { label: '打开摸鱼面板', click: () => createPanelWindow() },
     { label: 'AI 对话', click: () => createChatWindow() },
-    { type: 'separator' },
-    { label: panelOpen ? '隐藏面板' : '显示面板', click: () => togglePanel() },
     { type: 'separator' },
     { label: '全部显示（找不到界面时点这里）', click: () => showEverything() },
     { label: '退出', click: () => app.quit() },

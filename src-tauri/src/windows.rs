@@ -575,7 +575,10 @@ pub fn create_chat(app: &AppHandle) -> tauri::Result<WebviewWindow> {
 }
 
 pub fn open_chat_window(app: &AppHandle) {
-    let _ = create_chat(app);
+    /* 建窗失败此前被静默吞掉：托盘/命令两条路径共享这里，失败时两端都无感 */
+    if let Err(e) = create_chat(app) {
+        log::warn!("[chat] 打开对话窗失败：{e}");
+    }
 }
 
 pub fn hide_chat_window(app: &AppHandle) {
