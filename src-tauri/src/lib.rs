@@ -10,6 +10,7 @@
 
 mod db;
 mod http_proxy;
+mod photos;
 mod position;
 mod scale;
 mod tray;
@@ -74,6 +75,8 @@ pub fn run() {
             db::db_exec,
             db::db_select,
             tray::tray_update_snapshot,
+            /* 照片存在性全表（service 的 deps.photoExists 用） */
+            photos::photo_list,
             /* HTTP 流代理（webview fetch 的 CORS/UA 缺口） */
             http_proxy::http_fetch_stream,
             http_proxy::http_fetch_once,

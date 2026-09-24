@@ -44,7 +44,15 @@ export async function bootServiceHost() {
 
   const store = openStoreBridge()
   await store.ready
-  const service = createService(store, { loadSelfPortrait })
+  /* 照片存在性：正式包里照片内嵌进二进制、dev 由 vite 服务——都无法同步
+     查文件系统。启动时一次性拉全表缓存成 Set，deps.photoExists 做同步查询
+     （service 的判断接口是同步的：在 gallery 的 filter 里逐个调用）。
+     表未返回时 Set 为空，界面优雅退回立绘，不影响功能。 */
+  const photoSet = new Set(await invoke('photo_list').catch(() => []))
+  const service = createService(store, {
+    loadSelfPortrait,
+    photoExists: (kind, slug, relPath) => photoSet.has(relPath),
+  })
 
   /* createIpcHandlers 直接返回通道表（Electron 侧 Object.entries 同一形态）。
      petScale 归位后的窗口贴合由渲染层 ResizeObserver 自动完成，壳层无需接手 */
