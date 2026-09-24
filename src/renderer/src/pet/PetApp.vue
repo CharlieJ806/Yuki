@@ -559,17 +559,57 @@ async function quitWithWave() {
   window.setTimeout(() => window.desk?.quit?.(), 1200)
 }
 
-/* ---------- 右键菜单 ---------- */
+/* ---------- 右键菜单与窗口贴合 ---------- */
+
+/** 渲染层跑在哪个壳里（拖拽机制与 refit 通道不同） */
+const isTauri = Boolean(window.__TAURI__)
 
 /** 菜单在独立小窗打开（两种壳同构）：Tauri 走 Rust 命令，Electron 走主进程窗口 */
 function showMenu() {
   window.desk?.showPetMenu?.()
 }
 
+/**
+ * 把手拖拽（仅左键）：Tauri 用 startDragging 交接系统拖拽。
+ *
+ * 不用 CSS -webkit-app-region 的原因：合成器级的 drag 区会把右键也吞掉，
+ * 页面收不到 contextmenu，弹出的原生菜单无法拦截。startDragging 是同一
+ * 套系统机制（不存在「事件断流」问题，被禁的是 mousemove+setPosition），
+ * 但只有左键触发，右键正常冒泡到根节点的自定义菜单。
+ * Electron 仍走 CSS app-region（见 is-tauri 分支样式）。
+ */
+function onGripDrag() {
+  if (isTauri) window.__TAURI__.window.getCurrentWindow().startDragging()
+}
+
 /** 消费菜单窗转来的桌宠本地行为指令（气泡开关/退出挥手） */
 function onPetUi(action) {
   if (action === 'toggle-bubble') bubbleOpen.value = !bubbleOpen.value
   if (action === 'quit-wave') quitWithWave()
+}
+
+/* ---------- 窗口贴合（所见即所得） ----------
+ *
+ * 尺寸真值源是渲染层布局：ResizeObserver 盯 .stage（气泡+把手+立绘的内容列），
+ * 内容尺寸一变（气泡开关/台词换行/缩放）就把「内容 + 内边距」报给壳层，
+ * 壳层按右下角锚定重设窗口。去重防抖：尺寸没变不发、同帧合并。
+ * 气泡固定宽 144 —— 内容尺寸与窗口尺寸解耦，观测不会形成反馈回路。
+ */
+const stageEl = ref(null)
+let fitObserver = null
+let lastFit = ''
+
+function reportFit() {
+  const stage = stageEl.value
+  if (!stage) return
+  const w = Math.ceil(stage.offsetWidth) + 16
+  const h = Math.ceil(stage.offsetHeight) + 16
+  const key = `${w}x${h}`
+  if (key === lastFit) return
+  lastFit = key
+  const size = { width: w, height: h }
+  if (isTauri) window.__TAURI__.core.invoke('pet_refit', size).catch(() => {})
+  else window.desk?.refitPet?.(size)
 }
 
 onMounted(async () => {
@@ -592,6 +632,14 @@ onMounted(async () => {
   /* 见面即记一笔：保证「连续互动天数」不因为没动手摸而断掉 */
   grantDailyAffinity()
   timer = window.setInterval(refresh, 15_000)
+  /* 窗口贴合观测：内容尺寸一变就报给壳层（含首次挂载的那次回调）。
+     observe 后必须同步先量一次——WebView2 对静态页面不出新帧时，
+     RO 的首次回调会被饿死（实测：启动后窗不贴合，右键产帧后才好） */
+  fitObserver = new ResizeObserver(reportFit)
+  if (stageEl.value) {
+    fitObserver.observe(stageEl.value)
+    reportFit()
+  }
   /* 自动换装要跨过时段边界，每分钟对一次时间 */
   outfitClockTimer = window.setInterval(() => (clockTick.value = Date.now()), 60_000)
   /* 消费跨窗口的表情指令（例如面板里点了补卡） */
@@ -620,13 +668,19 @@ onBeforeUnmount(() => {
   if (idlePoseTimer) window.clearTimeout(idlePoseTimer)
   if (snackTimer) window.clearTimeout(snackTimer)
   if (outfitClockTimer) window.clearInterval(outfitClockTimer)
+  fitObserver?.disconnect()
 })
 </script>
 
 <template>
-  <div class="pet-root" :style="{ '--pet-scale': scale }" @contextmenu.prevent="showMenu">
+  <div
+    class="pet-root"
+    :class="{ 'is-tauri': isTauri }"
+    :style="{ '--pet-scale': scale }"
+    @contextmenu.prevent="showMenu"
+  >
     <!-- 右键菜单在独立小窗打开（showMenu），本窗只保留气泡与桌宠本体 -->
-    <div class="stage">
+    <div class="stage" ref="stageEl">
       <transition name="pop">
         <div v-if="bubbleOpen" class="bubble" :class="{ speaking: Boolean(speech) }" @dblclick="refresh">
           <div class="bubble-head">
@@ -679,11 +733,11 @@ onBeforeUnmount(() => {
         -->
         <span
           class="pet-grip"
-          title="按住这里拖动窗口"
-          data-tauri-drag-region
+          title="按住这里拖动窗口 · 右键打开菜单"
+          v-bind="isTauri ? {} : { 'data-tauri-drag-region': true }"
+          @mousedown.left.prevent="onGripDrag"
           @click.stop
           @dblclick.stop
-          @contextmenu.stop
         ><i /><i /><i /></span>
 
         <div
@@ -744,7 +798,8 @@ onBeforeUnmount(() => {
 
 /* ---------- 气泡 ---------- */
 .bubble {
-  align-self: stretch;
+  /* 定宽：内容尺寸与窗口尺寸解耦，窗口贴合（refit）的观测值才稳定 */
+  width: 144px;
   background: rgba(255, 255, 255, 0.93);
   backdrop-filter: blur(12px);
   border: 1px solid rgba(0, 0, 0, 0.07);
@@ -812,6 +867,11 @@ onBeforeUnmount(() => {
   line-height: 1.6;
   color: #1f2937;
   word-break: break-word;
+  /* 三行封顶：窗高按内容包围盒收紧后，超长台词不能把气泡顶出窗口 */
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 3;
+  overflow: hidden;
 }
 .bubble-sub {
   font-size: 10px;
@@ -906,10 +966,18 @@ onBeforeUnmount(() => {
   gap: 3px;
   transition: background 0.16s ease;
   /* 只有这一小块负责移动窗口。双运行时注解：
-     -webkit-app-region 给 Electron（合成器级拖拽），
-     data-tauri-drag-region（模板上）给 Tauri（target 自身判定）。 */
+     -webkit-app-region 给 Electron（合成器级拖拽）；
+     Tauri 下改为 JS startDragging（.is-tauri 分支关掉 CSS drag）——
+     合成器级 drag 区会把右键也吞掉，页面收不到 contextmenu，
+     自定义菜单在把手上就打不开。 */
   -webkit-app-region: drag;
   app-region: drag;
+}
+/* Tauri：CSS drag 停用（模板也不再带 data-tauri-drag-region），
+   左键 mousedown 显式 startDragging，右键正常冒泡到自定义菜单 */
+.is-tauri .pet-grip {
+  -webkit-app-region: no-drag;
+  app-region: no-drag;
 }
 .pet-grip:hover {
   background: rgba(0, 0, 0, 0.28);

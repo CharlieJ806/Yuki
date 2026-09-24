@@ -93,6 +93,9 @@ contextBridge.exposeInMainWorld('desk', {
   hidePetMenu: () => invoke('menu:hide'),
   /* 桌宠窗本地行为指令（气泡开关/退出挥手）：经 service 广播回桌宠窗 */
   petUiCommand: (action) => invoke('ui:pet', action),
+  /* 窗口贴合：渲染层量内容尺寸，主进程右下角锚定重设窗口 */
+  refitPet: (size) => invoke('pet:refit', size),
+  resizePetMenu: (height) => invoke('menu:resize', height),
 
   /* 主进程 → 渲染进程 事件 */
   onEvent: (fn) => {

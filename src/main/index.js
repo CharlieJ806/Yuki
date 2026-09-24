@@ -42,11 +42,12 @@ let petState = { x: null, y: null }
 Menu.setApplicationMenu(null)
 
 /*
- * 窗口要同时容纳：右键菜单 + 气泡 + 桌宠。
- * 菜单含亲密度面板后内容约 420px，加气泡 110 + 桌宠 140 + 间距 ≈ 690。
- * 之前 560 高会让菜单出现不易察觉的滚动条。
+ * 桌宠窗 = 内容包围盒：宽 160×缩放（气泡 144 + 留白）；高 = 固定部分
+ * （气泡+把手+留白 164，不随缩放，CDP 实测定值）+ 立绘 136×缩放。
+ * 右键菜单已迁独立小窗，不再为它预留高度。
+ * 公式与 Tauri scale.rs 的 pet_size 必须保持一致。
  */
-const PET_SIZE = { width: 340, height: 700 }
+const petSize = (s) => ({ width: Math.round(160 * s), height: Math.round(164 + 136 * s) })
 const PANEL_SIZE = { width: 1080, height: 720 }
 
 /* ---------- 窗口 ---------- */
@@ -264,19 +265,19 @@ function broadcast(event, payload) {
  * 按缩放值调整桌宠窗口尺寸，保持右下角锚定。
  * 缩放相关的入口（菜单按钮、设置滑块、重置设置）都走这里，避免漏掉某个路径。
  */
-function applyPetScale(rawScale) {
-  const s = Math.max(0.6, Math.min(2, Number(rawScale) || 1))
-  if (!petWindow || petWindow.isDestroyed()) return s
+/* 窗口贴合：渲染层 ResizeObserver 量内容尺寸，这里按右下角锚定重设窗口。
+   （取代旧 applyPetScale 手工公式——尺寸真值源是渲染层布局） */
+function refitPetWindow({ width, height }) {
+  if (!petWindow || petWindow.isDestroyed()) return
   const b = petWindow.getBounds()
-  const w = Math.round(PET_SIZE.width * s)
-  const h = Math.round(PET_SIZE.height * s)
+  const w = Math.max(80, Math.round(width))
+  const h = Math.max(80, Math.round(height))
   petWindow.setBounds({
     x: Math.round(b.x + b.width - w),
     y: Math.round(b.y + b.height - h),
     width: w,
     height: h,
   })
-  return s
 }
 
 function togglePanel() {
@@ -631,11 +632,7 @@ function registerIpc() {
    * turn 内完成」的原子性要靠队列保持（读改写序列不能与并发 handler 交错）。
    * 长操作与 Tauri 总线同口径绕开——它们本就长时间 await 网络，队列挡不住。
    */
-  const business = createIpcHandlers(service, {
-    /* 重置会把 petScale 恢复成 1，窗口尺寸必须跟着回去，
-       否则立绘是 1× 但窗口还是放大后的尺寸，热区对不上 */
-    onAfterReset: (next) => applyPetScale(next.settings.petScale),
-  })
+  const business = createIpcHandlers(service)
   const LONG_RUNNING = new Set(['chat:send', 'chat:diagnose', 'chat:test', 'chat:chatterLine'])
   let tail = Promise.resolve()
   const enqueue = (fn) => {
@@ -697,11 +694,9 @@ function registerIpc() {
     'pet:setScale': async (_e, scale) => {
       const s = Math.max(0.6, Math.min(2, Number(scale) || 1))
       await service.updateSettings({ petScale: s })
-      applyPetScale(s)
       /*
-       * 必须广播新状态：桌宠的立绘尺寸由 settings.petScale 推导，
-       * 不广播的话它要等下一次轮询（15s）才会重排，
-       * 期间窗口已经是新尺寸、图还是旧的，点击热区就对不上了。
+       * 必须广播新状态：桌宠的立绘尺寸由 settings.petScale 推导；
+       * 窗口尺寸由渲染层量内容后 refit，壳层不再按公式改窗。
        */
       broadcast('state', await service.getState())
       return s
@@ -717,7 +712,8 @@ function registerIpc() {
       app.quit()
       return true
     },
-    /* 桌宠右键菜单窗：光标处弹出 + 防溢出；失焦由窗自身 blur 隐藏 */
+    /* 桌宠右键菜单窗：光标处弹出 + 防溢出；失焦由窗自身 blur 隐藏。
+       （ui:pet 在业务表里，这里不再重复注册） */
     'menu:show': () => {
       showPetMenuWindow()
       return true
@@ -726,9 +722,24 @@ function registerIpc() {
       hidePetMenuWindow()
       return true
     },
-    /* 桌宠窗本地行为指令（气泡开关/退出挥手）：广播给全窗，桌宠窗消费 */
-    'ui:pet': (_e, action) => {
-      service.emit('pet-ui', { action })
+    /* 菜单窗高度贴合：渲染层量面板高度，这里只改高度（顶边不动）。
+       必须用 setBounds——Windows 下 resizable:false 的窗口 setSize 不生效
+       （实测传 533 后 innerHeight 仍 560），桌宠窗贴合的 setBounds 一直有效 */
+    'menu:resize': (_e, height) => {
+      if (petMenuWindow && !petMenuWindow.isDestroyed()) {
+        const b = petMenuWindow.getBounds()
+        petMenuWindow.setBounds({
+          x: b.x,
+          y: b.y,
+          width: b.width,
+          height: Math.max(120, Math.round(height)),
+        })
+      }
+      return true
+    },
+    /* 窗口贴合：渲染层量内容尺寸，右下角锚定重设窗口 */
+    'pet:refit': (_e, size) => {
+      refitPetWindow(size)
       return true
     },
   }

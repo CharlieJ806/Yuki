@@ -4,11 +4,11 @@
 //! 与 Electron 的差异都有注释：Tauri 没有 show/hide/ready-to-show 事件，
 //! 用「页面加载完成」与「我们自己的每个显隐入口」补位。
 
-use tauri::{AppHandle, LogicalPosition, Manager, WebviewUrl, WebviewWindow, WebviewWindowBuilder, WindowEvent};
+use tauri::{AppHandle, LogicalPosition, LogicalSize, Manager, WebviewUrl, WebviewWindow, WebviewWindowBuilder, WindowEvent};
 use tauri::webview::PageLoadEvent;
 
 use crate::position::{self, FRect};
-use crate::scale::{clamp_scale, PET_SIZE};
+use crate::scale::{clamp_scale, pet_size};
 use crate::tray;
 
 pub const PET: &str = "pet";
@@ -190,6 +190,38 @@ pub fn pet_visible(app: &AppHandle) -> bool {
     visible(app, PET)
 }
 
+/// `pet:refit` —— 窗口贴合：渲染层 ResizeObserver 量得内容尺寸后，
+/// 按右下角锚定重设桌宠窗（x += 旧宽−新宽，y += 旧高−新高），桌宠视觉不跳。
+/// 尺寸真值源是渲染层布局，壳层不维护尺寸公式。
+#[tauri::command]
+pub async fn pet_refit(app: tauri::AppHandle, width: f64, height: f64) -> Result<(), String> {
+    let Some(win) = get_window(&app, PET) else {
+        return Err("桌宠窗不存在".into());
+    };
+    let Some(rect) = window_logical_rect(&win) else {
+        return Err("桌宠窗不可测".into());
+    };
+    let w = width.max(80.0);
+    let h = height.max(80.0);
+    let _ = win.set_size(LogicalSize::new(w, h));
+    let _ = win.set_position(LogicalPosition::new(
+        (rect.x + rect.w - w).round(),
+        (rect.y + rect.h - h).round(),
+    ));
+    Ok(())
+}
+
+/// `pet:menuResize` —— 菜单窗按内容高度贴合（宽度定 340，顶边不动）。
+#[tauri::command]
+pub async fn pet_menu_resize(app: tauri::AppHandle, height: f64) -> Result<(), String> {
+    let Some(win) = get_window(&app, PETMENU) else {
+        return Err("菜单窗不存在".into());
+    };
+    let h = height.max(120.0);
+    let _ = win.set_size(LogicalSize::new(PETMENU_SIZE.0, h));
+    Ok(())
+}
+
 /* ---------- 桌宠右键菜单窗 ----------
  *
  * 独立无边框小窗（与桌宠窗解耦）：平时隐藏，右键时定位到光标显示。
@@ -236,6 +268,7 @@ pub fn create_petmenu(app: &AppHandle) -> tauri::Result<()> {
 ///
 /// 光标物理坐标先换算逻辑像素（与窗口定位同系），再夹进主显示器工作区：
 /// 右/下缘内收防溢出，左/上缘贴边。跨多显示器时以主屏为准（与 chat 钳制同口径）。
+/// 光标取不到（无交互桌面的进程上下文）时回落到桌宠窗正上方。
 #[tauri::command]
 pub async fn pet_menu_show(app: tauri::AppHandle) -> Result<(), String> {
     if get_window(&app, PETMENU).is_none() {
@@ -244,17 +277,24 @@ pub async fn pet_menu_show(app: tauri::AppHandle) -> Result<(), String> {
     let Some(win) = get_window(&app, PETMENU) else {
         return Err("菜单窗创建失败".into());
     };
-    let cur = app.cursor_position().map_err(|e| e.to_string())?;
+    let wa = work_area(&app);
+    let (mw, mh) = PETMENU_SIZE;
     let f = app
         .primary_monitor()
         .ok()
         .flatten()
         .map(|m| m.scale_factor())
         .unwrap_or(1.0);
-    let wa = work_area(&app);
-    let (mw, mh) = PETMENU_SIZE;
-    let x = (cur.x as f64 / f).max(wa.x).min(wa.x + wa.w - mw);
-    let y = (cur.y as f64 / f).max(wa.y).min(wa.y + wa.h - mh);
+    /* 首选光标位置；取不到就锚定桌宠窗（贴其右上角外侧） */
+    let (mut x, mut y) = match app.cursor_position() {
+        Ok(cur) => (cur.x as f64 / f, cur.y as f64 / f),
+        Err(_) => match get_window(&app, PET).as_ref().and_then(|w| window_logical_rect(w)) {
+            Some(rect) => (rect.x + rect.w + 8.0, rect.y),
+            None => (wa.x + wa.w - mw, wa.y + 24.0),
+        },
+    };
+    x = x.max(wa.x).min(wa.x + wa.w - mw);
+    y = y.max(wa.y).min(wa.y + wa.h - mh);
     let _ = win.set_position(LogicalPosition::new(x.round(), y.round()));
     set_shown(&win, true);
     let _ = win.set_focus();

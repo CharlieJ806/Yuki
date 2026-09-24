@@ -121,13 +121,9 @@ function installDeskShim() {
      */
     setPetScale: async (scale) => {
       const s = Math.max(0.6, Math.min(2, Number(scale) || 1))
+      /* 只持久化 + 广播：窗口尺寸由渲染层 ResizeObserver 量内容后 refit */
       await viaBus('settings:update')({ petScale: s })
-      await invoke('pet_set_scale', { scale: s })
       return s
-    },
-    setPetAlwaysOnTop: async (flag) => {
-      await viaBus('settings:update')({ petAlwaysOnTop: Boolean(flag) })
-      return invoke('pet_set_always_on_top', { flag })
     },
     setPetAlwaysOnTop: async (flag) => {
       await viaBus('settings:update')({ petAlwaysOnTop: Boolean(flag) })
@@ -136,6 +132,9 @@ function installDeskShim() {
     /* 桌宠右键菜单窗：独立小窗，Rust 定位到光标并钳制防溢出 */
     showPetMenu: () => invoke('pet_menu_show'),
     hidePetMenu: () => invoke('pet_menu_hide'),
+    /* 窗口贴合：渲染层量内容尺寸，壳层右下角锚定重设窗口 */
+    refitPet: (size) => invoke('pet_refit', { width: size.width, height: size.height }),
+    resizePetMenu: (height) => invoke('pet_menu_resize', { height }),
     /* 桌宠窗本地行为指令（气泡开关/退出挥手）：经 service 广播回桌宠窗 */
     petUiCommand: (action) => viaBus('ui:pet')(action),
 
