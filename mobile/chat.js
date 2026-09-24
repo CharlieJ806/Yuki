@@ -153,7 +153,17 @@ async function* parseSSE(stream) {
  * @param {Date}   [opts.now]
  * @returns {Promise<{ok:boolean, message?:object, reason?:string, aborted?:boolean}>}
  */
-export async function sendMessage({ settings, sessionId, text, images = [], onDelta, signal, selfPortrait = '', now = new Date() }) {
+export async function sendMessage({
+  settings,
+  sessionId,
+  text,
+  images = [],
+  onDelta,
+  onUserMessage,
+  signal,
+  selfPortrait = '',
+  now = new Date(),
+}) {
   const clean = String(text ?? '').trim()
   const pics = (Array.isArray(images) ? images : []).filter(Boolean)
   if (!clean && !pics.length) return { ok: false, reason: '消息不能为空' }
@@ -175,6 +185,21 @@ export async function sendMessage({ settings, sessionId, text, images = [], onDe
   if (!sid || !(await db.getSession(sid))) sid = (await db.createSession()).id
 
   const userMsg = await db.addMessage(sid, 'user', stored)
+  /*
+   * 立刻把它交给调用方渲染。
+   *
+   * 不回调的话，用户要等**整个流式回复走完**才看到自己发的话
+   * （早先的 `onSend` 是等 `sendMessage` 返回后才 `openSession` 重渲染）——
+   * 表现是「发了消息没反应，过几秒两条一起冒出来」，
+   * 用户会怀疑是不是没发出去。
+   *
+   * 放在落库**之后**：这样界面上画的这条一定已经在库里，
+   * 后面 `openSession` 重读时不会出现「刚显示又消失」。
+   *
+   * 调用方要做成幂等的（按 id 去重）—— 因为结束时还会整体重读一次。
+   */
+  onUserMessage?.(userMsg, sid)
+
   const n = await db.countMessages(sid)
   if (n === 1) await db.renameSession(sid, (clean || '图片').slice(0, 24))
 

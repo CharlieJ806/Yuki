@@ -26,3 +26,6 @@ release/
 # 本地环境
 .env
 .env.*
+
+# 预览脚本的临时启动器（被杀进程时会残留）
+.tmp-open-mobile.cjs

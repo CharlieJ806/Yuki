@@ -521,7 +521,11 @@ async function onSend() {
   el.send.hidden = true
   el.stop.hidden = false
   abortCtrl = new AbortController()
-  showTyping()
+  /*
+   * 「正在输入」的气泡要等**用户那条消息画上去之后**再显示。
+   * 反过来的话，气泡会出现在用户消息上方，位置看着不对。
+   */
+  const typingAfterUser = () => showTyping()
 
   const res = await sendMessage({
     settings,
@@ -529,6 +533,25 @@ async function onSend() {
     text,
     images,
     signal: abortCtrl.signal,
+    /*
+     * 用户消息一落库就画上去 —— 不等她的回复。
+     *
+     * 早先这里是「等 sendMessage 返回（含完整回复）才 openSession 重渲染」，
+     * 表现成「发了消息没反应，几秒后两条一起冒出来」，
+     * 用户会以为没发出去（实测反馈）。
+     *
+     * 只 append 一条、不整体重读：整体重读会重建所有节点、
+     * 图片重新解码，观感是整屏闪一下。
+     */
+    onUserMessage: (msg, sid) => {
+      if (sid && sid !== sessionId) {
+        /* 首次发送时后端新建了会话 —— 跟上，否则后面找不到消息 */
+        sessionId = sid
+      }
+      el.msgs.appendChild(renderMessage(msg))
+      scrollToBottom()
+      typingAfterUser()
+    },
     onDelta: (full) => {
       hideTyping()
       setLive(full)
@@ -544,7 +567,15 @@ async function onSend() {
 
   if (res.sessionId && res.sessionId !== sessionId) sessionId = res.sessionId
 
-  /* 用户消息可能因为失败没落库，统一从库里重读，避免界面与数据不一致 */
+  /*
+   * 结束后整体重读一次。
+   *
+   * 上面已经画了用户消息，这里为什么还要重读：
+   *   ① 失败了（接口报错/取消）时，用户消息**可能没落库**，
+   *      重读能让界面回到与库一致的状态
+   *   ② 她的回复要进界面
+   * 因为是全量重建，上面那条用户消息会被重建一份 —— 不会重复。
+   */
   await openSession(sessionId)
   if (!res.ok && !res.aborted) showError(res.reason)
 
@@ -1791,16 +1822,28 @@ async function refreshSetupHint() {
  */
 let petPageBelow = false
 
+/**
+ * 换装面板是否已经开着。
+ *
+ * 用来判断这次 openWardrobe 是**新打开**还是**换完一件后的原地刷新** ——
+ * 两者的 `petPageBelow` 处理完全不同（见下方注释）。
+ */
+let wardrobeOpen = false
+
 async function openWardrobe() {
   closeDrawer()
   el.settings.hidden = true
   el.gallery.hidden = true
   /*
    * 记下是不是从立绘页进来的 —— 关掉时要回到那里。
-   * 先把立绘页藏起来：换装面板 z-index(40) 比它(45) 低，
-   * 不藏的话面板会被压在下面点不到。
+   *
+   * 只在**新打开**时记：面板一打开就把立绘页藏了（z-index 40 < 45，
+   * 不藏会被压在下面点不到），所以换装后原地刷新时再读 `el.petpage.hidden`
+   * 恒为 true —— 会把「来自立绘页」这个事实冲掉，关掉面板后落回聊天页。
+   * 表现就是「在立绘页换装，换完跳回聊天」，实测反馈过。
    */
-  petPageBelow = !el.petpage.hidden
+  if (!wardrobeOpen) petPageBelow = !el.petpage.hidden
+  wardrobeOpen = true
   el.petpage.hidden = true
 
   const unlocked = await db.listUnlockedOutfits()
@@ -1868,6 +1911,7 @@ async function openWardrobe() {
 
 const closeWardrobe = () => {
   el.wardrobe.hidden = true
+  wardrobeOpen = false
   /* 从立绘页进来的就回去，否则留空的聊天页即可 */
   if (petPageBelow) {
     petPageBelow = false
