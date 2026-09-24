@@ -224,8 +224,22 @@ function createPetMenuWindow() {
   })
   win.setAlwaysOnTop(true, 'floating')
   loadRenderer(win, 'petmenu')
+  /* 首帧就绪门控：ready-to-show 与全应用其它窗口一致（did-finish-load 早于
+     首帧绘制，先 show 会闪一帧背景）；透明窗上该事件偶有不可靠的报告，
+     did-finish-load 后 100ms 兜底放行。预建常驻下用户右键远晚于就绪。 */
+  const reveal = () => {
+    win.__menuReady = true
+    if (!win.__menuPending || win.isDestroyed()) return
+    win.__menuPending = false
+    win.show()
+    win.focus()
+  }
+  win.webContents.once('ready-to-show', reveal)
+  win.webContents.once('did-finish-load', () => setTimeout(reveal, 100))
   win.on('blur', () => {
-    if (petMenuWindow && !petMenuWindow.isDestroyed()) petMenuWindow.hide()
+    /* 走 hidePetMenuWindow 而非直调 hide：同步清 __menuPending，
+       否则启动极早期失焦会残留 pending，reveal 时幻影开菜单 */
+    hidePetMenuWindow()
   })
   win.on('closed', () => {
     petMenuWindow = null
@@ -243,21 +257,14 @@ function showPetMenuWindow() {
   const x = Math.max(workArea.x, Math.min(cur.x, workArea.x + workArea.width - w))
   const y = Math.max(workArea.y, Math.min(cur.y, workArea.y + workArea.height - h))
   petMenuWindow.setPosition(x, y)
-  /* 首次显示等页面就绪，避免闪一帧透明空窗；用户在加载完成前已失焦/关闭的
-     话以 __menuPending 作废该次显示。之后常驻隐藏、即点即现。 */
+  /* 预建常驻下窗口早已就绪，这里恒走即显路径；__menuPending 只兜「启动
+     极早期右键」的边角，就绪事件（createPetMenuWindow 的 reveal）里补显示 */
   if (petMenuWindow.__menuReady) {
     petMenuWindow.show()
     petMenuWindow.focus()
     return
   }
   petMenuWindow.__menuPending = true
-  petMenuWindow.webContents.once('did-finish-load', () => {
-    if (!petMenuWindow || petMenuWindow.isDestroyed() || !petMenuWindow.__menuPending) return
-    petMenuWindow.__menuReady = true
-    petMenuWindow.__menuPending = false
-    petMenuWindow.show()
-    petMenuWindow.focus()
-  })
 }
 
 function hidePetMenuWindow() {
@@ -855,6 +862,9 @@ if (!gotLock) {
     bindStateBridge()
     createTray()
     createPetWindow()
+    /* 菜单窗预建常驻隐藏（Tauri setup 同构）：右键即现，也免去懒创建时
+       「加载完才显示」的首帧闪烁 */
+    createPetMenuWindow()
 
     app.on('activate', () => {
       if (BrowserWindow.getAllWindows().length === 0) createPetWindow()
