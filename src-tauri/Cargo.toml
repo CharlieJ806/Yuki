@@ -1,0 +1,36 @@
+[package]
+name = "app"
+version = "0.1.0"
+description = "A Tauri App"
+authors = ["you"]
+license = ""
+repository = ""
+edition = "2021"
+rust-version = "1.77.2"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[lib]
+name = "app_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+# tauri-build 与 tauri 同步精确锁定：前者生成的 context 代码与后者版本耦合，
+# 任何一侧升级都应是显式动作（先本地验证再动版本号）。
+tauri-build = { version = "=2.6.3", features = [] }
+
+[dependencies]
+serde_json = "1.0"
+serde = { version = "1.0", features = ["derive"] }
+log = "0.4"
+# 精确锁定 + 不开 unstable：窗口显隐同步 WebView2 IsVisible 走 with_webview
+# 稳定 API（windows.rs set_shown）；unstable 会连带把 webview 宿主翻成
+# WindowChild，破坏无边框可调窗的边缘缩放，禁止为图 API 方便而开启。
+tauri = { version = "=2.11.6", features = ["tray-icon"] }
+tauri-plugin-single-instance = "2"
+tauri-plugin-notification = "2"
+rusqlite = { version = "0.37", features = ["bundled"] }
+dirs = "6"
+reqwest = { version = "0.12", features = ["stream"] }
+futures-util = "0.3"
+tokio = { version = "1", features = ["sync", "macros"] }

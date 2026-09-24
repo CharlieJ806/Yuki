@@ -1,0 +1,172 @@
+<!DOCTYPE html>
+<!--
+  Tauri 2 迁移 spike 验证页（独立产物，不进主应用）。
+  覆盖迁移方案 TAURI_MIGRATION.md §4 Phase 0 的五个验证点：
+    1. 透明置顶窗（配合 OS 级品红色底板截图判定）
+    2. data-tauri-drag-region 系统级拖拽（配合 SendInput 实测窗口位移）
+    3. WebGL alpha 画布 + GPU 渲染器检查（blocklist/SwiftShader）
+    4. ?route= 查询串（asset protocol 与 devUrl 两种形态）
+    5. Rust HTTP 流代理（http_once / http_stream）
+  结果写入 window.SPIKE_RESULTS 与 document.title，供 CDP 断言。
+-->
+<html>
+<head>
+<meta charset="utf-8" />
+<style>
+  html, body { margin: 0; background: transparent; overflow: hidden; }
+  #dragstrip {
+    position: fixed; top: 0; left: 0; right: 0; height: 40px;
+    border-bottom: 1px solid rgba(255,255,255,.6);
+    color: #fff; font: 12px/40px sans-serif; text-align: center;
+  }
+  /* 按钮放在拖拽条内部：真实模拟「可拖区域内有交互元素」。
+     Tauri 按 target 自身判定 drag 属性 —— 按钮无属性，应可点、不触发拖拽。 */
+  #pingbtn { position: absolute; right: 8px; top: 8px; height: 24px; line-height: 24px; padding: 0 10px; }
+  #glcanvas { position: fixed; top: 60px; left: 20px; width: 380px; height: 300px; }
+  #info {
+    position: fixed; top: 380px; left: 20px; right: 20px; bottom: 0;
+    color: #0f0; font: 12px/1.5 monospace; white-space: pre-wrap;
+  }
+</style>
+</head>
+<body>
+  <div id="dragstrip" data-tauri-drag-region>DRAG HERE（此条内文字外全透明）<button id="pingbtn">PING</button></div>
+  <canvas id="glcanvas" width="380" height="300"></canvas>
+  <button id="pingbtn">PING invoke</button>
+  <div id="info">booting…</div>
+<script>
+const R = window.SPIKE_RESULTS = {
+  route: new URLSearchParams(location.search).get('route') || null,
+  hrefKind: location.protocol,
+  dragClickThrough: false,
+  webgl: { ok: false, renderer: null, cornerAlpha: null, centerAlpha: null },
+  glb: { ok: false, magic: null, bytes: 0 },
+  once: { ok: false, status: null, len: 0, err: null },
+  stream: { ok: false, chunks: 0, total: 0, err: null },
+  invokePath: { ok: false, err: null },
+}
+const info = document.getElementById('info')
+const log = (s) => { info.textContent += s + '\n' }
+
+function paint(list) {
+  const t = Object.fromEntries(Object.entries(R).filter(([,v]) => typeof v !== 'object'))
+  log('== ' + JSON.stringify(t))
+  for (const [k, v] of Object.entries(list)) log(`${v ? 'PASS' : 'FAIL'}  ${k}`)
+  document.title = 'SPIKE ' + (Object.values(list).every(Boolean) ? 'ALLPASS' : 'HASFAIL')
+}
+
+async function main() {
+  const tauri = window.__TAURI__
+  const results = {}
+
+  /* 4. ?route= 查询串 */
+  results['route 查询串'] = R.route === 'spike'
+  log('location.href = ' + location.href)
+
+  /* 3. WebGL alpha 画布 + GPU 渲染器 */
+  try {
+    const cv = document.getElementById('glcanvas')
+    const gl = cv.getContext('webgl2', { alpha: true, premultipliedAlpha: false })
+    if (!gl) throw new Error('no webgl2')
+    const dbg = gl.getExtension('WEBGL_debug_renderer_info')
+    R.webgl.renderer = dbg ? String(gl.getParameter(dbg.UNMASKED_RENDERER_WEBGL)) : String(gl.getParameter(gl.RENDERER))
+    gl.viewport(0, 0, cv.width, cv.height)
+    gl.clearColor(0, 0, 0, 0)
+    gl.enable(gl.BLEND)
+    gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA)
+    const vs = 'attribute vec2 p;void main(){gl_Position=vec4(p,0.0,1.0);}'
+    const fs = 'void main(){gl_FragColor=vec4(1.0,0.0,0.0,1.0);}'
+    const sh = (t, s) => { const o = gl.createShader(t); gl.shaderSource(o, s); gl.compileShader(o); return o }
+    const pr = gl.createProgram()
+    gl.attachShader(pr, sh(gl.VERTEX_SHADER, vs))
+    gl.attachShader(pr, sh(gl.FRAGMENT_SHADER, fs))
+    gl.linkProgram(pr)
+    gl.useProgram(pr)
+    const buf = gl.createBuffer()
+    gl.bindBuffer(gl.ARRAY_BUFFER, buf)
+    gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([0, 0.7, -0.7, -0.7, 0.7, -0.7]), gl.STATIC_DRAW)
+    const loc = gl.getAttribLocation(pr, 'p')
+    gl.enableVertexAttribArray(loc)
+    gl.vertexAttribPointer(loc, 2, gl.FLOAT, false, 0, 0)
+    gl.clear(gl.COLOR_BUFFER_BIT)
+    gl.drawArrays(gl.TRIANGLES, 0, 3)
+    const px = (x, y) => { const a = new Uint8Array(4); gl.readPixels(x, y, 1, 1, gl.RGBA, gl.UNSIGNED_BYTE, a); return a[3] }
+    R.webgl.cornerAlpha = px(2, 2)          /* 画布角落应为全透明 */
+    R.webgl.centerAlpha = px(cv.width >> 1, cv.height >> 1) /* 三角形中心应不透明 */
+    R.webgl.ok = R.webgl.cornerAlpha === 0 && R.webgl.centerAlpha === 255
+    const soft = /swiftshader|llvmpipe|software|basic render/i.test(R.webgl.renderer)
+    results['WebGL alpha 画布'] = R.webgl.ok
+    results['GPU 硬件加速（非软件渲染）'] = R.webgl.ok && !soft
+    log('GPU renderer = ' + R.webgl.renderer)
+  } catch (e) { log('webgl error: ' + e.message); results['WebGL alpha 画布'] = false }
+
+  /* 4b. 经协议取 GLB + 校验 glTF 魔数 */
+  try {
+    const res = await fetch('pet3d/test-minimal.glb')
+    const buf = new Uint8Array(await res.arrayBuffer())
+    R.glb.bytes = buf.length
+    R.glb.magic = buf.length >= 4 ? String.fromCharCode(...buf.slice(0, 4)) : null
+    R.glb.ok = R.glb.magic === 'glTF'
+    log(`glb bytes=${R.glb.bytes} magic=${R.glb.magic}`)
+  } catch (e) { log('glb error: ' + e.message) }
+  results['GLB 经协议加载 + 魔数'] = R.glb.ok
+
+  if (tauri?.core?.invoke) {
+    /* 5a/5b 的目标 URL：?probe= 优先，回落本机 vite dev server（真实 TCP，可离线测）。
+       注意不能回落 location.href —— tauri.localhost 是 webview 内部协议，Rust 侧 reqwest 够不着。 */
+    const probeUrl = new URLSearchParams(location.search).get('probe') || 'http://localhost:5199/spike.html'
+    log('probe url = ' + probeUrl)
+
+    /* 5a. http_fetch_once（生产命令：Rust reqwest 整包回取） */
+    try {
+      const r = await tauri.core.invoke('http_fetch_once', { id: 'spike-once', url: probeUrl, method: 'GET', headers: {}, body: '' })
+      Object.assign(R.once, r, { ok: r.status === 200 && r.body.length > 0 })
+      log(`http_fetch_once status=${r.status} len=${r.body.length}`)
+    } catch (e) { R.once.err = String(e); log('http_fetch_once error: ' + e) }
+    results['HTTP 代理 once'] = R.once.ok
+
+    /* 5b. http_stream（Channel 逐块回推：JS 侧建 Channel，统计真实到达的块数） */
+    try {
+      const ch = new tauri.core.Channel()
+      let chunks = 0, total = 0
+      ch.onmessage = (msg) => { chunks++; total += Array.isArray(msg) ? msg.length : (msg?.byteLength ?? (typeof msg === 'string' ? msg.length : 0)) }
+      const r = await tauri.core.invoke('http_stream', { url: probeUrl, onChunk: ch })
+      log(`http_stream js侧 chunks=${chunks} total=${total} | rust侧 chunks=${r.chunks} total=${r.total} sendErrors=${r.send_errors}`)
+      Object.assign(R.stream, { chunks, total }, { ok: chunks >= 1 && total > 0 })
+    } catch (e) { R.stream.err = String(e); log('http_stream error: ' + e) }
+    results['HTTP 代理 stream'] = R.stream.ok
+
+    /* 5c. http_fetch_stream —— 生产形态：帧协议（status/line/end），验证逐行到达 + 重组一致 */
+    try {
+      const ch2 = new tauri.core.Channel()
+      let chunks2 = 0, joined = '', status = 0
+      ch2.onmessage = (f) => {
+        if (f?.event === 'status') status = f.status
+        else if (f?.event === 'line') { chunks2++; joined += f.data }
+      }
+      const r2 = await tauri.core.invoke('http_fetch_stream', { id: 'spike-str', url: probeUrl, method: 'GET', headers: {}, body: '', onFrame: ch2 })
+      const intact = status === 200 && chunks2 === r2.chunks && new TextEncoder().encode(joined).byteLength === r2.bytes
+      log(`http_fetch_stream status=${status} js=${chunks2} rust=${r2.chunks} 重组长度=${joined.length}/${r2.bytes} -> ${intact ? '字节级一致' : '不一致!'}`)
+      R.streamStr = { chunks: chunks2, rust: r2.chunks, ok: intact }
+    } catch (e) { R.streamStr = { ok: false, err: String(e) }; log('http_fetch_stream error: ' + e) }
+
+    results['invoke 通路'] = true
+  } else {
+    results['invoke 通路'] = false
+    log('window.__TAURI__ 不存在（withGlobalTauri 未开？）')
+  }
+
+  /* 2. 拖拽区内的按钮可点击（target 自身判定：按钮无 drag 属性） */
+  document.getElementById('pingbtn').addEventListener('click', () => {
+    R.dragClickThrough = true
+    log('按钮点击成功 —— 拖拽条内交互元素未被拖拽吞掉')
+    paintAll(results)
+  })
+
+  function paintAll(list) { paint({ ...list, '拖拽区交互元素可点': R.dragClickThrough }) }
+  paintAll(results)
+}
+main().catch((e) => { log('FATAL ' + (e?.stack || e)); document.title = 'SPIKE FATAL' })
+</script>
+</body>
+</html>
