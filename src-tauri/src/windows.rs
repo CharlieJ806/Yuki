@@ -113,17 +113,60 @@ pub fn create_pet(app: &AppHandle) -> tauri::Result<WebviewWindow> {
         .and_then(|v| v.as_f64())
         .map(clamp_scale)
         .unwrap_or(1.0);
-    let saved = app
-        .try_state::<crate::db::Db>()
-        .and_then(|d| crate::db::meta_get(&d, "petPosition"))
-        .and_then(|v| {
-            let x = v.get("x")?.as_f64()?;
-            let y = v.get("y")?.as_f64()?;
-            Some((x, y))
-        });
+    let db = app.try_state::<crate::db::Db>();
+    let mut saved = db.as_deref().and_then(|d| crate::db::meta_get(d, "petPosition")).and_then(|v| {
+        let x = v.get("x")?.as_f64()?;
+        let y = v.get("y")?.as_f64()?;
+        Some((
+            x,
+            y,
+            v.get("v").and_then(|n| n.as_i64()).unwrap_or(1),
+            v.get("w").and_then(|n| n.as_f64()),
+            v.get("h").and_then(|n| n.as_f64()),
+        ))
+    });
+    /* 一次性几何迁移（petPosition.v < 3）：旧高度为已迁走的右键菜单预留过整段
+       空间，且宽度已从 340 收窄到 160。右下角锚定语义下：
+       x 右移 180×scale（宽差）；y 按「v<2 从 700×scale、v=2 从 148+136×scale
+       的旧高公式」下移相应 ΔH。迁移标记写回共享 meta，Electron 壳同规则不会
+       重复迁（两壳公式必须同式，见 scale.rs pet_size 注释）。 */
+    if let Some((x, y, v, ..)) = saved.as_mut() {
+        if *v < 3 {
+            *x += 180.0 * scale;
+            *y -= if *v < 2 { 0.0 } else { 16.0 };
+            if *v < 2 {
+                *y += 536.0 * scale - 164.0;
+            }
+            *v = 3;
+            if let Some(d) = db.as_deref() {
+                crate::db::meta_set(d, "petPosition", &serde_json::json!({ "x": x, "y": y, "v": 3 }));
+            }
+        }
+    }
     let work = work_area(app);
-    let w = (PET_SIZE.0 * scale).round();
-    let h = (PET_SIZE.1 * scale).round();
+    /* 建窗尺寸：有 v4 存档直接用存档尺寸——恢复「上次的窗口」本身，比
+       pet_size 猜测准，且真实内容尺寸（气泡列定宽 144+16）不低于 Windows
+       最小窗宽（dpr 200% 下实测 ≈131）：猜测宽 160×0.6=96 会被系统保左上角
+       钳到 131，右缘推出锚点 +35，每次重启右漂一段。下限 80 与 pet_refit 同。
+       两壳同式（Electron createPetWindow 同规则）。 */
+    let (w, h) = match saved {
+        Some((_, _, 4, Some(sw), Some(sh))) if sw >= 80.0 && sh >= 80.0 => (sw, sh),
+        _ => pet_size(scale),
+    };
+    /* v4 起位置记忆以「右下角锚点」为真值：存档记保存时刻的顶角 + 当时尺寸，
+       恢复按锚点 − 建窗尺寸落位（建窗尺寸取自存档时即原样回放上次矩形）。
+       内容驱动贴合（pet_refit）右下角锚定，锚点是它的不变量——直接回放顶角
+       会把「气泡收起的贴合位移」当用户拖拽存下来，桌宠每次重启下移一段（v3
+       时代实测每轮 ~129 逻辑像素）。v3 及更早的存档没有尺寸，按顶角原样落位
+       一次（本就是漂移污染期的存档），首次保存即升级 v4。 */
+    let saved = saved.map(|(x, y, v, sw, sh)| {
+        if v >= 4 {
+            if let (Some(sw), Some(sh)) = (sw, sh) {
+                return (x + sw - w, y + sh - h);
+            }
+        }
+        (x, y)
+    });
     let (x, y) = position::resolve_pet_position(saved, w, h, work);
 
     let builder = apply_debug_args(
@@ -146,6 +189,19 @@ pub fn create_pet(app: &AppHandle) -> tauri::Result<WebviewWindow> {
        SetWindowPos 无此检查，运行时 set_position 任意坐标都精确（与
        apply_pet_scale 同路径）。 */
     let _ = win.set_position(LogicalPosition::new(x.round(), y.round()));
+    /* 系统最小尺寸钳制补偿：请求尺寸低于 Windows 最小窗宽/高时，系统保左上角
+       只钳尺寸，右/下缘被推出锚点（实测 96 宽被钳到 131，右缘 +35）。读实际
+       尺寸按锚点 − 实际尺寸补一次定位，对任意平台最小值免疫。 */
+    if let (Ok(_), Ok(s)) = (win.outer_position(), win.outer_size()) {
+        let f = win.scale_factor().unwrap_or(1.0);
+        let (aw, ah) = (s.width as f64 / f, s.height as f64 / f);
+        if (aw - w).abs() > 0.5 || (ah - h).abs() > 0.5 {
+            let _ = win.set_position(LogicalPosition::new(
+                (x + w - aw).round(),
+                (y + h - ah).round(),
+            ));
+        }
+    }
 
     /* moved：Tauri 拖拽过程中持续发 Moved，比 Electron 的 moved 事件更频繁，
        但只是一次 meta upsert，成本可忽略。meta 表未建好时写入静默失败
@@ -162,12 +218,18 @@ pub fn create_pet(app: &AppHandle) -> tauri::Result<WebviewWindow> {
             if (lx - initial.0).abs() < 0.5 && (ly - initial.1).abs() < 0.5 {
                 return;
             }
+            /* v4：顶角 + 当时尺寸，恢复端据此换算右下角锚点（见 create_pet）。
+               贴合的程序性移动也走这里，但锚点不受贴合影响，写多少次都稳定 */
             if let Some(db) = w2.app_handle().try_state::<crate::db::Db>() {
-                crate::db::meta_set(
-                    &db,
-                    "petPosition",
-                    &serde_json::json!({ "x": lx, "y": ly }),
-                );
+                if let Some(rect) = window_logical_rect(&w2) {
+                    crate::db::meta_set(
+                        &db,
+                        "petPosition",
+                        &serde_json::json!({
+                            "x": rect.x, "y": rect.y, "w": rect.w, "h": rect.h, "v": 4
+                        }),
+                    );
+                }
             }
         }
     });

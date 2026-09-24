@@ -44,6 +44,8 @@ src/renderer/        单份构建产物，main.js 按 ?route=pet|panel|chat 挂�
 
 - **窗口只用 `hide()` 不销毁**；任何改动不能让用户失去找回入口（托盘单击兜底 `restoreAnyWindow()`）。
 - **`petScale` 唯一真相来源是 `settings.petScale`**，渲染层用 computed 派生；三条修改路径统一走 `applyPetScale()` 并广播。
+- **桌宠窗/菜单窗尺寸 = 内容驱动贴合**：渲染层 ResizeObserver 量内容 → 壳层 `pet_refit`/`pet_menu_resize` 按右下角锚定重设窗口；**禁止在壳层手写尺寸公式**（建窗初值除外：Tauri `scale.rs pet_size` / Electron `petSize` 仅首帧猜测）。右键菜单/面板等常驻 UI 一律独立小窗，禁止塞回桌宠窗；把手在 Tauri 下走 `startDragging`（CSS drag 会吞右键），禁改回纯 CSS。
+- **桌宠位置持久化以右下角锚点为真值（`petPosition.v=4`：顶角+当时尺寸，恢复按锚点−建窗尺寸，两壳同式）**——顶角直存会把贴合位移当用户拖拽，位置每次重启漂移；禁改回纯顶角存档。建窗尺寸优先用存档尺寸（首启才用 petSize/pet_size 猜测），且放置后须按锚点补偿系统最小窗宽钳制（实测 96 宽被钳到 131，右缘 +35/次重启）。
 - **桌宠拖拽用 `-webkit-app-region: drag`**，禁止「mousemove + setPosition」——事件会断流拖不动；交互元素须显式 `no-drag`。
 - 节假日 API（timor.tech）**必须带 User-Agent**，否则返回 Cloudflare 页。
 - 提示词顺序必须「稳定在前、易变在后」（token 差 50 倍）；改对话/人设/表情先读 README「AI 对话」整章。

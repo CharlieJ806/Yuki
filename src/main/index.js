@@ -77,10 +77,47 @@ async function createPetWindowImpl() {
   const { workArea } = screen.getPrimaryDisplay()
   const settings = await service.getSettings()
   const scale = Math.max(0.6, Math.min(2, Number(settings.petScale) || 1))
-  const W = Math.round(PET_SIZE.width * scale)
-  const H = Math.round(PET_SIZE.height * scale)
 
-  const saved = await service.getMeta('petPosition', null)
+  /* 一次性几何迁移（petPosition.v < 3，与 Tauri 建窗同规则、标记存共享 meta
+     不会重复迁）：x 右移 180×scale（宽 340→160）；y 按旧高公式下移——
+     v<2 从 700×scale、v=2 从 148+136×scale 起算（右下角锚定）。 */
+  const savedRaw = await service.getMeta('petPosition', null)
+  let saved = null
+  if (savedRaw && Number.isFinite(savedRaw.x) && Number.isFinite(savedRaw.y)) {
+    const v = savedRaw.v ?? 1
+    if (v >= 3) {
+      saved = savedRaw
+    } else {
+      saved = {
+        x: savedRaw.x + 180 * scale,
+        y: savedRaw.y + (v < 2 ? 536 * scale - 164 : -16),
+        v: 3,
+      }
+      await service.setMeta('petPosition', saved).catch(() => {})
+    }
+  }
+  /* 建窗尺寸：有 v4 存档直接用存档尺寸——恢复「上次的窗口」本身，比 petSize
+     猜测准，且真实内容尺寸（气泡列定宽 144+16）不低于 Windows 最小窗宽，
+     避免建窗被系统钳宽后右缘推出锚点、每次重启右漂。下限 80 与壳层贴合同。
+     两壳同式（Tauri create_pet 同规则）。 */
+  const savedSizeOk =
+    saved &&
+    (saved.v ?? 1) >= 4 &&
+    Number.isFinite(saved.w) &&
+    Number.isFinite(saved.h) &&
+    saved.w >= 80 &&
+    saved.h >= 80
+  const { width: W, height: H } = savedSizeOk
+    ? { width: saved.w, height: saved.h }
+    : petSize(scale)
+  /* v4 起位置记忆以「右下角锚点」为真值：存档记保存时刻的顶角 + 当时尺寸，
+     恢复按锚点 − 建窗尺寸落位（建窗尺寸取自存档时即原样回放上次矩形）。
+     内容驱动贴合（refitPetWindow）右下角锚定，锚点是它的不变量——直接回放
+     顶角会把「气泡收起的贴合位移」当用户拖拽存下来，桌宠每次重启下移一段。
+     v3 及更早的存档没有尺寸，按顶角原样落位一次，首次保存即升级 v4。 */
+  if (saved && (saved.v ?? 1) >= 4 && Number.isFinite(saved.w) && Number.isFinite(saved.h)) {
+    saved = { ...saved, x: saved.x + saved.w - W, y: saved.y + saved.h - H }
+  }
   /* 保存的位置若完全落在可视区外（换分辨率 / 拔掉外接屏），回退到右下角默认位 */
   const onScreen =
     saved &&
@@ -115,6 +152,20 @@ async function createPetWindowImpl() {
       sandbox: false,
     },
   })
+  /* 系统最小尺寸钳制补偿（两壳同式）：请求尺寸低于 Windows 最小窗宽/高时，
+     系统保左上角只钳尺寸，右/下缘被推出锚点。读实际尺寸按锚点 − 实际尺寸
+     补一次定位，对任意平台最小值免疫。 */
+  {
+    const b = petWindow.getBounds()
+    if (Math.abs(b.width - W) > 0.5 || Math.abs(b.height - H) > 0.5) {
+      petWindow.setBounds({
+        x: Math.round(x + W - b.width),
+        y: Math.round(y + H - b.height),
+        width: b.width,
+        height: b.height,
+      })
+    }
+  }
 
   petWindow.setAlwaysOnTop(true, 'floating')
   petWindow.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true })
@@ -123,7 +174,10 @@ async function createPetWindowImpl() {
   const rememberPosition = () => {
     if (!petWindow || petWindow.isDestroyed()) return
     const [px, py] = petWindow.getPosition()
-    petState = { x: px, y: py }
+    /* v4：顶角 + 当时尺寸，恢复端据此换算右下角锚点（见 createPetWindowImpl）。
+       'moved' 只在用户拖拽结束时触发，贴合的程序性移动不会进这里 */
+    const [pw, ph] = petWindow.getSize()
+    petState = { x: px, y: py, w: pw, h: ph, v: 4 }
     service.setMeta('petPosition', petState).catch(() => {})
   }
   petWindow.on('moved', rememberPosition)
