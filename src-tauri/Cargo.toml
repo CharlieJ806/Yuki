@@ -29,6 +29,9 @@ log = "0.4"
 tauri = { version = "=2.11.6", features = ["tray-icon"] }
 tauri-plugin-single-instance = "2"
 tauri-plugin-notification = "2"
+# pet_refit 单次 SetWindowPos 原子贴合（尺寸+位置一次到位），
+# 替代 set_size + set_position 两次提交的可见台阶
+windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging"] }
 rusqlite = { version = "0.37", features = ["bundled"] }
 dirs = "6"
 reqwest = { version = "0.12", features = ["stream"] }

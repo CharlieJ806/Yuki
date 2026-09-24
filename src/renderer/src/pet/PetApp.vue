@@ -23,6 +23,7 @@ import {
   TIRED_POSES,
   AFFINITY_GAIN,
   OUTFIT_SLUGS,
+  PET_EXPRESSIONS,
   DEFAULT_OUTFIT,
   affinityLevel,
   contextualScene,
@@ -655,6 +656,21 @@ onMounted(async () => {
   window.setTimeout(rotateIdlePose, 12_000)
   /* 启动后延迟几秒打个招呼（走情境台词，没有场景就不说） */
   window.setTimeout(() => maybeContextLine(), 4000)
+  /* 立绘预热放空闲队列：全部服饰+表情图提前拉取并解码进缓存，首次上场
+     不再慢半拍（共 ~0.9MB，解码峰值 16-20MB，可接受），不与首帧抢资源 */
+  const preloadPortraits = () => {
+    const urls = new Set([
+      ...OUTFIT_SLUGS.map((slug) => outfitFile(slug)),
+      ...Object.values(PET_EXPRESSIONS).map((pose) => poseImageFile(pose)),
+    ])
+    for (const url of urls) {
+      const img = new Image()
+      img.src = url
+      img.decode?.().catch(() => {})
+    }
+  }
+  if (window.requestIdleCallback) window.requestIdleCallback(preloadPortraits)
+  else window.setTimeout(preloadPortraits, 1500)
 })
 
 onBeforeUnmount(() => {
@@ -867,7 +883,9 @@ onBeforeUnmount(() => {
   line-height: 1.6;
   color: #1f2937;
   word-break: break-word;
-  /* 三行封顶：窗高按内容包围盒收紧后，超长台词不能把气泡顶出窗口 */
+  /* 三行封顶：窗高按内容包围盒收紧后，超长台词不能把气泡顶出窗口。
+     同时预留满三行高：连续说话时台词长短不一不再逐句改高（refit 跟着跳） */
+  min-height: calc(1.6em * 3);
   display: -webkit-box;
   -webkit-box-orient: vertical;
   -webkit-line-clamp: 3;

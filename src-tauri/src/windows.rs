@@ -6,6 +6,7 @@
 
 use tauri::{AppHandle, LogicalPosition, LogicalSize, Manager, WebviewUrl, WebviewWindow, WebviewWindowBuilder, WindowEvent};
 use tauri::webview::PageLoadEvent;
+use windows_sys::Win32::UI::WindowsAndMessaging::{SetWindowPos, SWP_NOACTIVATE, SWP_NOZORDER};
 
 use crate::position::{self, FRect};
 use crate::scale::{clamp_scale, pet_size};
@@ -265,12 +266,26 @@ pub async fn pet_refit(app: tauri::AppHandle, width: f64, height: f64) -> Result
     };
     let w = width.max(80.0);
     let h = height.max(80.0);
-    let _ = win.set_size(LogicalSize::new(w, h));
-    let _ = win.set_position(LogicalPosition::new(
-        (rect.x + rect.w - w).round(),
-        (rect.y + rect.h - h).round(),
-    ));
-    Ok(())
+    /* 一次 SetWindowPos 同时带尺寸与位置（物理像素）：先 set_size 再
+       set_position 是两次独立提交——第一步按左上角锚定改尺寸、第二步才挪回
+       右下角锚点，换装/气泡开合时屏幕上出现两个可见台阶。单次 API 调用才是
+       原子贴合（Electron 的 setBounds 同理）。NOACTIVATE：贴合不该抢焦点；
+       经 run_on_main_thread 提交，避免跨线程 SetWindowPos 的重入风险 */
+    let Ok(f) = win.scale_factor() else {
+        return Err("桌宠窗不可测".into());
+    };
+    let x = ((rect.x + rect.w - w) * f).round() as i32;
+    let y = ((rect.y + rect.h - h) * f).round() as i32;
+    let (cw, ch) = ((w * f).round() as i32, (h * f).round() as i32);
+    let Ok(hwnd) = win.hwnd() else {
+        return Err("桌宠窗句柄不可得".into());
+    };
+    /* 裸指针非 Send，转 usize 过闭包再转回（run_on_main_thread 要求 Send） */
+    let hwnd_addr = hwnd.0 as usize;
+    win.run_on_main_thread(move || unsafe {
+        SetWindowPos(hwnd_addr as *mut core::ffi::c_void, std::ptr::null_mut(), x, y, cw, ch, SWP_NOZORDER | SWP_NOACTIVATE);
+    })
+    .map_err(|e| e.to_string())
 }
 
 /// `pet:menuResize` —— 菜单窗按内容高度贴合（宽度定 340，顶边不动）。
