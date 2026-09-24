@@ -3,7 +3,7 @@
  * 验证：摸鱼收入换算、打卡幂等、等级推进、设置持久化。
  * 用法: node scripts/smoke.js
  */
-import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync } from 'node:fs'
+import { existsSync, readFileSync, mkdtempSync, readdirSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -13,6 +13,28 @@ import { toDateKey, isRestDay, levelOf, todaySnapshot, workDaysInMonth, timeCont
 import { isCacheFresh } from '../src/main/holiday.js'
 import { VIDEO_STORIES } from '../src/shared/videoStories.js'
 import { OUTFIT_STORIES } from '../src/shared/outfitStories.js'
+import { PHOTO_SLUGS, photoFiles } from '../src/shared/photoStories.js'
+import { GALLERY_KINDS, GALLERY_KEYS } from '../src/shared/gallery.js'
+import { pickChatBackground, rotateIntervalMs } from '../src/shared/chatBackground.js'
+import {
+  tapLineCount,
+  tapTier,
+  TAP_LINES,
+  pickFromBag,
+  resetBags,
+} from '../src/shared/tapLines.js'
+import { buildChatterRequest, nextChatterDelay, cleanChatter } from '../src/shared/chatter.js'
+import { ChatBackgroundMode } from '../src/shared/moyu.js'
+import {
+  buildPhotoMessages,
+  isPhotoMessage,
+  photoCandidates,
+  photoPathAt,
+  photoPathsOf,
+  MAX_PHOTOS_PER_OUTFIT,
+} from '../src/shared/photoMessage.js'
+import { OUTFIT_LOOKS, ORIENTATIONS, PER_SHEET, PHOTO_SHOTS, buildSheetBody, shotsByOrient } from './gen-photos.js'
+import { normalizeForRequest, textOfContent } from '../src/shared/content.js'
 import { resolveChatConfig } from '../src/main/chat.js'
 import { CHAT_PERSONAS, DEFAULT_SETTINGS } from '../src/shared/moyu.js'
 import {
@@ -22,7 +44,11 @@ import {
   affinityGain,
   AFFINITY_GAIN,
   AFFINITY_MAX_POINTS,
-  CHAT_AFFINITY_DAILY_CAP,
+  AFFINITY_DAILY_CAP,
+  AFFINITY_DECAY,
+  affinityDecay,
+  settleAffinity,
+  isUpsetting,
   linesFor,
   hoverLinesFor,
   idleIntervalScale,
@@ -47,12 +73,16 @@ import {
   EMOTE_KEYS,
   EMOTE_FOR,
   PET_EXPRESSIONS,
+  PET_EXPRESSIONS_KEYS,
+  CHAT_ACTION_RULES,
+  chatActionFor,
   IDLE_POSES,
   sanitizeChatter,
   recentDialogueMessages,
 } from '../src/shared/interactions.js'
 
-const ROOT_PUBLIC = join(dirname(fileURLToPath(import.meta.url)), '..', 'src', 'renderer', 'public')
+const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..')
+const ROOT_PUBLIC = join(ROOT, 'src', 'renderer', 'public')
 
 let failures = 0
 let checks = 0
@@ -393,7 +423,7 @@ try {
       check('所有服饰都有图片', missing.map((o) => o.slug), [])
 
       /* 服饰必须走独立命名空间：混进动作会覆盖立绘（实测过睡衣→pose1 撞握拳） */
-      check('服饰文件名带 outfit 前缀', outfitFile('casual').startsWith('yuki-outfit-'), true)
+      check('服饰文件名带 outfit 前缀', outfitFile(DEFAULT_OUTFIT).startsWith('yuki-outfit-'), true)
       check('服饰与动作命名空间不重叠', OUTFIT_SLUGS.some((s) => PET_EXPRESSIONS[s]) , false)
 
       /* 解锁只增不减 */
@@ -416,29 +446,58 @@ try {
       /* 挂机候选 = 动作 + 服饰，且服饰带可辨识前缀 */
       const intimate = idleCandidatesFor('intimate')
       check('候选含动作', intimate.includes('snack'), true)
-      check('候选含服饰且带前缀', intimate.includes('outfit:casual'), true)
+      check('候选含服饰且带前缀', intimate.includes(`outfit:${DEFAULT_OUTFIT}`), true)
       check('候选总数 = 动作 + 服饰', intimate.length, idlePosesFor('intimate').length + outfitsFor('intimate').length)
 
       /* 候选 -> 文件名：前缀决定取图逻辑 */
       check('动作候选解析', poseImageFile('snack'), 'yuki-snack.png')
-      check('服饰候选解析', poseImageFile('outfit:casual'), 'yuki-outfit-casual.png')
+      check('服饰候选解析', poseImageFile(`outfit:${DEFAULT_OUTFIT}`), `yuki-outfit-${DEFAULT_OUTFIT}.png`)
       /* 未知输入必须安全回落，不能拼出不存在的路径 */
       check('未知候选回落默认', poseImageFile('nope'), expressionFile('idle'))
       check('空候选回落默认', poseImageFile(''), expressionFile('idle'))
       check('未知名服饰回落默认', outfitFile('nope'), outfitFile(DEFAULT_OUTFIT))
 
-      /* 时间换装：深夜睡衣、早晚居家、白天便服 */
+      /* 时间换装（未给解锁清单时的类别回落）：深夜/早晚在家穿睡衣，白天常服 */
       const at = (h) => outfitForTime(new Date(2026, 8, 21, h, 0))
       check('03:00 睡衣', at(3), 'pajamas')
       check('23:30 睡衣', at(23), 'pajamas')
-      check('08:00 居家', at(8), 'homewear')
-      check('21:00 居家', at(21), 'homewear')
-      check('12:00 便服', at(12), 'casual')
-      check('15:00 便服', at(15), 'casual')
+      check('08:00 睡衣（在家）', at(8), 'pajamas')
+      check('21:00 睡衣（在家）', at(21), 'pajamas')
+      check('12:00 常服', at(12), DEFAULT_OUTFIT)
+      check('15:00 常服', at(15), DEFAULT_OUTFIT)
       /* 任何时刻都必须返回合法 slug，否则界面会拿到 404 图 */
       let allValid = true
       for (let h = 0; h < 24; h++) if (!OUTFIT_SLUGS.includes(at(h))) allValid = false
       check('24 小时都能返回合法服饰', allValid, true)
+
+      /*
+       * 传入解锁清单时同样必须返回合法 slug。
+       *
+       * 曾经踩过：散列最后一步 `h32 ^ (h32 >>> 16)` 返回**有符号 int32**，
+       * 取模得到负索引 -> `pool[-17]` = undefined -> 换装静默失效。
+       * 上面那条只覆盖「不给清单」的回落路径，覆盖不到这个分支。
+       */
+      let poolValid = true
+      const badHours = []
+      for (let h = 0; h < 24; h++) {
+        const got = outfitForTime(new Date(2026, 8, 24, h, 0), OUTFIT_SLUGS)
+        if (!OUTFIT_SLUGS.includes(got)) { poolValid = false; badHours.push(h) }
+      }
+      check('给了清单也必须返回合法服饰', badHours, [])
+
+      /* 同一小时内稳定（不闪），否则立绘会不停跳 */
+      const stable =
+        outfitForTime(new Date(2026, 8, 24, 14, 0), OUTFIT_SLUGS) ===
+        outfitForTime(new Date(2026, 8, 24, 14, 59), OUTFIT_SLUGS)
+      check('同一小时内换装稳定', stable, true)
+
+      /* 返回的必须是**解锁池里的**那几套，不能跑到池外 */
+      const small = ['jk', 'pajamas']
+      let poolBound = true
+      for (let h = 0; h < 24; h++) {
+        if (!small.includes(outfitForTime(new Date(2026, 8, 24, h, 0), small))) poolBound = false
+      }
+      check('换装结果不超出解锁池', poolBound, true)
 
       check('服饰信息可查', outfitInfo('qipao').label, '旗袍')
       check('未知服饰信息回落默认', outfitInfo('nope').slug, DEFAULT_OUTFIT)
@@ -598,10 +657,10 @@ try {
       const base = idleCandidatesFor('intimate')
       const pool = weightedPool(base, (k) => !k.startsWith('outfit:') && TIRED_POSES.includes(k))
       const yawnCount = pool.filter((k) => k === 'yawn').length
-      const casualCount = pool.filter((k) => k === 'outfit:casual').length
-      check('困倦项被加权', yawnCount > casualCount, true)
+      const outfitCount = pool.filter((k) => k === `outfit:${DEFAULT_OUTFIT}`).length
+      check('困倦项被加权', yawnCount > outfitCount, true)
       check('非困倦项仍在池里', pool.includes('snack'), true)
-      check('服饰不被加权', casualCount, 1)
+      check('服饰不被加权', outfitCount, 1)
 
       /* 权重为 1 / 非法时应当是原池（不能改变调用方语义） */
       check('weight=1 不复制', weightedPool(['a', 'b'], () => true, 1), ['a', 'b'])
@@ -628,43 +687,166 @@ try {
       check('服饰 slug 唯一', new Set(OUTFIT_SLUGS).size, OUTFITS.length)
     }
 
-    /* ---------- 源素材零遗漏：每张 yuki 源图都必须被用上 ---------- */
+    /* ---------- 素材对账：清单、图片文件、代码表三者一致 ---------- */
     {
       /*
-       * 这条是为了防止重演「同款去重误删 9 张素材」那类问题。
+       * 这条是为了防止重演两类事故：
+       *   1. 「同款去重误删 9 张素材」—— 靠命名习惯猜内容，静默丢弃
+       *   2. 「睡衣(1) 撞 pose1」—— 新旧素材混用同名 slug，静默覆盖立绘
        *
-       * 当时的根因是「靠命名习惯猜内容」：以为 `便服 (2)` 是 `便服` 的同款，
-       * 于是静默丢弃。实际它们是完全不同的衣服（实测 RMSE 6000~14000、
-       * 缩略指纹全不同）。所以这里用 manifest 对账：
-       * **源目录里每张 png 都必须出现在产物清单里**，一张都不能少。
+       * 现在素材链路是：`resources/yuki-new/G*.png` --split-sheet.js-->
+       * resources/raw-cut --install-pet-assets.js--> public/ + manifest。
+       * 所以对账三方：**manifest 条目 = 实际图片文件 = 代码里的 slug 表**。
        */
-      const SRC_DIR = join(dirname(fileURLToPath(import.meta.url)), '..', 'resources', 'yuki')
-      const manifestPath = join(dirname(fileURLToPath(import.meta.url)), '..', 'resources', 'pet', 'manifest.json')
+      /*
+       * manifest 仍在 `resources/pet/` —— 它是**素材清单**（slug/kind/尺寸），
+       * 体积才 5.7KB，而且是「代码里的 slug 表」与「实际文件」之间的
+       * 对账依据（下面几条断言靠它）。与它同目录的那 48 张重复 PNG
+       * 才是冗余（运行期读的是 public 那份）。
+       */
+      const manifestPath = join(ROOT, 'resources', 'pet', 'manifest.json')
 
       if (!existsSync(manifestPath)) {
         check('manifest 已生成', false, true)
       } else {
         const manifest = JSON.parse(readFileSync(manifestPath, 'utf8'))
-        const sourcesUsed = new Set(Object.values(manifest).map((v) => v.source))
-        const allSources = readdirSync(SRC_DIR).filter((f) => /\.png$/i.test(f))
+        const slugs = Object.keys(manifest)
 
-        const dropped = allSources.filter((f) => !sourcesUsed.has(f))
-        check('源素材零遗漏（每张都被用上）', dropped, [])
-        check('manifest 条目数 = 源图数', Object.keys(manifest).length, allSources.length)
-
-        /* 服饰类的每一项都必须产出独立图片文件 */
         /*
-         * 服饰条目数从 manifest 自身推导比较，而不是写死 17：
-         * 断言的是「服饰表里的每一套都产出了图」这一层对应关系。
+         * ① manifest 里的每个 slug 都必须有**运行期用的那份图**。
+         *
+         * 只查 `src/renderer/public/` —— 它才是渲染层真正读的。
+         * `resources/pet/` 里那份母版是 `install-pet-assets.js` 的归档产物，
+         * 与 public 逐字节相同、**运行期无人读**（曾经两边都查，
+         * 于是删掉那份冗余母版会让冒烟挂掉 —— 守错了对象）。
          */
-        const outfitEntries = Object.entries(manifest).filter(
-          ([, v]) => v.kind === 'outfit' || v.kind === 'outfit-scene',
-        )
-        check('服饰条目数 = 服饰表条目数', outfitEntries.length, OUTFITS.length)
-        const missingFiles = outfitEntries
-          .filter(([slug]) => !existsSync(join(ROOT_PUBLIC, `yuki-${slug}.png`)))
-          .map(([slug]) => slug)
-        check('服饰图文件零缺失', missingFiles, [])
+        const missingWeb = slugs.filter((s) => !existsSync(join(ROOT_PUBLIC, `yuki-${s}.png`)))
+        check('manifest 每项都有图（public）', missingWeb, [])
+
+        /*
+         * ② 反过来：public 里不能有 manifest 之外的孤儿图。
+         *
+         * 这才是「slug 改名后忘了清理」真正会出问题的地方 ——
+         * 多出来的图不会被任何代码引用，白占体积。
+         */
+        const onDisk = readdirSync(ROOT_PUBLIC)
+          .filter((f) => /^yuki-(outfit-)?[a-z0-9-]+\.png$/.test(f))
+          .map((f) => f.replace(/^yuki-/, '').replace(/\.png$/, ''))
+          .filter((s) => s !== 'avatar')
+        const orphans = onDisk.filter((s) => !slugs.includes(s))
+        check('public 里没有 manifest 之外的孤儿图', orphans, [])
+
+        /* ③ 代码里的动作表与服饰表必须恰好覆盖 manifest */
+        const manifestActions = slugs.filter((s) => manifest[s].kind === 'action')
+        const manifestOutfits = slugs.filter((s) => manifest[s].kind === 'outfit')
+        const codeActions = Object.values(PET_EXPRESSIONS)
+        const missingInCode = manifestActions.filter((s) => !codeActions.includes(s))
+        check('每个动作素材都在 PET_EXPRESSIONS 里（无死素材）', missingInCode, [])
+        /* manifest 里服饰 slug 带 outfit- 前缀，代码里不带 —— 去掉前缀再比 */
+        const outfitsNotInCode = manifestOutfits
+          .map((s) => s.replace(/^outfit-/, ''))
+          .filter((s) => !OUTFIT_SLUGS.includes(s))
+        check('每套服饰素材都在 OUTFITS 里', outfitsNotInCode, [])
+
+        /* ④ 反向：代码里引用的每个 slug 都必须有图，否则轮换到就 404 */
+        const codeMissingImage = [
+          ...new Set(codeActions).values(),
+        ].map((s) => expressionFile(s)).concat(OUTFIT_SLUGS.map((s) => outfitFile(s)))
+          .filter((f) => !existsSync(join(ROOT_PUBLIC, f)))
+        check('代码引用的 slug 都有图', codeMissingImage, [])
+
+        /*
+         * 角色设定图（高中 / 大学）也要在。设置页按固定路径引用，
+         * 改名或漏打包会直接空白 —— 这两张不参与素材轮换，容易被忽略。
+         */
+        const profileMissing = [
+          'character/yuki-profile-1-highschool.png',
+          'character/yuki-profile-2-university.png',
+        ].filter((f) => !existsSync(join(ROOT_PUBLIC, f)))
+        check('角色设定图都在', profileMissing, [])
+
+        /*
+         * 自拍照片：有则必须能对上 OUTFITS 的 slug。
+         *
+         * 照片是**分批生成**的，所以允许缺失（解锁时退回立绘）。
+         * 但**存在而不能对上 slug 的**必须报出来 ——
+         * 那说明生成脚本里的 slug 拼错了，或者 OUTFITS 改了名
+         * 而照片没跟着改，表现为解锁弹窗里显示空图。
+         */
+        const PHOTO_DIR = join(ROOT_PUBLIC, 'photos')
+        if (existsSync(PHOTO_DIR)) {
+          const all = readdirSync(PHOTO_DIR)
+            .filter((f) => /^yuki-photo-[a-z0-9-]+\.png$/.test(f))
+            .map((f) => f.replace(/^yuki-photo-/, '').replace(/\.png$/, ''))
+          /*
+           * 两类：
+           *   - 装扮照片：slug 必须对上 `OUTFITS`（对不上 = 拼错名字，解锁时显示空图）
+           *   - 额外照片：`scene-N`（旧命名）/ `free-N`（自由穿搭格），不绑装扮
+           */
+          const EXTRA_RE = /^(scene|free)-\d+$/
+          const extra = all.filter((s) => EXTRA_RE.test(s))
+          /* 一套装扮可有多张：`<slug>.png` / `<slug>-2.png`… 比较用基础名 */
+          const photos = all.filter((s) => !EXTRA_RE.test(s)).map((s) => s.replace(/-\d+$/, ''))
+          check('装扮照片 slug 都能对上服饰表', photos.filter((s) => !OUTFIT_SLUGS.includes(s)), [])
+          /* 额外照片的命名必须规范，否则装图时会被当成装扮处理 */
+          check('额外照片命名规范', extra.filter((s) => !EXTRA_RE.test(s)), [])
+
+          /*
+           * 同一个 slug 可以出现多次（多张照片），但**每张的路径必须唯一**——
+           * 文件名撞车会互相覆盖，最终只剩一张。
+           */
+          check('照片文件名唯一（无覆盖）', all.length - new Set(all).size, 0)
+
+          /*
+           * 多张照片的序号必须**从 1 连续**：
+           * 有 `-2` 却没第 1 张，说明基础名拼错了（比如生成时少了后缀），
+           * 前端按 1..N 顺序探测，中间断档会让后面的图永远显示不出来。
+           */
+          const groups = new Map()
+          for (const s of all) {
+            if (EXTRA_RE.test(s)) continue
+            const idx = Number((/-\d+$/.exec(s) || ['1'])[0].replace('-', '')) || 1
+            const base = s.replace(/-\d+$/, '')
+            if (!groups.has(base)) groups.set(base, [])
+            groups.get(base).push(idx)
+          }
+          const holes = []
+          for (const [base, idxs] of groups) {
+            const sorted = [...new Set(idxs)].sort((a, b) => a - b)
+            for (let i = 0; i < sorted.length; i++) {
+              if (sorted[i] !== i + 1) {
+                holes.push(`${base}: 期望第${i + 1}张，实际有 ${sorted[i]}`)
+                break
+              }
+            }
+          }
+          check('多张照片的序号从 1 连续', holes, [])
+          const multi = [...groups.values()].filter((v) => v.length > 1).length
+          if (multi) console.log(`  · ${multi} 套装扮有多张照片`)
+
+          if (photos.length) {
+            console.log(`  · 装扮照片 ${photos.length}/${OUTFIT_SLUGS.length} 套已生成`)
+          }
+          if (extra.length) console.log(`  · 额外照片 ${extra.length} 张（自由穿搭）`)
+        }
+
+        /*
+         * 生活照：每一组都必须至少有第一张图。
+         *
+         * 第二张是可选的（同场景跑了两版才有），所以要分别断言：
+         *   - 第一张：必须有，缺了说明切图或搬运漏了
+         *   - 第二张：有则行，但**不能只有第二张没有第一张**
+         *     （那说明命名错位，调用方从 1 开始找会找不到）
+         */
+        const photoMissing = PHOTO_SLUGS.filter((slug) => !existsSync(join(ROOT_PUBLIC, photoFiles(slug)[0])))
+        check('生活照每组都有第一张', photoMissing, [])
+        const orphanSecond = PHOTO_SLUGS.filter((slug) => {
+          const [a, b] = photoFiles(slug)
+          return existsSync(join(ROOT_PUBLIC, b)) && !existsSync(join(ROOT_PUBLIC, a))
+        })
+        check('生活照没有「有第二张却没第一张」的组', orphanSecond, [])
+        const lifeCount = PHOTO_SLUGS.filter((slug) => existsSync(join(ROOT_PUBLIC, photoFiles(slug)[0]))).length
+        if (lifeCount) console.log(`  · 生活照 ${lifeCount}/${PHOTO_SLUGS.length} 组已就位`)
       }
     }
 
@@ -790,11 +972,361 @@ try {
     check('裁剪后至少留一条', trimmed.length >= 1, true)
     check('正序保留（最后一条最新）', trimmed[trimmed.length - 1].content.includes('内容19'), true)
 
+    /* ---------- 照片生成器的提示词覆盖 ---------- */
+    {
+      /*
+       * 照片提示词是**逐格手写**的，最容易出的错是：
+       *   1. 某套装扮漏了服装描述 → 生成出一套认不出来的衣服
+       *   2. 服装描述与 gen-sheet.js 的立绘描述漂移 →
+       *      照片里的人和桌宠立绘不是同一个人
+       *   3. 24 套没盖全 / 有重复
+       */
+      const photoSlugs = PHOTO_SHOTS.map((x) => x.slug).filter(Boolean)
+      const lookSlugs = Object.keys(OUTFIT_LOOKS)
+
+      check('每套装扮都有服装描述', OUTFIT_SLUGS.filter((s) => !lookSlugs.includes(s)), [])
+      check('服装描述没有多余的 slug', lookSlugs.filter((s) => !OUTFIT_SLUGS.includes(s)), [])
+      check('每套装扮都有照片格子', OUTFIT_SLUGS.filter((s) => !photoSlugs.includes(s)), [])
+      check('照片格子没有重复 slug', photoSlugs.length - new Set(photoSlugs).size, 0)
+
+      /*
+       * 服装描述必须**点到具体单品**，不能只剩一句氛围话。
+       *
+       * 不卡长度：像「白色比基尼，配浅色外罩衫」只有 12 字但完全够用，
+       * 卡长度会误伤。改成要求出现服装名词 —— 被误删成
+       * 「穿得很休闲」这类描述会立刻报警。
+       */
+      const GARMENT = /吊带|裙|衬衫|外套|开衫|旗袍|比基尼|泳装|西装|风衣|睡衣|裤|女仆|修女|制服|礼裙|背心|毛衣|袜|新年装|棉衣|大衣/
+      const vague = lookSlugs.filter((s) => !GARMENT.test(OUTFIT_LOOKS[s]?.wear ?? ''))
+      check('服装描述点到具体单品', vague, [])
+
+      /*
+       * 逐格明细必须**逐格可定位**：每条都带「（第N行第M列）」。
+       *
+       * 只说「第N格」时模型仍可能自行重排顺序（实测出图出现过
+       * 把第 3 格的服装画到第 5 格）。锁定行列之后位置才是死的。
+       */
+      for (const key of Object.keys(ORIENTATIONS)) {
+        const o = ORIENTATIONS[key]
+        /*
+         * 用 shotsByOrient 而不是直接筛 PHOTO_SHOTS ——
+         * `feet` 是独立特辑（清单在 FEET_SHOTS），不在 PHOTO_SHOTS 里，
+         * 直接筛会得到 0 格，断言形同虚设。
+         */
+        const shots = shotsByOrient(key)
+        const text = buildSheetBody(o, shots)
+        const cells = text.match(/^第\d+格（第\d+行第\d+列）/gm) || []
+        check(`${o.label} 逐格明细带行列坐标`, cells.length, shots.length)
+
+        /* 行列不能越界 */
+        const badPos = []
+        for (const m of text.matchAll(/^第\d+格（第(\d+)行第(\d+)列）/gm)) {
+          if (Number(m[1]) > o.rows || Number(m[2]) > o.cols) badPos.push(m[0])
+        }
+        check(`${o.label} 行列坐标不越界`, badPos, [])
+
+        /* 同一格数不能重复出现（重复说明编号算错） */
+        const nums = (text.match(/^第(\d+)格（/gm) || []).length
+        check(`${o.label} 逐格明细条数 = ${shots.length}`, nums, shots.length)
+      }
+
+      /* 两栏提示词画的必须是同一批画布，否则切图参数会错 */
+      for (const key of Object.keys(ORIENTATIONS)) {
+        const o = ORIENTATIONS[key]
+        const [cw, chh] = o.size.split('x').map(Number)
+        const cellW = cw / o.cols
+        const cellH = chh / o.rows
+        const want = key === 'vert' ? 3 / 4 : 4 / 3
+        const got = cellW / cellH
+        check(`${o.label} 每格比例正确`, Math.abs(got - want) < 0.02, true)
+        check(`${o.label} 格子数 = 4×4`, o.cols * o.rows, PER_SHEET)
+      }
+
+      /* 每张 sheet 都要凑满槽位，空镜补足 */
+      for (const key of Object.keys(ORIENTATIONS)) {
+        const n = shotsByOrient(key).length
+        check(`${ORIENTATIONS[key].label} 格子数 = ${PER_SHEET}`, n, PER_SHEET)
+      }
+    }
+
+    /* ---------- 解锁照片消息（拆成多条） ---------- */
+    {
+      /*
+       * 解锁时照片要作为**真实消息**进聊天记录，而且是
+       * 「配文一条、每张照片一条」—— 像她一张张发过来。
+       *
+       * 最容易错的几点：
+       *   1. 多条消息的 `createdAt` 撞在同一毫秒 → 列表排序不稳定，
+       *      照片会跑到配文前面。`offsetMs` 必须严格递增。
+       *   2. 消息里的图用相对路径，回传给模型会变非法 URL →
+       *      规范化必须降级成纯文本。
+       *   3. 生活照走的是另一套路径命名（`photos/life/`），
+       *      用错规则就是裂图。
+       */
+      const parts = buildPhotoMessages('早八的课', [photoPathAt('jk', 1), photoPathAt('jk', 2)])
+      check('配文单独一条（不带图）', parts[0].content.map((b) => b.type), ['text'])
+      check('每条照片各占一条消息', parts.slice(1).map((b) => b.content.map((x) => x.type)), [
+        ['image_url'],
+        ['image_url'],
+      ])
+      check('配文在最前', parts[0].content[0].text, '早八的课')
+      check('图片路径符合 UI 约定', parts[1].content[0].image_url.url, 'photos/yuki-photo-jk.png')
+
+      /*
+       * offsetMs 必须**严格递增** —— 落库时按它算 createdAt，
+       * 并列会让排序不稳定。
+       */
+      const offsets = parts.map((p) => p.offsetMs)
+      check('offsetMs 严格递增', offsets.every((v, i) => i === 0 || v > offsets[i - 1]), true)
+
+      /* 空配文不产出配文那条（只有图，不要一句空洞的兜底） */
+      const noCap = buildPhotoMessages('', [photoPathAt('jk', 1)])
+      check('空配文只出图那一条', noCap.length, 1)
+      check('空配文那条是图', noCap[0].content[0].type, 'image_url')
+
+      /* 类目分派：生活照走另一套命名 */
+      check('生活照路径在 life/ 下', photoPathsOf('photo', 'g08')[0], 'photos/life/g08-1.png')
+      check('服饰照片路径不带 life/', photoPathsOf('outfit', 'jk')[0], 'photos/yuki-photo-jk.png')
+      const lifeParts = buildPhotoMessages('刚洗完', photoPathsOf('photo', 'g08'))
+      check('生活照也拆成配文+两张', lifeParts.length, 3)
+
+      /* 关键：规范化后不能把相对路径原样发给模型 */
+      const norm = normalizeForRequest([
+        { role: 'user', content: '在干嘛' },
+        { role: 'assistant', content: parts[1].content },
+      ])
+      const assistantOut = norm.find((m) => m.role === 'assistant')
+      check('照片消息发给模型时降级成纯文本', typeof assistantOut.content, 'string')
+      check('降级后不含图片路径', assistantOut.content.includes('photos/'), false)
+
+      /* isPhotoMessage 用于渲染层判断 */
+      check('能识别照片消息', isPhotoMessage({ role: 'assistant', content: parts[1].content }), true)
+      check('纯配文那条不算照片消息', isPhotoMessage({ role: 'assistant', content: parts[0].content }), false)
+    }
+
+    /* ---------- 手机端 vendor 模块完整性 ---------- */
+    {
+      /*
+       * 手机端的 shared 模块是**构建时复制**到 `dist-mobile/vendor/` 的
+       * （见 mobile/build.js 的 MODULES 列表）。
+       *
+       * 踩过的坑：新增 `src/shared/weather.js` 却忘了加进 MODULES，
+       * 于是构建产物里没有 `vendor/weather.js` → 浏览器 404 →
+       * **app.js 整个模块加载失败**（`main()` 根本没跑）→
+       * 页面白屏、状态行停在「…」，但控制台没有任何异常，
+       * 只有网络面板里一条 404。查了很久。
+       *
+       * 这条断言把两个列表对上：`mobile/app.js` 里 import 了哪些
+       * shared 模块，就必须在 MODULES 里。缺了当场报出来。
+       */
+      const appSrc = readFileSync(join(ROOT, 'mobile', 'app.js'), 'utf8')
+      const buildSrc = readFileSync(join(ROOT, 'mobile', 'build.js'), 'utf8')
+
+      const imported = new Set(
+        [...appSrc.matchAll(/from '\.\.\/src\/shared\/([a-zA-Z0-9]+)\.js'/g)].map((m) => `${m[1]}.js`),
+      )
+      const modListMatch = /const MODULES = \[([\s\S]*?)\]/.exec(buildSrc)
+      const bundled = new Set(
+        modListMatch ? [...modListMatch[1].matchAll(/'([a-zA-Z0-9]+\.js)'/g)].map((m) => m[1]) : [],
+      )
+
+      check('build.js 能解析出 MODULES 列表', bundled.size > 0, true)
+      const missing = [...imported].filter((f) => !bundled.has(f)).sort()
+      check('app.js 引用的 shared 模块都在 MODULES 里（缺了会白屏）', missing, [])
+
+      /*
+       * 反向：MODULES 里列了但没人 import 的 —— 不是错误
+       * （可能是别的 mobile 文件要用），但值得知道。
+       * 这里不断言，只在有富余时打印，避免噪声。
+       */
+      const unused = [...bundled].filter((f) => !imported.has(f)).sort()
+      if (unused.length) console.log(`  · vendor 里未被 app.js 直接引用：${unused.join(', ')}`)
+
+      /* 每个列出的模块文件都要真实存在，否则复制时静默跳过 */
+      const notExist = [...bundled].filter((f) => !existsSync(join(ROOT, 'src', 'shared', f)))
+      check('MODULES 里的文件都存在', notExist, [])
+    }
+
+    /* ---------- 点击台词与洗牌袋 ---------- */
+    {
+      /*
+       * 用户要求「台词写死但丰富到 100 条」。少了他会立刻察觉在重复。
+       * 只数**单击**（最常用的那组）—— 双击/长按是附加的，不该凑数。
+       */
+      check('单击台词 ≥ 100 条', tapLineCount() >= 100, true)
+      const tiers = ['cold', 'warm', 'hot']
+      check(
+        '三档都有台词',
+        tiers.every((t) => (TAP_LINES[t] ?? []).length > 0),
+        true,
+      )
+      /* 同一句不能同时出现在两档里 —— 那说明复制粘贴漏改 */
+      const allTap = tiers.flatMap((t) => TAP_LINES[t])
+      check('单击台词无重复', allTap.length - new Set(allTap).size, 0)
+
+      /* 档次边界：40 / 120 与 AFFINITY_LEVELS 的「好朋友」「默契搭档」对齐 */
+      check('亲密度 0 是冷档', tapTier(0), 'cold')
+      check('亲密度 39 还是冷档', tapTier(39), 'cold')
+      check('亲密度 40 进熟档', tapTier(40), 'warm')
+      check('亲密度 119 还是熟档', tapTier(119), 'warm')
+      check('亲密度 120 进热档', tapTier(120), 'hot')
+
+      /*
+       * 洗牌袋：**一轮之内绝不重复**。
+       *
+       * 这条断言是有来历的 —— 初版把「该不该重洗」的判据写成了
+       * `bag.length !== pool.length`，而取过一张后袋子自然比池子短，
+       * 于是每次都重洗、洗牌袋等于失效（实测取 23 次只覆盖 14 张）。
+       * 这种 bug 不报错、只是手感变差，所以必须锁住。
+       */
+      resetBags()
+      const pool = ['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h']
+      const round = Array.from({ length: pool.length }, () => pickFromBag(pool, 'test'))
+      check('洗牌袋一轮内不重复', round.length - new Set(round).size, 0)
+      check('洗牌袋一轮覆盖全部', new Set(round).size, pool.length)
+
+      /* 跨轮：继续取不该出错，且仍是池内的元素 */
+      const next = pickFromBag(pool, 'test')
+      check('洗牌袋跨轮仍取池内元素', pool.includes(next), true)
+
+      /* 池子变了要重洗 —— 否则新池的元素要等旧袋取完才出现 */
+      resetBags()
+      pickFromBag(['x', 'y'], 'swap')
+      const afterSwap = pickFromBag(['p', 'q'], 'swap')
+      check('池子变化后重洗', ['p', 'q'].includes(afterSwap), true)
+
+      /* 空池不该崩 */
+      check('空池返回空串', pickFromBag([], 'empty'), '')
+    }
+
+    /* ---------- 聊天背景的轮换选图 ---------- */
+    {
+      /*
+       * 轮换是**按时间片取模**算的，不存「轮到第几张」。
+       * 这条断言守的是「两端算出的一致」—— 逻辑写错会导致
+       * 同一时刻 PC 和手机显示不同的背景（它们读同一份 settings）。
+       */
+      const pool = ['a.png', 'b.png', 'c.png']
+      const step = rotateIntervalMs(30)
+
+      check('关模式不选图', pickChatBackground({ mode: ChatBackgroundMode.OFF, fixed: 'x.png' }), '')
+      check('固定模式用指定那张', pickChatBackground({ mode: ChatBackgroundMode.FIXED, fixed: 'x.png' }), 'x.png')
+      check('轮换模式从池里选', pickChatBackground({ mode: ChatBackgroundMode.ROTATE, pool, now: 0 }), 'a.png')
+
+      /* 时间片推进：每过一个间隔轮一张，转完一圈回到开头 */
+      const seq = [0, 1, 2, 3, 4].map((i) =>
+        pickChatBackground({ mode: ChatBackgroundMode.ROTATE, pool, now: i * step }),
+      )
+      check('轮换按时间片依次推进', seq, ['a.png', 'b.png', 'c.png', 'a.png', 'b.png'])
+
+      /* 同一时刻算两次必须一样（无状态） */
+      const t = 12345678
+      check(
+        '同一时刻结果稳定',
+        pickChatBackground({ mode: ChatBackgroundMode.ROTATE, pool, now: t }),
+        pickChatBackground({ mode: ChatBackgroundMode.ROTATE, pool, now: t }),
+      )
+
+      /*
+       * 池里剔除不可用的：**先滤再取模**。
+       *
+       * 反过来（先取模再滤）会在轮到失效那张时空一下 —— 用户没改设置，
+       * 背景却闪没了，看起来像 bug。所以关键是「任何时刻都有结果」。
+       * 滤掉 b 后池子是 [a, c]，逐个时间片都该有图，且不出现 b。
+       */
+      const filtered = [0, 1, 2, 3].map((i) =>
+        pickChatBackground({ mode: ChatBackgroundMode.ROTATE, pool, available: (p) => p !== 'b.png', now: i * step }),
+      )
+      check('池里不可用的被滤掉', filtered.includes('b.png'), false)
+      check('滤掉之后每个时间片都有图', filtered.every((p) => Boolean(p)), true)
+      check('滤掉后按剩下的循环', filtered, ['a.png', 'c.png', 'a.png', 'c.png'])
+      check('池子全不可用则不设背景', pickChatBackground({ mode: ChatBackgroundMode.ROTATE, pool, available: () => false }), '')
+      check('空池不设背景', pickChatBackground({ mode: ChatBackgroundMode.ROTATE, pool: [] }), '')
+      check('固定模式下失效的图被忽略', pickChatBackground({ mode: ChatBackgroundMode.FIXED, fixed: 'x.png', available: () => false }), '')
+
+      /* 时钟回拨（负数时间戳）不能算出负索引 */
+      check('时钟回拨不越界', pickChatBackground({ mode: ChatBackgroundMode.ROTATE, pool, now: -1 }), 'c.png')
+
+      /* 间隔钳制：0 / 负数 / 非数字都用默认，超大值封顶 */
+      check('间隔 0 用默认', rotateIntervalMs(0), 30 * 60 * 1000)
+      check('间隔为负用默认', rotateIntervalMs(-5), 30 * 60 * 1000)
+      check('间隔非数字用默认', rotateIntervalMs('x'), 30 * 60 * 1000)
+      check('间隔过小被抬到下限', rotateIntervalMs(1), 5 * 60 * 1000)
+      check('间隔过大被封顶', rotateIntervalMs(999999), 24 * 60 * 60 * 1000)
+    }
+
+    /* ---------- 图鉴类目三方一致 ---------- */
+    {
+      /*
+       * 加「背景图」时踩过：gallery.js 注册了三类，
+       * 但 mobile/storage.js 和主进程各维护一张键名表，
+       * 只改了一处 -> 手机端直接抛「未知的图鉴类型: background」。
+       *
+       * 现在键名表已收归 shared/gallery.js 一份。这条断言锁住
+       * 「键名表必须覆盖所有类目」，加类目忘了登记键名会当场红。
+       */
+      const keyed = Object.keys(GALLERY_KEYS)
+      const missingKeys = GALLERY_KINDS.filter((k) => !keyed.includes(k))
+      check('每个图鉴类目都有存储键名', missingKeys, [])
+      const extraKeys = keyed.filter((k) => !GALLERY_KINDS.includes(k))
+      check('没有多余/失效的键名条目', extraKeys, [])
+
+      /* 键名不能撞车，否则两类共用一份数据 */
+      const all = Object.values(GALLERY_KEYS).flatMap((k) => [k.list, k.mem])
+      check('存储键名互不重复', all.length - new Set(all).size, 0)
+    }
+
+    /* ---------- 聊天关键词 -> 动作 ---------- */
+    {
+      /*
+       * 手机端会在用户发消息时本地匹配关键词，命中就切立绘演 5 秒。
+       * 两条最容易出错的：① 映射到不存在的表情 -> 空白立绘
+       *                ② 关键词太宽 -> 随便一句都触发，看着像卡住
+       */
+      const emoteKeys = new Set(PET_EXPRESSIONS_KEYS)
+      const badEmote = CHAT_ACTION_RULES.filter((r) => !emoteKeys.has(r.emote)).map((r) => r.emote)
+      check('关键词规则都指向存在的表情', badEmote, [])
+
+      /* 每条规则必须有关键词，且不能有空串（空串 includes 恒真 -> 全触发） */
+      const noWords = CHAT_ACTION_RULES.filter((r) => !Array.isArray(r.any) || !r.any.length).map((r) => r.emote)
+      check('每条规则都有关键词', noWords, [])
+      const emptyWord = []
+      for (const r of CHAT_ACTION_RULES) {
+        for (const w of r.any) if (!String(w).trim()) emptyWord.push(`${r.emote}:"${w}"`)
+      }
+      check('没有空关键词（会全命中）', emptyWord, [])
+
+      /* 权重去重：同一 emote 不该出现两条规则（合并成一条更清楚） */
+      const dupEmote = []
+      const seenEmote = new Set()
+      for (const r of CHAT_ACTION_RULES) {
+        if (seenEmote.has(r.emote)) dupEmote.push(r.emote)
+        seenEmote.add(r.emote)
+      }
+      check('每种动作只有一条规则', dupEmote, [])
+
+      /*
+       * 冷却：同一动作 20 秒内不重复触发。
+       * 用固定时间戳避开「跑测试时真的过了 20 秒」这种不稳定。
+       */
+      const t0 = 1_700_000_000_000
+      check('首次命中', chatActionFor('笑死我了哈哈哈', t0), 'laugh')
+      check('20 秒内同动作不重复', chatActionFor('哈哈哈好好笑', t0 + 5000), null)
+      check('超过 20 秒可再次触发', chatActionFor('哈哈哈哈', t0 + 21_000), 'laugh')
+      check('不同动作互不影响', chatActionFor('我好难过想哭', t0 + 1000), 'cry')
+      /* 权重：一句话同时像好几条时取权重最高的 */
+      check('命中取权重最高的', chatActionFor('哈哈哈笑死 但我好难过想哭', t0 + 60_000), 'laugh')
+      /* 无关的话不该触发 */
+      check('无关内容不触发', chatActionFor('今天天气还行', t0 + 90_000), null)
+      check('空输入不触发', chatActionFor('', t0 + 90_000), null)
+    }
+
     /* 表情注册表：每个 key 都要能映射到实际存在的文件 */
     const allKeys = [...MOOD_KEYS, ...EMOTE_KEYS]
-    check('表情 key 数量', allKeys.length, 18)
+    /* 数量跟着素材走：动作 24 = 状态 4 + 表情 20 */
+    check('表情 key 数量', allKeys.length, PET_EXPRESSIONS_KEYS.length)
     check('状态类 4 个', MOOD_KEYS.length, 4)
-    check('表情类 14 个', EMOTE_KEYS.length, 14)
+    check('表情类数量 = 动作总数 - 状态数', EMOTE_KEYS.length, PET_EXPRESSIONS_KEYS.length - MOOD_KEYS.length)
     /* 生活化姿态也要有图，否则挂机轮换会 404 */
     check('挂机姿态都有图', IDLE_POSES.every((k) => allKeys.includes(k)), true)
 
@@ -855,31 +1387,77 @@ try {
     check('主动说话频率随亲密度递增', scales.every((s, i) => i === 0 || s < scales[i - 1]), true)
     check('未知档位倍率为 1', idleIntervalScale('nope'), 1)
 
-    /* ---------- 亲密度：得分规则（上限 + 聊天日配额） ---------- */
+    /* ---------- 亲密度：得分规则（上限 + 每日总额度） ---------- */
     check('满级后不再涨点', affinityGain({ points: AFFINITY_MAX_POINTS }, 5, '2026-09-21'), 0)
     check('接近上限时被截断', affinityGain({ points: AFFINITY_MAX_POINTS - 2 }, 5, '2026-09-21'), 2)
     check('正常加点', affinityGain({ points: 0 }, AFFINITY_GAIN.pet, '2026-09-21'), AFFINITY_GAIN.pet)
     check('零和负数不加点', affinityGain({ points: 0 }, 0, '2026-09-21'), 0)
-    /* 聊天配额：不设的话一口气聊几十条就能从 0 冲到满级 */
-    const capUsed = { points: 10, chatDay: '2026-09-21', chatToday: CHAT_AFFINITY_DAILY_CAP }
-    check('聊到日上限后不再加分', affinityGain(capUsed, 3, '2026-09-21', { chat: true, chatCap: CHAT_AFFINITY_DAILY_CAP }), 0)
-    check('跨天后配额重置', affinityGain(capUsed, 3, '2026-09-22', { chat: true, chatCap: CHAT_AFFINITY_DAILY_CAP }), 3)
-    check('配额快满时按剩余给', affinityGain({ points: 10, chatDay: '2026-09-21', chatToday: 59 }, 3, '2026-09-21', { chat: true, chatCap: 60 }), 1)
-    /* 手动互动不受聊天配额约束 */
-    check('摸头不受聊天配额影响', affinityGain(capUsed, 2, '2026-09-21', { chatCap: CHAT_AFFINITY_DAILY_CAP }), 2)
+
+    /*
+     * 每日额度：**所有来源合计**封顶（原来是「只封聊天」）。
+     *
+     * 改的原因：只封聊天时，一直点立绘能无限涨 ——
+     * 一天点 300 下就能从「有点眼熟」冲到「默契搭档」，
+     * 等级推进完全失去节奏。
+     */
+    const capUsed = { points: 10, gainDay: '2026-09-21', gainToday: AFFINITY_DAILY_CAP }
+    check('额度用尽后聊天不加分', affinityGain(capUsed, 3, '2026-09-21'), 0)
+    check('额度用尽后点击也不加分', affinityGain(capUsed, AFFINITY_GAIN.click, '2026-09-21'), 0)
+    check('跨天后额度重置', affinityGain(capUsed, 3, '2026-09-22'), 3)
+    check('额度快满时按剩余给', affinityGain({ points: 10, gainDay: '2026-09-21', gainToday: 59 }, 3, '2026-09-21'), 1)
+    /* 旧字段（chatDay/chatToday）仍要能读到，否则升级当天的额度会凭空多出来 */
+    check(
+      '旧的聊天计数字段仍被识别',
+      affinityGain({ points: 10, chatDay: '2026-09-21', chatToday: AFFINITY_DAILY_CAP }, 3, '2026-09-21'),
+      0,
+    )
+
+    /* ---------- 亲密度：下降机制 ---------- */
+    check('刚互动过不衰减', affinityDecay({ points: 100, lastActive: '2026-09-21' }, '2026-09-21'), 0)
+    check('宽限期内不衰减', affinityDecay({ points: 100, lastActive: '2026-09-21' }, '2026-09-24'), 0)
+    check(
+      '超过宽限期后按天扣',
+      affinityDecay({ points: 100, lastActive: '2026-09-21' }, '2026-09-26'),
+      2 * AFFINITY_DECAY.IDLE_PER_DAY,
+    )
+    /* 已结算过的天数不再重复扣 —— 否则同一天里每次互动都扣一遍 */
+    check(
+      '已结算的不重复扣',
+      affinityDecay({ points: 100, lastActive: '2026-09-21', decaySettledDays: 2 }, '2026-09-26'),
+      0,
+    )
+    check('没有 lastActive 不衰减', affinityDecay({ points: 100 }, '2026-09-26'), 0)
+
+    /* 惹她生气的判定：只认「针对她」的冒犯 */
+    check('骂她算惹生气', isUpsetting('讨厌你'), true)
+    check('赶她走算惹生气', isUpsetting('别烦我'), true)
+    /* 关键：用户自己诉苦**不能**被算成惹她生气（那该被安慰） */
+    check('用户自己委屈不算惹她', isUpsetting('今天好委屈'), false)
+    check('用户自己难过不算惹她', isUpsetting('我想哭'), false)
+    check('普通聊天不算惹她', isUpsetting('今天天气不错'), false)
 
     const before = service.affinity().points
     service.addAffinity(7)
     check('亲密度累加', service.affinity().points, before + 7)
     check('连续天数为 1', service.affinity().streakDays, 1)
     check('getState 带亲密度', service.getState().affinity.points, before + 7)
-    /* 上限：到顶后继续互动不再涨，避免等级卡在最后一档还以为在涨 */
-    for (let i = 0; i < 400; i++) service.addAffinity(10)
+    /*
+     * 上限：到顶后继续互动不再涨，避免等级卡在最后一档还以为在涨。
+     *
+     * 注意**要跨多天**：现在每日额度是 60 点（全来源合计），
+     * 同一天里怎么加都上不去 —— 这正是额度的作用。
+     * 早先这条写成「一天连加 400 次」，加了额度之后自然失败。
+     */
+    for (let day = 0; day < 10; day++) {
+      const d = new Date(2026, 8, 21 + day, 14, 0)
+      /* 第 4 个参数是「时间」——不传的话每天都是同一天，测不出跨天重置 */
+      for (let i = 0; i < 20; i++) service.addAffinity(10, {}, null, d)
+    }
     check('亲密度封顶', service.affinity().points, AFFINITY_MAX_POINTS)
     check('封顶后 isMax', service.affinity().isMax, true)
     service.resetAffinity()
     check('重置归零', service.affinity().points, 0)
-    check('重置清空聊天配额', service.affinity().chatToday, 0)
+    check('重置清空当日额度', service.affinity().gainToday ?? 0, 0)
   }
 
   /* ---------- 16b. 聊天记亲密度 ---------- */
@@ -894,21 +1472,24 @@ try {
     service.addChatMessage(chatSession.id, 'user', '在吗')
     service.addAffinity(AFFINITY_GAIN.chatMessage, { kind: 'chat' })
     check('聊天加分生效', service.affinity().points, before + AFFINITY_GAIN.chatMessage)
-    check('聊天计入当日配额', service.affinity().chatToday, AFFINITY_GAIN.chatMessage)
+    check('聊天计入当日额度', service.affinity().gainToday, AFFINITY_GAIN.chatMessage)
 
-    /* 配额用完后再聊不加分，但其他互动照常 */
-    service.addAffinity(CHAT_AFFINITY_DAILY_CAP * 10, { kind: 'chat' })
+    /*
+     * 额度用完后再聊不加分 —— 且**点击也不行**。
+     * 这是这次改动的重点：原来只封聊天，导致一直点立绘能无限刷。
+     */
+    service.addAffinity(AFFINITY_DAILY_CAP * 10, { kind: 'chat' })
     const capped = service.affinity().points
-    check('聊天配额封顶', service.affinity().chatToday, CHAT_AFFINITY_DAILY_CAP)
+    check('当日额度封顶', service.affinity().gainToday, AFFINITY_DAILY_CAP)
     service.addAffinity(AFFINITY_GAIN.chatMessage, { kind: 'chat' })
-    check('配额用尽后聊天不加分', service.affinity().points, capped)
-    service.addAffinity(AFFINITY_GAIN.pet)
-    check('配额用尽后摸头仍加分', service.affinity().points, capped + AFFINITY_GAIN.pet)
+    check('额度用尽后聊天不加分', service.affinity().points, capped)
+    service.addAffinity(AFFINITY_GAIN.click)
+    check('额度用尽后点击也不加分', service.affinity().points, capped)
 
     /* meta 要下发规则，否则设置页只能写死文案 */
     const meta = service.meta()
     check('meta 带亲密度等级表', meta.affinity.levels.length, affinityLevel(0).level ? 5 : 0)
-    check('meta 带聊天日上限', meta.affinity.chatDailyCap, CHAT_AFFINITY_DAILY_CAP)
+    check('meta 带每日额度', meta.affinity.dailyCap, AFFINITY_DAILY_CAP)
     check('meta 带得分规则', meta.affinity.gain.chatRound, AFFINITY_GAIN.chatRound)
     service.resetAffinity()
   }
@@ -1264,7 +1845,7 @@ try {
     const { buildVideoJudgePrompt } = await import('../src/shared/videoStories.js')
     const { buildStoryJudgePrompt } = await import('../src/shared/outfitStories.js')
 
-    const vp = buildVideoJudgePrompt([{ role: 'user', content: 'hi' }], ['headpat'], 'casual')
+    const vp = buildVideoJudgePrompt([{ role: 'user', content: 'hi' }], ['headpat'], DEFAULT_OUTFIT)
     check('视频提示词含剧情', vp.includes(VIDEO_STORIES.headpat.story), true)
 
     const op = buildStoryJudgePrompt([{ role: 'user', content: 'hi' }], ['jk'], 'jk')

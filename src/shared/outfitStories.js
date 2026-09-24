@@ -29,15 +29,76 @@
  *   'condition'—— 硬条件（亲密度 / 时段 / 工作日）
  *   'model'    —— 交给模型判断（多数用这个）
  */
+/**
+ * 每套装扮的**亲密度门槛**。
+ *
+ * ## 为什么单独一张表，不写进各条 story 里
+ *
+ * 门槛是「难度设计」，和故事文案是两回事 —— 混在一起的话，
+ * 想调平衡得逐条翻 24 个对象。集中成一张表，一眼能看出难度分布，
+ * 也方便整体平移（比如觉得都太难就统一降一档）。
+ *
+ * ## 分档依据
+ *
+ * 按「私密程度」而不是「好不好看」：
+ *
+ *   0    日常外穿，一开始给（JK 制服是基准装扮）
+ *   40   稍熟才给 —— 见面、出门、参加活动的装扮（好朋友）
+ *   120  偏私密的居家/私服（默契搭档）
+ *   300  最私密的那几套（形影不离）
+ *
+ * 阈值与 `AFFINITY_LEVELS` 的等级对齐，用户看到「形影不离」就知道
+ * 自己到了最高档，不用记数字。
+ *
+ * **没列在这里的 = 0 门槛。**
+ */
+export const OUTFIT_MIN_POINTS = {
+  /* 0：日常，一开始就有 */
+  jk: 0,
+  'casual-mono': 0,
+  campus: 0,
+  raincoat: 0,
+  formal: 0,
+
+  /* 40（好朋友）：出门 / 活动 / 有点打扮的场合 */
+  'casual-red': 40,
+  'casual-lace': 40,
+  'casual-dark': 40,
+  'campus-idol': 40,
+  idol: 40,
+  longskirt: 40,
+  xmas: 40,
+  newyear: 40,
+  gown: 40,
+  qipao: 40,
+  nun: 40,
+  maid: 40,
+
+  /* 120（默契搭档）：居家、私服 */
+  'pajamas-shorts': 120,
+  'pajamas-bodysuit': 120,
+  camisole: 120,
+
+  /* 300（形影不离）：最私密的几套 */
+  pajamas: 300,
+  'pajamas-black': 300,
+  'pajamas-pink': 300,
+  swimsuit: 300,
+}
+
+/** 取某套装扮的门槛（没配 = 0） */
+export const outfitMinPoints = (slug) => OUTFIT_MIN_POINTS[slug] ?? 0
+
 export const OUTFIT_STORIES = {
-  casual: {
+  jk: {
     title: '最日常的那件',
     hint: '聊到日常琐事时可能会穿',
     unlock: 'condition',
     condition: { minPoints: 0 }, // 初始就解锁，作为「基准装扮」
+    story: '这是她最常穿的一套 —— 白衬衫配黑色背心裙，背上书包就能出门。',
   },
   'casual-red': {
-    title: '打了场好球',
+    title: '打得好',
     hint: '和她聊聊打游戏的战绩',
     unlock: 'model',
     keywords: ['打赢了', '赢了这局', '上分了', 'rank 上分', '刚刚那把', '战绩怎么样'],
@@ -64,7 +125,7 @@ export const OUTFIT_STORIES = {
     keywords: ['想看你穿深色的', '换个风格看看', '想看你穿得酷一点'],
     story: '她说想换个风格试试，穿了套深色制服，拍给你看问是不是有点太装了。',
   },
-  pajamas: {
+  'pajamas': {
     title: '熬夜的证据',
     hint: '深夜还在聊天时',
     unlock: 'condition',
@@ -98,13 +159,6 @@ export const OUTFIT_STORIES = {
     unlock: 'model',
     keywords: ['热得睡不着', '深圳是不是很热'],
     story: '深圳太热了，她换了最薄的那条粉色睡裙，拍张照片哀嚎说空调像是不太管用。',
-  },
-  homewear: {
-    title: '在家的一天',
-    hint: '聊到居家、休息日',
-    unlock: 'model',
-    keywords: ['今天在家干嘛', '休息日做什么'],
-    story: '休息日在家，她穿着最舒服的居家服拍张照片，说今天什么都不打算干。',
   },
   camisole: {
     title: '夏天来了',
@@ -141,23 +195,8 @@ export const OUTFIT_STORIES = {
     keywords: ['穿修女服', '那套修女服'],
     story: '她说想试试奇怪的东西，穿了套修女服拍了张照片，自己先笑场了。',
   },
-  cosplay: {
-    title: '二次元时间',
-    hint: '聊到动漫、角色扮演',
-    unlock: 'model',
-    keywords: ['cos 一个给我看', '想看你 cos'],
-    story: '她最近在追一部番，忍不住cos了一下里面的角色，拍了张照片问你能不能认出来。',
-  },
-
   /* ---------- 第二批 ---------- */
 
-  jk: {
-    title: 'JK 制服',
-    hint: '聊到上课、早八、学校日常',
-    unlock: 'model',
-    keywords: ['你今天上课穿的什么', '今天上课穿的什么', '上课穿哪件', '想看你穿 JK', '今天穿的 JK', '上课穿的那件', '上课穿的那套'],
-    story: '早八的课，她穿了 JK 制服拍了张照片说「今天要迟到了，救命」。',
-  },
   campus: {
     title: '清纯校园',
     hint: '聊到校园、青春、学生时代',
@@ -186,33 +225,40 @@ export const OUTFIT_STORIES = {
     keywords: ['穿女仆装给我看', '想看你当店员'],
     story: '她路过一家女仆咖啡店，试了店里的制服拍了张照片，说打工会不会很有意思。',
   },
-  'maid-two': {
-    title: '女仆装',
-    hint: '接着上面那段聊下去',
+  xmas: {
+    title: '圣诞快乐',
+    hint: '聊到圣诞节、平安夜',
     unlock: 'model',
-    keywords: ['再穿一次女仆装', '换一套女仆装'],
-    story: '你说好看，她又换了另一套拍了张照片，说这套更适合端盘子。',
+    keywords: ['圣诞怎么过', '平安夜做什么', '圣诞快乐'],
+    story: '圣诞节她换上了红色的小裙子，头上还戴了个驯鹿角，拍了张照片说「可是没有人和我一起过」。',
   },
-  interview: {
-    title: '实习面试',
-    hint: '聊到实习、面试、找工作',
+  newyear: {
+    title: '过年啦',
+    hint: '聊到过年、春节、除夕',
     unlock: 'model',
-    keywords: ['面试怎么样', '面试穿什么'],
-    story: '她去面试了一个实习，回来拍了张照片说「紧张到腿软，但我尽力了」。',
+    keywords: ['过年穿什么', '新年穿哪件', '春节快乐', '过年好'],
+    story: '过年了，她穿上了红金色的旗袍拍了张照片，说过年就是要穿红的才喜庆。',
   },
-  ol: {
-    title: 'OL 制服',
-    hint: '聊到上班、通勤、职场',
+  gown: {
+    title: '宴会那天',
+    hint: '聊到晚宴、正式聚会、礼服',
     unlock: 'model',
-    keywords: ['上班穿什么', '想看 OL'],
-    story: '她想象了一下毕业后的样子，穿了套 OL 制服拍照，说「不知道以后会不会天天这样」。',
+    keywords: ['想看你穿礼服', '晚宴穿什么', '正式场合穿什么'],
+    story: '要去参加一个正式晚宴，她借了件露肩礼服试着拍给你看，说有点不太习惯这么隆重。',
   },
-  stepmom: {
-    title: '小妈长裙',
-    hint: '聊到成熟、气质、长裙',
+  formal: {
+    title: '面试之前',
+    hint: '聊到面试、实习、正经场合',
     unlock: 'model',
-    keywords: ['想看你成熟一点', '穿成熟点给我看'],
-    story: '她试了条成熟路线的长裙，拍了张照片问你是不是有点太像大人了。',
+    keywords: ['面试怎么样', '面试穿什么', '要去面试了'],
+    story: '明天要去面试，她换上西装对着镜子拍了一张，说「帮我看看这样够不够正式」。',
+  },
+  raincoat: {
+    title: '下雨的傍晚',
+    hint: '聊到下雨、天气、带没带伞',
+    unlock: 'model',
+    keywords: ['外面下雨了', '今天下雨', '带伞了吗'],
+    story: '傍晚下起了雨，她裹着风衣、撑着伞拍了张照片说「深圳的雨说来就来」。',
   },
 }
 
@@ -230,14 +276,22 @@ export const STORY_SLUGS = Object.keys(OUTFIT_STORIES)
  * @param {string[]} unlocked 已解锁的 slug（这些不再参与）
  * @returns {string[]} 候选 slug（按在文本中出现的先后）
  */
-export function keywordCandidates(text, unlocked = []) {
+export function keywordCandidates(text, unlocked = [], points = 0) {
   const s = String(text ?? '')
   if (!s) return []
   const done = new Set(unlocked)
+  const p = Number(points) || 0
   const hits = []
   for (const [slug, def] of Object.entries(OUTFIT_STORIES)) {
     if (done.has(slug)) continue
     if (def.unlock !== 'model') continue /* 关键词只用来预筛 model 类 */
+    /*
+     * 亲密度不够的**不进候选** —— 在这里挡最省：
+     * 代价是零（纯比较），而且不会白花一次模型调用。
+     * 放在模型判断那步的话，每次都要先问一遍「她愿意给吗」，
+     * 既花钱又容易被模型放水。
+     */
+    if (p < outfitMinPoints(slug)) continue
     const kw = def.keywords ?? []
     if (kw.some((k) => k && s.includes(k))) hits.push(slug)
   }

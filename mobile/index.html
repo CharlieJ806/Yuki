@@ -38,25 +38,28 @@
       看着像同一个按钮，用户以为「有一个没用」。
       换装用衣架、图鉴用相册，语义和形状都拉开距离。
     -->
-    <button class="icon-btn" id="btn-wardrobe" aria-label="换装">🧥</button>
+    <!--
+      换装按钮不在这里 —— 它跟着立绘一起搬到了「她」的全屏页
+      （顶栏留三个位置给：菜单 / 图鉴 / 设置，手机上不再挤）。
+    -->
     <button class="icon-btn" id="btn-gallery" aria-label="图鉴">🖼️</button>
     <button class="icon-btn" id="btn-settings" aria-label="设置">⚙</button>
   </header>
 
-  <!-- 她的立绘：常驻顶部，随时间和解锁进度轮换 -->
+  <!--
+    她的立绘：常驻顶部，随时间和解锁进度轮换。
+    与「她」的全屏页是**两处独立显示**（同一份数据、各刷各的）——
+    小图是为了「聊天时也能看到她」，大图是「专门看她」。
+    亲密度两边都有：这里看进度，全屏页看细节。
+  -->
   <div class="pet-strip" id="pet-strip">
     <img class="pet-img" id="pet-img" alt="Yuki" />
     <div class="pet-meta">
       <p class="pet-outfit" id="pet-outfit">…</p>
       <p class="pet-note" id="pet-note"></p>
-      <!--
-        亲密度进度条。
-        之前手机端完全看不到关系进展 —— 只有一句「用已聊条数当代理」的注释，
-        而图鉴的条件解锁（如睡裙要 23 点后）又依赖它，用户无从判断自己到哪了。
-      -->
-      <div class="affinity" id="affinity">
-        <div class="affinity-bar"><i id="affinity-fill"></i></div>
-        <span class="affinity-text" id="affinity-text"></span>
+      <div class="affinity">
+        <div class="affinity-bar"><i class="affinity-fill"></i></div>
+        <span class="affinity-text"></span>
       </div>
     </div>
   </div>
@@ -99,6 +102,17 @@
       <button class="icon-btn" id="btn-new" aria-label="新建">＋</button>
       <button class="icon-btn" id="btn-close-drawer" aria-label="关闭">✕</button>
     </div>
+  </div>
+  <!--
+    入口区：「她」的全屏页。
+    只放这一个 —— 换装已经收进那一页里了，抽屉里再放一个
+    是重复入口（两处都能进，用户还要猜有没有区别）。
+  -->
+  <div class="drawer-entries">
+    <button class="drawer-entry" id="btn-open-petpage">
+      <span class="de-icon">🐾</span>
+      <span class="de-text">她</span>
+    </button>
   </div>
   <ul class="session-list" id="session-list"></ul>
 </aside>
@@ -156,6 +170,75 @@
     <label class="field">
       <span>角色设定</span>
       <select id="f-persona"></select>
+    </label>
+    <!-- 角色设定图：高中 / 大学两个阶段，和人设里的描述对应 -->
+    <div class="field">
+      <span>角色设定图</span>
+      <div class="profile-shots">
+        <figure>
+          <img src="./character/yuki-profile-1-highschool.png" alt="高中时期" loading="lazy" />
+          <figcaption>高中时期 · 安静害羞</figcaption>
+        </figure>
+        <figure>
+          <img src="./character/yuki-profile-2-university.png" alt="大学时期" loading="lazy" />
+          <figcaption>大学时期 · 现在</figcaption>
+        </figure>
+      </div>
+    </div>
+    <!--
+      主动搭话：默认关。
+      手机上她半夜自己发消息的观感比桌面挂件突兀得多，
+      所以不跟随桌面端那个默认开的开关。
+    -->
+    <label class="field">
+      <span>主动搭话</span>
+      <label class="switch-row">
+        <input type="checkbox" id="f-proactive" />
+        <span>挂机时她会自己开口</span>
+      </label>
+      <small>到点她会根据最近的聊天说一句，同时进聊天记录</small>
+    </label>
+    <label class="field" id="field-proactive-min">
+      <span>搭话间隔</span>
+      <select id="f-proactiveMin">
+        <option value="5">5 分钟</option>
+        <option value="10">10 分钟</option>
+        <option value="20">20 分钟</option>
+        <option value="40">40 分钟</option>
+        <option value="60">1 小时</option>
+      </select>
+      <small>实际间隔会在这个值上下浮动，避免像定时机器人</small>
+    </label>
+
+    <!-- 聊天背景：在「图鉴」里点开某张照片即可设为背景 / 加入轮换池 -->
+    <label class="field">
+      <span>聊天背景</span>
+      <select id="f-bgMode">
+        <option value="off">不设背景</option>
+        <option value="fixed">固定一张</option>
+        <option value="rotate">自动轮换</option>
+      </select>
+      <small>
+        在「图鉴」里点开一张照片 → 底部按钮可「设为背景」或「加入轮换」。
+        自动轮换会按下面的间隔在轮换池里依次换。
+      </small>
+    </label>
+    <label class="field" id="field-bgRotate">
+      <span>轮换间隔</span>
+      <select id="f-bgRotateMin">
+        <option value="5">5 分钟</option>
+        <option value="15">15 分钟</option>
+        <option value="30">30 分钟</option>
+        <option value="60">1 小时</option>
+        <option value="180">3 小时</option>
+        <option value="1440">1 天</option>
+      </select>
+      <small id="f-bgPool-info"></small>
+    </label>
+    <label class="field">
+      <span>背景透明度 <b id="f-bgOpacity-val">25%</b></span>
+      <input id="f-bgOpacity" type="range" min="5" max="85" step="5" />
+      <small>数值越小背景越淡、字越清楚</small>
     </label>
     <label class="field">
       <span>工作时间</span>
@@ -268,6 +351,145 @@
     <button class="btn primary" id="btn-reveal-ok">收下</button>
   </div>
 </div>
+
+<!--
+  详情弹层：看图鉴里的某一项（大图 / 视频）。
+
+  与上面的 `reveal` 分开：`reveal` 是「解锁瞬间」的一次性提示（带「收下」按钮），
+  这里是**随时回看**的浏览器 —— 可以多张翻页、设为背景、勾选进轮换池。
+  混成一个的话，「收下」这种一次性的语义会污染回看场景。
+-->
+<div class="viewer" id="viewer" hidden>
+  <div class="viewer-head">
+    <span class="viewer-title" id="viewer-title"></span>
+    <button class="icon-btn" id="btn-viewer-close" aria-label="关闭">✕</button>
+  </div>
+
+  <div class="viewer-stage" id="viewer-stage">
+    <!--
+      多张时左右各一个翻页按钮。单张时隐藏 ——
+      「只有一张却能看到箭头」会让人以为还有别的图没加载出来。
+    -->
+    <button class="viewer-nav prev" id="viewer-prev" aria-label="上一张">‹</button>
+    <img class="viewer-img" id="viewer-img" alt="" />
+    <video class="viewer-video" id="viewer-video" playsinline controls preload="metadata" hidden></video>
+    <button class="viewer-nav next" id="viewer-next" aria-label="下一张">›</button>
+  </div>
+
+  <p class="viewer-count" id="viewer-count"></p>
+  <p class="viewer-line" id="viewer-line"></p>
+  <div class="viewer-tools" id="viewer-tools">
+    <button class="btn" id="btn-viewer-bg">设为背景</button>
+    <button class="btn" id="btn-viewer-pool">加入轮换</button>
+  </div>
+</div>
+
+<!--
+  「她」的全屏页 —— 桌宠的手机版。
+
+  这里替代了原来顶部那条 pet-strip（现在已从聊天页移除）：
+  大立绘 + 亲密度 + 点她说话 + 换装入口。
+
+  为什么做成独立全屏页而不是继续挤在顶部：
+  立绘是主角，56×70 的小图看不出细节；亲密度和换装也塞不下。
+  做成页面之后，聊天页顶部变干净，消息流能多显示出几行。
+-->
+<section class="petpage" id="petpage" hidden>
+  <!--
+    背景层：铺满整页的场景照（书桌 / 玄关 / 地铁 / 便利店）。
+    分成「图」和「遮罩」两层 —— 遮罩单独一个元素而不是给图加滤镜，
+    这样调暗只改一个 rgba 值，不用碰图片本身。
+    `aria-hidden`：纯装饰，读屏软件不需要念。
+  -->
+  <div class="petpage-bg" id="petpage-bg" aria-hidden="true"></div>
+  <div class="petpage-bg-dim" id="petpage-bg-dim" aria-hidden="true"></div>
+  <!--
+    顶部信息栏：日期 + 时间 + 离周末几天 + 打卡。
+    全部**本地可算**，不依赖网络 —— 打开就立刻有内容，
+    不会出现「那一栏空着」的加载态。
+  -->
+  <header class="petpage-info">
+    <div class="pinfo-left">
+      <p class="pinfo-date" id="pinfo-date">—</p>
+      <p class="pinfo-sub" id="pinfo-weekend"></p>
+    </div>
+    <div class="pinfo-mid">
+      <p class="pinfo-clock" id="pinfo-clock">--:--</p>
+    </div>
+    <div class="pinfo-right">
+      <button class="checkin-btn" id="btn-checkin">打卡</button>
+      <p class="pinfo-days" id="pinfo-days"></p>
+    </div>
+    <!-- 次要操作收进这里（换背景 / 让她说句话） -->
+    <button class="pinfo-more" id="btn-petpage-more" aria-label="更多">⋯</button>
+  </header>
+
+  <!--
+    状态区：她此刻在做什么、穿的哪套、收集进度。
+    紧跟在信息栏下方 —— 「外面的世界」在上、「她此刻的状态」在下，层级顺。
+  -->
+  <!--
+    状态胶囊：她在做什么 / 穿的哪套 / 收集进度。
+    做成**一个带底色的胶囊**而不是两行裸文字 ——
+    裸文字直接压在模糊背景上很零散，而且和背景的明暗撞色时读不清。
+  -->
+  <div class="petpage-status" id="petpage-status">
+    <p class="pstat-line" id="petpage-doing">…</p>
+    <p class="pstat-sub" id="petpage-meta"></p>
+  </div>
+
+  <!-- 立绘舞台：点图即互动，气泡浮在上方 -->
+  <div class="petpage-stage" id="petpage-stage">
+    <div class="petpage-bubble" id="petpage-bubble" hidden></div>
+    <!--
+      飘心/星光的容器。
+      点击反馈用它而不是换立绘 —— 换立绘会把「她穿的那套」也换掉，
+      等于让换装失去意义。飘心是叠加层，不碰底图。
+      由 JS 往里塞临时节点，动画结束自己移除。
+    -->
+    <div class="petpage-fx" id="petpage-fx" aria-hidden="true"></div>
+
+    <!-- 长按会连续触发，用 touch-action 阻止原生的长按选中/放大 -->
+    <img class="petpage-pet" id="petpage-pet" alt="Yuki" draggable="false" />
+  </div>
+
+  <!-- 亲密度：从原来的 pet-strip 搬过来 -->
+  <div class="petpage-affinity" id="petpage-affinity">
+    <div class="affinity-bar"><i class="affinity-fill"></i></div>
+    <span class="affinity-text"></span>
+  </div>
+
+
+  <!--
+    底部三个按钮。
+    「聊天」取代了原来的右上角 ✕ —— 关闭按钮在语义上是「退出」，
+    但用户离开这一页的下一步几乎总是「回去聊天」，
+    所以做成并列的一个入口更像「跳转」而不是「关闭」。
+  -->
+  <!--
+    底部只留两个**主操作**。
+    之前四个按钮平分一行：「让她说句话」5 个字、其它 2 个字，
+    宽度却差不多，既挤又主次不分。次要操作收进右上角的 ⋯ 菜单。
+  -->
+  <div class="petpage-actions">
+    <button class="btn" id="btn-petpage-chat">聊天</button>
+    <button class="btn" id="btn-petpage-wardrobe">换装</button>
+  </div>
+
+  <!--
+    次要操作菜单：从右上角 ⋯ 展开。
+    用**浮层菜单**而不是把按钮塞进底部 —— 底部空间是稀缺的，
+    而「换背景」「让她说句话」都不是高频操作。
+  -->
+  <div class="petpage-menu" id="petpage-menu" hidden>
+    <button class="pmenu-item" id="btn-petpage-say">
+      <span class="pmi-icon">💬</span><span>让她说句话</span>
+    </button>
+    <button class="pmenu-item" id="btn-petpage-bg">
+      <span class="pmi-icon">🖼</span><span>换个背景</span>
+    </button>
+  </div>
+</section>
 
 <script type="module" src="app.js"></script>
 </body>

@@ -7,8 +7,10 @@ import { dirname } from 'node:path'
 import { openStore } from './store.js'
 import { streamChat, pingChat, validateConfig, ChatError, completeOnce } from './chat.js'
 import { buildContent, validateImageDataUrl, checkImagesForModel } from '../shared/content.js'
-import { createGalleryRunner, galleryTotal, explainCandidates } from '../shared/gallery.js'
+import { GALLERY_KEYS, createGalleryRunner, galleryTotal, explainCandidates } from '../shared/gallery.js'
 import { OUTFIT_STORIES } from '../shared/outfitStories.js'
+import { buildPhotoMessages, photoPathsOf } from '../shared/photoMessage.js'
+import { PHOTO_STORIES } from '../shared/photoStories.js'
 import { VIDEO_STORIES } from '../shared/videoStories.js'
 import { fetchHolidayYear, isCacheFresh, HOLIDAY_CACHE_TTL_MS } from './holiday.js'
 import {
@@ -31,9 +33,14 @@ import {
   AFFINITY_GAIN,
   AFFINITY_LEVELS,
   AFFINITY_MAX_POINTS,
-  CHAT_AFFINITY_DAILY_CAP,
+  AFFINITY_DAILY_CAP,
+  AFFINITY_DECAY,
   CHATTER_SYSTEM_PROMPT,
+  DEFAULT_OUTFIT,
+  OUTFIT_SLUGS,
   affinityGain,
+  settleAffinity,
+  isUpsetting,
   affinityLevel,
   outfitForTime,
   recentDialogueMessages,
@@ -46,6 +53,10 @@ import {
  * @param {() => string} [deps.loadSelfPortrait] 返回她自己的参考图（data URL）。
  *   通过参数注入而不是在 service 里直接读文件：service 刻意不依赖 electron、
  *   也不假设自己的资源路径，让打包后的路径解析留给调用方（主进程）决定。
+ * @param {(kind:string, slug:string, relPath:string) => boolean} [deps.photoExists]
+ *   kind 是 'outfit' | 'photo'；relPath 已由 shared 按类目拼好
+ *   某张照片文件是否存在（relPath 由 shared 的 photoPathsOf 拼好）。
+ *   同样注入 —— 照片是分批生成的，缺的那些退回立绘。
  */
 export function createService(dbPath, deps = {}) {
   const store = openStore(dbPath)
@@ -200,14 +211,36 @@ export function createService(dbPath, deps = {}) {
     store.setMeta(scopedKey(base, sessionId), value)
   }
 
+  /**
+   * 读亲密度记录。
+   *
+   * ## 为什么不能用「白名单字段」的写法
+   *
+   * 这里原来是逐字段列举的（只列 5 个旧字段）。加了
+   * `gainDay`/`gainToday`/`lastActive`/`decaySettledDays` 之后
+   * **写进去读不出来** —— 存的是新对象，`readAffinity` 按旧字段
+   * 拼一个新对象，新字段在读取层就被丢了。
+   *
+   * 症状极隐蔽：`points` 正常涨（那个字段在白名单里），
+   * 只有每日额度恒为 0 —— 表现为「额度封顶形同虚设」。
+   *
+   * 现在改成**透传全部字段 + 只对数值做钳制**：
+   * 存储层不该知道业务字段有哪些，那是 `settleAffinity` 的事。
+   */
   function readAffinity(sessionId = currentSessionId()) {
-    const data = readScoped('affinity', null, sessionId)
+    const data = readScoped('affinity', null, sessionId) ?? {}
     return {
-      points: Math.max(0, Number(data?.points) || 0),
-      lastDay: data?.lastDay ?? null,
-      streakDays: Number(data?.streakDays) || 0,
-      chatDay: data?.chatDay ?? null,
-      chatToday: Math.max(0, Number(data?.chatToday) || 0),
+      ...data,
+      points: Math.max(0, Number(data.points) || 0),
+      lastDay: data.lastDay ?? null,
+      streakDays: Number(data.streakDays) || 0,
+      /* 旧字段保留（老数据的会话还在用），新字段原样带出 */
+      chatDay: data.chatDay ?? null,
+      chatToday: Math.max(0, Number(data.chatToday) || 0),
+      gainDay: data.gainDay ?? null,
+      gainToday: Math.max(0, Number(data.gainToday) || 0),
+      lastActive: data.lastActive ?? null,
+      decaySettledDays: Number(data.decaySettledDays) || 0,
     }
   }
 
@@ -218,7 +251,16 @@ export function createService(dbPath, deps = {}) {
       points: data.points,
       lastDay: data.lastDay,
       streakDays: data.streakDays,
-      chatToday: data.chatDay === today ? data.chatToday : 0,
+      /*
+       * 当日已用额度。
+       *
+       * 这里要**同时兼容新旧字段**：`gainDay/gainToday` 是现在用的，
+       * `chatDay/chatToday` 是「只封聊天」时代的旧字段。
+       * 只读新字段的话，升级当天的额度会凭空多出来一截
+       * （那天早先的聊天没被计入新计数器）。
+       */
+      gainToday:
+        (data.gainDay === today ? data.gainToday : data.chatDay === today ? data.chatToday : 0) || 0,
       max: AFFINITY_MAX_POINTS,
       isMax: data.points >= AFFINITY_MAX_POINTS,
       /** 前端要按会话显示，带上 id 才知道这份是谁的 */
@@ -232,7 +274,7 @@ export function createService(dbPath, deps = {}) {
    * @param {number} delta 想加的点数
    * @param {Date} now
    * @param {{ kind?: 'chat'|'interaction', silent?: boolean, sessionId?: string }} [opts]
-   *   kind='chat' 的得分受 `CHAT_AFFINITY_DAILY_CAP` 约束，
+   *   得分受当日总额度（`AFFINITY_DAILY_CAP`）约束，
    *   避免一口气聊几十条就把关系刷满。
    */
   function addAffinity(delta, now = new Date(), opts = {}) {
@@ -240,7 +282,18 @@ export function createService(dbPath, deps = {}) {
     const sid = opts.sessionId ?? currentSessionId()
     const cur = readAffinity(sid)
     const today = toDateKey(now)
-    const gain = affinityGain(cur, delta, today, { chat: opts.kind === 'chat' })
+
+    /*
+     * 加、扣、每日额度、久未互动衰减**全走 shared 的 settleAffinity** ——
+     * 与手机端同一套规则。两端各写一遍时改规则容易漏一处，
+     * 表现为「电脑上掉了 3 点、手机上只掉 1 点」，用户没法理解。
+     */
+    const settled = settleAffinity(cur, {
+      today,
+      delta,
+      upsetting: opts.upsetting === true,
+    })
+    const gain = settled.gained
 
     let streakDays = cur.streakDays
     if (cur.lastDay !== today) {
@@ -250,22 +303,17 @@ export function createService(dbPath, deps = {}) {
       streakDays = cur.lastDay === toDateKey(y) ? cur.streakDays + 1 : 1
     }
 
-    const chatToday = opts.kind === 'chat'
-      ? (cur.chatDay === today ? cur.chatToday : 0) + gain
-      : cur.chatDay === today ? cur.chatToday : 0
-
     const next = {
-      points: Math.min(AFFINITY_MAX_POINTS, cur.points + gain),
-      lastDay: today,
+      ...cur,
+      ...settled,
       streakDays,
-      chatDay: today,
-      chatToday,
+      lastDay: today,
     }
     writeScoped('affinity', next, sid)
 
-    /* 无进展（已满级 / 聊天配额用完）就不用广播了，省得前端白刷一次 */
+    /* 无进展（已满级 / 配额用完 / 没扣没加）就不用广播，省得前端白刷一次 */
     const seen = getAffinity(now, sid)
-    if (gain > 0 || !opts.silent) emit('affinity', seen)
+    if (gain > 0 || settled.lost > 0 || !opts.silent) emit('affinity', seen)
     return seen
   }
 
@@ -317,11 +365,6 @@ export function createService(dbPath, deps = {}) {
    * 每个键都会再按会话加前缀（见 scopedKey）：**每个会话是独立的她**，
    * 图鉴进度不跨会话共享。
    */
-  const GALLERY_KEYS = {
-    outfit: { list: 'unlockedOutfits', mem: 'outfitMemories' },
-    video: { list: 'unlockedVideos', mem: 'videoMemories' },
-  }
-
   function listUnlocked(kind, sessionId = currentSessionId()) {
     const k = GALLERY_KEYS[kind]
     if (!k) return []
@@ -358,6 +401,17 @@ export function createService(dbPath, deps = {}) {
   function gallerySnapshot(sessionId = currentSessionId()) {
     /* 读之前先补齐初始内容，老会话也能拿到 */
     seedSessionIfNeeded(sessionId)
+    /*
+     * 该类目下该 slug 实际存在的照片路径。
+     * 生活照与服饰照片的命名空间不同，交给 shared 的 photoPathsOf 分派。
+     * 视频没有照片（它是封面），返回空数组。
+     */
+    const existsFor = (kind, slug) => {
+      if (kind === 'video') return []
+      const exists = deps.photoExists
+      return photoPathsOf(kind, slug).filter((p) => (exists ? exists(kind, slug, p) : false))
+    }
+
     const build = (kind, table) => {
       const unlocked = listUnlocked(kind, sessionId)
       const mem = listMemories(kind, sessionId)
@@ -378,6 +432,13 @@ export function createService(dbPath, deps = {}) {
           /* 解锁时她说的那句（记忆）；未解锁时为空 */
           line: mem[slug]?.line ?? '',
           at: mem[slug]?.at ?? null,
+          /*
+           * 这一项**实际存在的照片**（相对路径，按序号）。
+           * 前端要拿它显示真图、以及「设为背景 / 加入轮换」——
+           * 不给的话前端只能靠拼路径猜，而照片是分批生成的，
+           * 猜出来的多半是裂图。
+           */
+          photos: existsFor(kind, slug),
         })),
       }
     }
@@ -385,13 +446,14 @@ export function createService(dbPath, deps = {}) {
       sessionId,
       outfit: build('outfit', OUTFIT_STORIES),
       video: build('video', VIDEO_STORIES),
+      photo: build('photo', PHOTO_STORIES),
     }
   }
 
   /**
    * 建会话并补上「初始就该有」的内容。
    *
-   * `casual` 的解锁条件是 minPoints=0（「初始就有」），但条件解锁只在
+   * `DEFAULT_OUTFIT` 的解锁条件是 minPoints=0（「初始就有」），但条件解锁只在
    * 聊天时跑 —— 不主动补的话新会话图鉴全黑，用户会以为坏了。
    *
    * 注意 `ensureChatSession` 在**已有会话**时直接返回，不走这里：
@@ -414,12 +476,12 @@ export function createService(dbPath, deps = {}) {
     if (!sessionId) return
     try {
       const unlocked = listUnlocked('outfit', sessionId)
-      if (unlocked.includes('casual')) return
+      if (unlocked.includes(DEFAULT_OUTFIT)) return
       unlockItem(
         'outfit',
-        'casual',
-        OUTFIT_STORIES.casual?.story ?? '',
-        OUTFIT_STORIES.casual?.title ?? '便服',
+        DEFAULT_OUTFIT,
+        OUTFIT_STORIES[DEFAULT_OUTFIT]?.story ?? '',
+        OUTFIT_STORIES[DEFAULT_OUTFIT]?.title ?? '常服',
         sessionId,
       )
     } catch {
@@ -434,10 +496,11 @@ export function createService(dbPath, deps = {}) {
       writeScoped(k.mem, {}, sessionId)
     }
     /* 顺手把老全局键也清掉，否则下一个会话会把它当「可迁移的历史」领走 */
-    store.setMeta('unlockedOutfits', null)
-    store.setMeta('outfitMemories', null)
-    store.setMeta('unlockedVideos', null)
-    store.setMeta('videoMemories', null)
+    /* 直接从键名表生成，加类目时不用再改这里 */
+    for (const k of Object.values(GALLERY_KEYS)) {
+      store.setMeta(k.list, null)
+      store.setMeta(k.mem, null)
+    }
   }
 
   /**
@@ -492,7 +555,12 @@ export function createService(dbPath, deps = {}) {
     currentOutfit: () => {
       const sid = lastGallerySession ?? currentSessionId()
       const st = settingsForSession(sid)
-      if (st.outfitMode === 'fixed' && st.outfitSlug) return st.outfitSlug
+      /*
+       * 固定模式要**校验 slug 仍在服饰表里**：
+       * 素材换代后老用户的设置里可能留着已删除的 slug（如 `casual`），
+       * 直接用会让她在提示词里「穿着不存在的一套衣服」。
+       */
+      if (st.outfitMode === 'fixed' && OUTFIT_SLUGS.includes(st.outfitSlug)) return st.outfitSlug
       return outfitForTime(new Date(), listUnlocked('outfit', sid))
     },
   })
@@ -516,6 +584,66 @@ export function createService(dbPath, deps = {}) {
   }
 
   /**
+   * 把解锁到的照片插进聊天记录 —— **配文一条、每张照片一条**。
+   *
+   * ## 为什么拆成多条
+   *
+   * 早先是一条消息塞 N 张图 + 配文，看起来是一坨。
+   * 真实聊天里连拍是**一张一条**发过来的，配文常在最前面 ——
+   * 拆开之后观感对得上（渲染层还会给每条之间加一点延迟，
+   * 见 `buildPhotoMessages` 的 `delayMs`）。
+   *
+   * ## 顺序不能靠 `Date.now()`
+   *
+   * 多条连续落库很可能落在**同一毫秒**，而列表按 `createdAt` 排 ——
+   * 并列时顺序不保证。所以这里取一次基准时间，
+   * 按 `buildPhotoMessages` 给的 `offsetMs` 逐条递增传入。
+   *
+   * ## 哪些类目进对话
+   *
+   * 只有服饰照片（`outfit`）和生活照（`photo`）—— 视频有自己的播放器，
+   * 不进聊天记录。
+   *
+   * 为什么照片缺失时不插消息：没有图的话这条消息只剩一句配文，
+   * 读起来像她突然说了句没头没尾的话，反而更奇怪。
+   * 弹窗那边会退回立绘展示，聊天记录保持干净。
+   */
+  function appendUnlockPhoto(sessionId, unlocked) {
+    try {
+      const kind = unlocked?.kind
+      if (kind !== 'outfit' && kind !== 'photo') return
+      const slug = unlocked.slug
+      if (!slug) return
+
+      /*
+       * 候选路径由 shared 按类目分派（两类命名空间不同）。
+       * 存在性由 deps.photoExists 判 —— 主进程是文件系统，手机端是图片探测。
+       */
+      const exists = deps.photoExists
+      const paths = photoPathsOf(kind, slug).filter((p) => (exists ? exists(kind, slug, p) : false))
+      if (!paths.length) return
+
+      /*
+       * 配文优先级：模型给的 `line`（贴合这轮对话）>
+       * 故事表里的固定文案 > 空（空则不出配文那条）。
+       */
+      const story = kind === 'photo' ? PHOTO_STORIES[slug]?.title : OUTFIT_STORIES[slug]?.story
+      const parts = buildPhotoMessages(unlocked.line || story || '', paths)
+
+      const base = Date.now()
+      for (const part of parts) {
+        const msg = store.addMessage(sessionId, 'assistant', part.content, {
+          createdAt: base + part.offsetMs,
+        })
+        emit('chat', { type: 'message', sessionId, message: msg })
+      }
+    } catch (err) {
+      /* 插图失败不该影响解锁本身 —— 弹窗已经弹出来了 */
+      console.warn(`[desk-pet] 解锁照片插入失败：${err?.message ?? err}`)
+    }
+  }
+
+  /**
    * 重置亲密度。
    *
    * 必须写**当前会话的键** —— 早先这里还在写全局 `affinity`，
@@ -526,7 +654,21 @@ export function createService(dbPath, deps = {}) {
    * 「可迁移的历史进度」领走，一开局就有分。
    */
   function resetAffinity(sessionId = currentSessionId()) {
-    const blank = { points: 0, lastDay: null, streakDays: 0, chatDay: null, chatToday: 0 }
+    /*
+     * 空记录要带上**全部**在用字段。
+     * 之前只写了 `chatDay/chatToday`（旧名），漏了新的
+     * `gainDay/gainToday` —— 重置后读额度会得到 undefined，
+     * 表现为「重置完当天还能再加满 60 点」。
+     */
+    const blank = {
+      points: 0,
+      lastDay: null,
+      streakDays: 0,
+      gainDay: null,
+      gainToday: 0,
+      lastActive: null,
+      decaySettledDays: 0,
+    }
     writeScoped('affinity', blank, sessionId)
     store.setMeta('affinity', null)
     const next = getAffinity(new Date(), sessionId)
@@ -550,7 +692,7 @@ export function createService(dbPath, deps = {}) {
    *
    * **但 `settings` 字段必须是「当前活跃会话的」**：
    * 人设/穿着是逐会话的，广播全局值会把刚写进会话 A 的覆盖掉 ——
-   * 别的窗口收到 state 后又把 casual-red 冲回 casual，
+   * 别的窗口收到 state 后又把 casual-red 冲回 jk，
    * 表现成「对话窗换装点了，立绘窗没反应」。
    * 这是那个 bug 的最后一环。
    */
@@ -799,8 +941,15 @@ export function createService(dbPath, deps = {}) {
      * 漏了就会静默写到「最近更新的会话」而不是目标会话。
      * 提成显式位置参数后，忘传至少能在签名上被看出来。
      */
-    addAffinity: (delta, opts, sessionId) =>
-      addAffinity(delta, new Date(), sessionId ? { ...opts, sessionId } : opts),
+    /*
+     * 公开的 addAffinity。
+     *
+     * 第三个参数是 `now`（可选）—— 冒烟测试要跨天验证额度重置，
+     * 不传的话时间永远是「现在」，测出来的是「同一天连续加」。
+     * 原来这里写死 `new Date()`，测试传的日期被当成 opts 静默忽略。
+     */
+    addAffinity: (delta, opts, sessionId, now) =>
+      addAffinity(delta, now ?? new Date(), sessionId ? { ...opts, sessionId } : opts),
     resetAffinity,
 
     /* ---------- 人设（内置 + 自定义） ---------- */
@@ -1070,12 +1219,15 @@ export function createService(dbPath, deps = {}) {
 
       /*
        * 聊天记亲密度 —— 对话是处关系的主要途径，比摸头值钱。
-       * 受当日聊天配额约束（见 affinityGain），所以这里只报「想加多少」。
+       * 受当日总额度约束（见 AFFINITY_DAILY_CAP），所以这里只报「想加多少」。
+       *
+       * 同时判断这轮是否**惹她生气了**：说重话要扣分，
+       * 否则「说错话」除了回复语气之外没有任何代价。
        */
       const affinityAfterMessage = addAffinity(
         AFFINITY_GAIN.chatMessage,
         new Date(),
-        { kind: 'chat', silent: true, sessionId: sid },
+        { kind: 'chat', silent: true, sessionId: sid, upsetting: isUpsetting(text) },
       )
       emit('affinity', affinityAfterMessage)
 
@@ -1123,7 +1275,18 @@ export function createService(dbPath, deps = {}) {
         } catch {
           unlocked = null
         }
-        if (unlocked) emit('gallery-unlock', unlocked)
+        if (unlocked) {
+          /*
+           * 解锁装扮时，还要让照片**作为一条真实消息进聊天记录** ——
+           * 用户往上翻能重新看到，而不是只在弹窗里闪一下。
+           *
+           * 顺序：先落库、再广播。广播出去时消息已在库里，
+           * 前端收到广播去重读会话就能一起拿到，不会出现
+           * 「弹窗里有了但聊天记录里没有」的中间态。
+           */
+          appendUnlockPhoto(sid, unlocked)
+          emit('gallery-unlock', unlocked)
+        }
 
         emit('chat-done', { sessionId: sid, requestId, ok: true, message: msg, unlocked })
         return { ok: true, sessionId: sid, message: msg, unlocked }
@@ -1164,7 +1327,10 @@ export function createService(dbPath, deps = {}) {
         levels: AFFINITY_LEVELS,
         max: AFFINITY_MAX_POINTS,
         gain: AFFINITY_GAIN,
-        chatDailyCap: CHAT_AFFINITY_DAILY_CAP,
+        /* 每日额度：所有来源合计（不再是「只封聊天」） */
+        dailyCap: AFFINITY_DAILY_CAP,
+        /* 衰减规则：前端要拿它说明「多久不理她会掉分」 */
+        decay: AFFINITY_DECAY,
       },
       version: '0.1.0',
     }),

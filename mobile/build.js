@@ -29,7 +29,7 @@ const DIST = join(ROOT, 'dist-mobile')
  * 手机端没有桌宠，用不到。少一个文件就少一份首屏下载。
  * （将来手机端要加亲密度之类的功能，再把它加回来即可。）
  */
-const MODULES = ['content.js', 'moyu.js', 'interactions.js', 'outfitStories.js', 'videoStories.js', 'gallery.js']
+const MODULES = ['content.js', 'moyu.js', 'interactions.js', 'outfitStories.js', 'videoStories.js', 'photoStories.js', 'photoMessage.js', 'chatBackground.js', 'tapLines.js', 'chatter.js', 'dayInfo.js', 'holidays.js', 'gallery.js']
 
 /* 需要一起打包进产物的手机端文件 */
 const APP_FILES = [
@@ -41,7 +41,7 @@ const APP_FILES = [
   'sw.js',
   'manifest.webmanifest',
   /*
-   * yuki-avatar.png 不在这里 —— 它是 prepare-yuki.js 的产物，
+   * yuki-avatar.png 不在这里 —— 它是 install-pet-assets.js 的产物，
    * 从渲染端 public/ 复制（见下面「头像」一段）。
    * 早先它是 mobile/ 下的一份手工副本，结果改了生成逻辑后
    * 产物里还是旧图（用户实测：左上角头像没变）。副本会和真相源脱节。
@@ -102,6 +102,20 @@ if (appDeploy === appSrc) {
 }
 
 /*
+ * storage.js 同样要改写 —— 它引用了 shared/gallery.js 的键名表。
+ *
+ * 这是同一个坑的第三次：前两次是 app.js 和 chat.js。
+ * 规律很清楚 —— **任何引用 shared 的 mobile 源文件都必须进这张清单**，
+ * 漏一个就整个应用加载失败（界面在、无报错、一行不跑）。
+ * 下面的构建后自检会兜住这类遗漏。
+ */
+const storageSrc = readFileSync(join(HERE, 'storage.js'), 'utf8')
+const storageDeploy = storageSrc.replace(/from '\.\.\/src\/shared\//g, "from './vendor/")
+if (storageDeploy === storageSrc) {
+  console.warn('⚠ storage.js 里没有找到 ../src/shared/ 引用，路径改写可能已失效')
+}
+
+/*
  * 给立绘 URL 注入版本串。
  *
  * 立绘是静态资源却没有内容 hash，浏览器会长期缓存 ——
@@ -140,13 +154,24 @@ if (appDeploy === beforeVer) {
 rmSync(DIST, { recursive: true, force: true })
 mkdirSync(DIST, { recursive: true })
 
+/*
+ * 改写过的文件直接写内容（不能先 copy 再覆盖，容易漏）；
+ * 其余原样复制。
+ */
+const REWRITTEN = {
+  'chat.js': () => chatDeploy,
+  'app.js': () => appDeploy,
+  'storage.js': () => storageDeploy,
+}
+
 for (const f of APP_FILES) {
   const src = join(HERE, f)
   if (!existsSync(src)) {
     console.warn(`⚠ 跳过缺失文件: ${f}`)
     continue
   }
-  copyFileSync(src, join(DIST, f))
+  if (REWRITTEN[f]) writeFileSync(join(DIST, f), REWRITTEN[f](), 'utf8')
+  else copyFileSync(src, join(DIST, f))
 }
 /*
  * index.html / manifest 注入资源版本串。
@@ -186,7 +211,7 @@ console.log(`✓ 打包 ${outfits.length} 张服饰立绘 → outfits/ (版本 $
 /*
  * 头像：**从渲染端 public/ 复制**，不在 mobile/ 下留副本。
  *
- * 它是 prepare-yuki.js 生成的（取 heart 那张的头部特写），
+ * 它是 install-pet-assets.js 生成的（取 heart 那张的头部特写），
  * 真相源在 src/renderer/public/yuki-avatar.png。
  * 之前 mobile/ 下有一份手工副本，改生成逻辑后没同步，
  * 产物里一直是旧图 —— 这类「两份文件各自维护」的坑必须消灭掉。
@@ -209,6 +234,77 @@ const actionFiles = readdirSync(OUTFIT_SRC).filter(
 mkdirSync(join(DIST, 'poses'), { recursive: true })
 for (const f of actionFiles) copyFileSync(join(OUTFIT_SRC, f), join(DIST, 'poses', f))
 console.log(`✓ 打包 ${actionFiles.length} 张动作立绘 → poses/`)
+
+/*
+ * 自拍照片：解锁装扮时弹出的「她发来的照片」。
+ *
+ * 预缓存：每张约 200-400KB，24 张合计约 7MB —— 偏大。
+ * 但它们**按需加载**（解锁到那一套才显示），且解锁后
+ * 浏览器会自然缓存，所以不放进 SW 的预缓存清单，
+ * 否则首次安装要白等好几秒。
+ */
+const PHOTO_SRC = join(OUTFIT_SRC, 'photos')
+let photos = []
+if (existsSync(PHOTO_SRC)) {
+  photos = readdirSync(PHOTO_SRC).filter((f) => /^yuki-photo-[a-z0-9-]+\.png$/.test(f)).sort()
+  mkdirSync(join(DIST, 'photos'), { recursive: true })
+  for (const f of photos) copyFileSync(join(PHOTO_SRC, f), join(DIST, 'photos', f))
+  console.log(`✓ 打包 ${photos.length} 张自拍照片 → photos/`)
+}
+
+/*
+ * 生活照（`photos/life/`）—— 不绑装扮的日常照片。
+ *
+ * 单独一个子目录：命名空间和服饰照片不同（生活照是 `gNN-N.png`），
+ * 混在 `photos/` 根下会和「装扮 slug」看混。
+ * 早先这里打的是独立的「聊天背景图」目录，但那个类目只有一张占位图、
+ * 也没素材 —— 现在背景直接用她发过的照片，不需要单独目录了。
+ *
+ * **不预缓存**：和服饰照片同理，按需加载即可（一张 500KB 上下）。
+ */
+const LIFE_SRC = join(PHOTO_SRC, 'life')
+let lifePhotos = []
+if (existsSync(LIFE_SRC)) {
+  lifePhotos = readdirSync(LIFE_SRC).filter((f) => /^g\d{2}-\d+\.png$/.test(f)).sort()
+  mkdirSync(join(DIST, 'photos', 'life'), { recursive: true })
+  for (const f of lifePhotos) copyFileSync(join(LIFE_SRC, f), join(DIST, 'photos', 'life', f))
+  console.log(`✓ 打包 ${lifePhotos.length} 张生活照 → photos/life/`)
+}
+
+/*
+ * 角色设定图（高中 / 大学）。
+ *
+ * 真相源在 `src/renderer/public/character/`。手机端设置页同样要看，
+ * 所以一起进产物 —— 两张共约 400KB，相对立绘可以忽略。
+ */
+const PROFILE_SRC = join(OUTFIT_SRC, 'character')
+let profiles = []
+if (existsSync(PROFILE_SRC)) {
+  profiles = readdirSync(PROFILE_SRC).filter((f) => /^yuki-profile-\d+-[a-z]+\.png$/.test(f)).sort()
+  mkdirSync(join(DIST, 'character'), { recursive: true })
+  for (const f of profiles) copyFileSync(join(PROFILE_SRC, f), join(DIST, 'character', f))
+  console.log(`✓ 打包 ${profiles.length} 张角色设定图 → character/`)
+} else {
+  console.warn('⚠ 找不到 src/renderer/public/character/，产物将缺少角色设定图')
+}
+
+/*
+ * 「她」页的背景图（场景空镜：书桌 / 玄关 / 地铁 / 便利店）。
+ *
+ * 真相源在 `src/renderer/public/bg/`。四张共约 1.2MB —— 不小，
+ * 但它们是**立绘页的底图**，打开那一页就要看到，没法按需加载
+ * （没有背景会让整页只有渐变，观感差很多）。
+ */
+const BG_SRC = join(OUTFIT_SRC, 'bg')
+let petBgs = []
+if (existsSync(BG_SRC)) {
+  petBgs = readdirSync(BG_SRC).filter((f) => /^[a-z]+\.png$/.test(f)).sort()
+  mkdirSync(join(DIST, 'bg'), { recursive: true })
+  for (const f of petBgs) copyFileSync(join(BG_SRC, f), join(DIST, 'bg', f))
+  console.log(`✓ 打包 ${petBgs.length} 张立绘页背景 → bg/`)
+} else {
+  console.warn('⚠ 找不到 src/renderer/public/bg/，立绘页将没有背景图')
+}
 
 /*
  * 视频资源：从渲染端 public/videos/ 复制到产物 videos/。
@@ -240,18 +336,44 @@ const poseEntries = actionFiles.map((f) => `  './poses/${f}',`).join('\n')
  * 封面图很小（约 60KB/张），可以一起预缓存，让图鉴秒开。
  */
 const videoPosters = videos.filter((f) => f.endsWith('.jpg')).map((f) => `  './videos/${f}',`).join('\n')
+/* 设定图很小（两张共约 400KB），直接预缓存 —— 设置页离线也要能看 */
+const profileEntries = profiles.map((f) => `  './character/${f}',`).join('\n')
 let swDeploy = swSrc
   .replace(/__CACHE_VER__/g, OUTFIT_VER)
   .replace('  __OUTFIT_FILES__', outfitEntries)
   .replace('  __POSE_FILES__', poseEntries)
+  .replace('  __PROFILE_FILES__', profileEntries)
   .replace('  __VIDEO_POSTERS__', videoPosters)
 if (swDeploy === swSrc) {
   console.warn('⚠ sw.js 里没有找到占位符，缓存版本不会更新')
 }
 writeFileSync(join(DIST, 'sw.js'), swDeploy, 'utf8')
-console.log(`✓ 注入 Service Worker 版本 ${OUTFIT_VER} + ${outfits.length} 张立绘预缓存`)
+console.log(`✓ 注入 Service Worker 版本 ${OUTFIT_VER} + ${outfits.length} 张服饰 / ${actionFiles.length} 张动作 / ${profiles.length} 张设定图预缓存`)
 
 console.log(`✓ 打包 ${MODULES.length} 个 shared 模块 → vendor/`)
+
+/*
+ * 构建后自检：产物里**不能残留 `../src/` 这类源码路径**。
+ *
+ * 这个坑踩过三次（app.js / chat.js / storage.js）。症状极具迷惑性：
+ * 界面渲染正常、控制台不报 JS 错，但模块图加载失败、整个应用一行不跑。
+ * 与其靠人记得往 REWRITTEN 里加文件，不如构建时直接扫一遍。
+ */
+{
+  const offenders = []
+  for (const f of readdirSync(DIST)) {
+    if (!f.endsWith('.js')) continue
+    if (f === 'sw.js') continue
+    const txt = readFileSync(join(DIST, f), 'utf8')
+    if (/from '\.\.\/src\//.test(txt)) offenders.push(f)
+  }
+  if (offenders.length) {
+    console.error(`✗ 产物里有源码路径引用（部署后必然 404）: ${offenders.join(', ')}`)
+    console.error('  把对应文件加进 build.js 的 REWRITTEN 里做路径改写。')
+    process.exit(1)
+  }
+  console.log('✓ 产物无源码路径残留')
+}
 console.log(`\n✓ 构建完成 → ${DIST}`)
 console.log('  把这个目录整体上传到任意静态托管即可（GitHub Pages / Vercel / 自己的服务器）')
 console.log('  注意：必须是 https，否则浏览器不允许「添加到主屏幕」')

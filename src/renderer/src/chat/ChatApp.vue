@@ -33,6 +33,8 @@ import {
   DEFAULT_OUTFIT,
 } from '@shared/interactions.js'
 import { checkImagesForModel } from '@shared/content.js'
+import { photoPathsOf } from '@shared/photoMessage.js'
+import { PHOTO_SLUGS } from '@shared/photoStories.js'
 
 const input = ref('')
 /*
@@ -43,6 +45,52 @@ const input = ref('')
  * 不该再弹上一次的。
  */
 const unlock = computed(() => state.lastUnlock ?? null)
+
+/*
+ * 解锁装扮时优先显示**自拍照片**（「她发来的照片」的观感），
+ * 没生成过照片的 slug 退回立绘。
+ *
+ * 探测方式：预加载一次，成功才记进 availablePhotos。
+ * 不写死清单是因为照片会分批补，清单要跟着改；而 404 会被浏览器
+ * 缓存住，探测成本极低。
+ */
+const availablePhotos = ref(new Set())
+function probePhotos() {
+  /*
+   * 探两类照片：服饰照片 + 生活照。
+   * 存路径而不是 slug —— 一套装扮可能有多张，生活照也是每组多张。
+   */
+  const paths = [
+    ...OUTFITS.flatMap((o) => photoPathsOf('outfit', o.slug)),
+    ...PHOTO_SLUGS.flatMap((g) => photoPathsOf('photo', g)),
+  ]
+  const found = new Set()
+  let pending = paths.length
+  if (!pending) return
+  for (const rel of paths) {
+    const img = new Image()
+    const done = () => {
+      if (--pending === 0) availablePhotos.value = found
+    }
+    img.onload = () => {
+      found.add(rel)
+      done()
+    }
+    img.onerror = done
+    img.src = rel
+  }
+}
+onMounted(probePhotos)
+
+/** 解锁弹窗该显示哪张图：有照片用第 1 张，没有退立绘 */
+const unlockImgSrc = computed(() => {
+  const u = unlock.value
+  if (!u) return ''
+  /* 按类目分派路径 —— 生活照没有立绘可退，取不到就留空 */
+  const first = photoPathsOf(u.kind, u.slug).find((rel) => availablePhotos.value.has(rel))
+  if (first) return first
+  return u.kind === 'photo' ? '' : `yuki-outfit-${u.slug}.png`
+})
 function closeUnlock() {
   consumeUnlock()
 }
@@ -651,12 +699,7 @@ watch(messages, scrollToBottom, { deep: true })
     <div v-if="unlock" class="unlock-mask" @click.self="closeUnlock">
       <div class="unlock-card">
         <p class="unlock-badge">{{ unlock.kind === 'video' ? '🎬 解锁新视频' : '✨ 解锁新装扮' }}</p>
-        <img
-          v-if="unlock.kind === 'outfit'"
-          class="unlock-img"
-          :src="`yuki-outfit-${unlock.slug}.png`"
-          :alt="unlock.title"
-        />
+        <img v-if="unlock.kind === 'outfit'" class="unlock-img" :src="unlockImgSrc" :alt="unlock.title" />
         <video
           v-else
           class="unlock-video"
@@ -1285,12 +1328,21 @@ watch(messages, scrollToBottom, { deep: true })
   gap: 5px;
   margin-bottom: 5px;
 }
+/* 同时给 max-width/max-height、不设 aspect-ratio：
+   照片有 3:4 和 4:3 两种，写死比例会把其中一种压变形 */
 .bubble-images img {
-  max-width: 170px;
-  max-height: 170px;
+  max-width: 240px;
+  max-height: 240px;
   border-radius: 9px;
   border: 1px solid rgba(0, 0, 0, 0.1);
   cursor: zoom-in;
+}
+/* 多张（连拍）时缩小并排，避免叠起来占满一屏 */
+.bubble-images:has(> img:nth-child(2)) { flex-wrap: nowrap; }
+.bubble-images:has(> img:nth-child(2)) img {
+  max-width: 150px;
+  max-height: 200px;
+  min-width: 0;
 }
 
 /* 点开大图 */

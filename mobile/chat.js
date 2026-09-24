@@ -27,7 +27,7 @@ import {
   buildRouteOptions,
 } from '../src/shared/content.js'
 import { createGalleryRunner } from '../src/shared/gallery.js'
-import { AFFINITY_GAIN, affinityGain, affinityLevel, outfitForTime } from '../src/shared/interactions.js'
+import { AFFINITY_GAIN, affinityLevel, settleAffinity, isUpsetting, outfitForTime } from '../src/shared/interactions.js'
 import * as db from './storage.js'
 
 /* ---------- 配置 ---------- */
@@ -244,10 +244,17 @@ export async function sendMessage({ settings, sessionId, text, images = [], onDe
 
   const assistantMsg = await db.addMessage(sid, 'assistant', full, { model })
 
-  /* 一轮问答完成：记亲密度（用户消息 + 一轮结束，和桌面端口径一致） */
+  /*
+   * 一轮问答完成：记亲密度（用户消息 + 一轮结束，和桌面端口径一致）。
+   *
+   * 同时判断这轮用户**是否惹她生气了** —— 说重话要扣分，
+   * 否则「说错话」除了这一轮的回复语气之外没有任何代价，
+   * 关系好坏的差别就没了。
+   */
   try {
-    await bumpAffinity('chatMessage')
-    await bumpAffinity('chatRound')
+    const upsetting = isUpsetting(text)
+    await bumpAffinity('chatMessage', undefined, { upsetting })
+    await bumpAffinity('chatRound', undefined, { upsetting: false })
   } catch {
     /* 亲密度记不上不该影响对话 */
   }
@@ -260,7 +267,7 @@ export async function sendMessage({ settings, sessionId, text, images = [], onDe
   try {
     /*
      * 手机端没有桌面端那套亲密度，用「已聊条数」当进度代理：
-     * 聊得越多，条件类故事越容易解锁（casual 是初始装扮，立即给）。
+     * 聊得越多，条件类故事越容易解锁（jk 是初始装扮，立即给）。
      */
     const msgCount = await db.countMessages(sid)
     unlocked = await checkAnyUnlock({
@@ -278,29 +285,40 @@ export async function sendMessage({ settings, sessionId, text, images = [], onDe
 /**
  * 记一笔亲密度。
  *
- * 直接用 shared 的 affinityGain —— 它带「上限 + 聊天日上限」双重约束，
+ * 直接用 shared 的 settleAffinity —— 它带「上限 + 每日总额度 + 衰减」三重约束，
  * 防止一口气刷满。手机端自己实现一套的话，两端等级进度会对不上。
  *
  * @param {'chatMessage'|'chatRound'|'daily'} kind
  * @returns {Promise<object|null>} 更新后的亲密度（用于即时刷新 UI）
  */
-export async function bumpAffinity(kind = 'chatMessage', now = new Date()) {
+/**
+ * 结算一次亲密度变化。
+ *
+ * 加、扣、每日额度、久未互动衰减**全部走 shared 的 `settleAffinity`** ——
+ * 两端各写一遍的话，改规则时漏一处就会出现
+ * 「手机上掉了 3 点、电脑上只掉 1 点」，用户没法理解。
+ *
+ * @param {string} kind AFFINITY_GAIN 的键（chatMessage / chatRound / click / …）
+ * @param {Date}   now
+ * @param {object} [opts]
+ * @param {boolean} [opts.upsetting] 这轮用户是否惹她生气了
+ */
+export async function bumpAffinity(kind = 'chatMessage', now = new Date(), { upsetting = false } = {}) {
   const today = toDateKey(now)
   const cur = await db.getAffinity()
-  const isChat = kind !== 'daily'
-  const gain = affinityGain(cur, AFFINITY_GAIN[kind] ?? 0, today, { chat: isChat })
-  if (!gain) {
-    /* 到顶或当日聊天已封顶：仍要把日期推进，否则明天算不出新的一天 */
-    return { ...cur, lastDay: today }
-  }
-  const next = {
+
+  const next = settleAffinity(cur, {
+    today,
+    delta: AFFINITY_GAIN[kind] ?? 0,
+    upsetting,
+  })
+
+  return db.setAffinity({
     ...cur,
-    points: (cur.points ?? 0) + gain,
+    ...next,
+    /* `lastDay` 是旧字段（摸鱼统计在用），保留推进 */
     lastDay: today,
-    chatDay: isChat ? today : cur.chatDay,
-    chatToday: isChat ? (cur.chatDay === today ? (cur.chatToday ?? 0) + gain : gain) : cur.chatToday,
-  }
-  return db.setAffinity(next)
+  })
 }
 
 /** 读当前亲密度（含等级、下一级还差多少） */
@@ -359,7 +377,7 @@ const galleryRunner = createGalleryRunner({
   isReady: async () => (await configStatus(currentSettings)).ready,
   /*
    * 手机端没有桌面端那套亲密度历史，用「已聊条数」当进度代理。
-   * 条件类故事（如 casual 初始就有）靠它判定。
+   * 条件类故事（如 jk 初始就有）靠它判定。
    */
   points: () => affinityPoints,
   /*
@@ -398,10 +416,6 @@ export async function checkAnyUnlock({ settings, recentText, points = 0, now = n
   currentUnlockedOutfits = await db.listUnlockedOutfits()
   return galleryRunner.checkAny({ recentText, now })
 }
-
-/** 兼容旧调用点：只要装扮 */
-export const checkStoryUnlock = (args) =>
-  checkAnyUnlock(args).then((hit) => (hit?.kind === 'outfit' ? hit : null))
 
 
 /** 取当前会话 id（判断故事时用最近对话） */

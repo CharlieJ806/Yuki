@@ -331,10 +331,81 @@ export function initBridge() {
         /* 流式占位在真正落库消息到达时清掉，避免重复显示 */
         store.chat.streaming = false
         store.chat.streamText = ''
-        if (!store.chat.messages.some((m) => m.id === message.id)) store.chat.messages.push(message)
+        if (!store.chat.messages.some((m) => m.id === message.id)) enqueueMessage(message)
       }
     }
   })
+}
+
+/* ---------- 照片消息的「逐条出现」队列 ---------- */
+
+/*
+ * 一次解锁会落**多条**消息（配文一条、每张照片一条），主进程是
+ * 一口气全部发过来的。直接 push 会瞬间全冒出来，不像她一张张发。
+ *
+ * 所以在这里排队：消息仍按 `createdAt` 顺序进数组，但**进数组的时刻**
+ * 按相邻两条 `createdAt` 的差值递延 —— 差值正是落库时按连拍节奏
+ * 算好的 `offsetMs`（见 `buildPhotoMessages`）。
+ * 这样不需要给消息加额外字段，也不改变数据本身，只是控制了「出现时机」。
+ *
+ * 只对**间隔很小**的相邻消息递延：正常对话两条消息可能隔几分钟，
+ * 那种情况必须立刻显示（否则她会「迟到」几分钟才回话）。
+ */
+const STAGGER_MAX_MS = 3000 /* 相邻两条 createdAt 差超过这个数，视为普通对话，不递延 */
+
+let pendingQueue = []
+let pendingTimer = null
+
+function enqueueMessage(message) {
+  pendingQueue.push(message)
+  /*
+   * 队列按 createdAt 排序 —— 消息从 IPC 来，顺序有保证，
+   * 但延迟插队后仍以时间戳为准更稳。
+   */
+  pendingQueue.sort((a, b) => (a.createdAt ?? 0) - (b.createdAt ?? 0))
+  pumpQueue(0)
+}
+
+function pumpQueue(extraDelay) {
+  if (pendingTimer) {
+    clearTimeout(pendingTimer)
+    pendingTimer = null
+  }
+  const step = () => {
+    pendingTimer = null
+    if (!pendingQueue.length) return
+
+    const next = pendingQueue[0]
+    const last = store.chat.messages[store.chat.messages.length - 1]
+    const gap = last ? (next.createdAt ?? 0) - (last.createdAt ?? 0) : 0
+    /*
+     * gap <= 0：乱序或同毫秒（不该发生，落库已保证递增）→ 立即出。
+     * gap >  STAGGER_MAX_MS：普通对话 → 立即出。
+     * 其余：按 gap 递延。
+     */
+    const wait = gap > 0 && gap <= STAGGER_MAX_MS ? gap : 0
+
+    if (wait > 0) {
+      pendingTimer = window.setTimeout(step, wait)
+      return
+    }
+    pendingQueue.shift()
+    if (!store.chat.messages.some((m) => m.id === next.id)) store.chat.messages.push(next)
+    /* 出队一条后立刻看下一条（它可能与这条很近，需要继续递延） */
+    if (pendingQueue.length) pumpQueue(1)
+  }
+
+  if (extraDelay > 0) pendingTimer = window.setTimeout(step, extraDelay)
+  else step()
+}
+
+/** 切换会话时清空队列 —— 旧会话的照片不该出现在新会话里 */
+export function resetPhotoQueue() {
+  pendingQueue = []
+  if (pendingTimer) {
+    clearTimeout(pendingTimer)
+    pendingTimer = null
+  }
 }
 
 /* ---------- 对话 ---------- */
@@ -372,6 +443,8 @@ export async function ensureChatSession() {
 export async function openChatSession(id) {
   const data = await call('读取对话失败', () => backend.chatLoad?.(id), null)
   if (!data) return null
+  /* 切会话时丢掉还没播完的照片队列 —— 全量重读已经把消息取回来了 */
+  resetPhotoQueue()
   store.chat.sessionId = id
   store.chat.messages = data.messages ?? []
   store.chat.streaming = false
@@ -386,6 +459,7 @@ export async function loadChatMessages(id) {
 export async function newChatSession() {
   const s = await call('创建会话失败', () => backend.chatCreateSession?.('新的对话'), null)
   if (s) {
+    resetPhotoQueue()
     store.chat.sessionId = s.id
     store.chat.messages = []
     store.chat.streaming = false

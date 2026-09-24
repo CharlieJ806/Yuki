@@ -5,7 +5,7 @@
 import { app, BrowserWindow, Menu, Tray, ipcMain, nativeImage, screen } from 'electron'
 import { fileURLToPath } from 'node:url'
 import { dirname, join } from 'node:path'
-import { mkdirSync, readFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync } from 'node:fs'
 import { createService } from './service.js'
 import { SELF_PORTRAIT_SLUG } from '../shared/content.js'
 
@@ -715,6 +715,32 @@ function loadSelfPortrait() {
   }
 }
 
+/**
+ * 某套装扮有没有配好的自拍照片。
+ *
+ * 照片是**分批生成**的，缺的那些解锁时退回立绘 ——
+ * 所以这里只做存在性判断，不保证一定有。
+ *
+ * 与 loadSelfPortrait 同理放在主进程：资源路径解析依赖打包方式，
+ * service 刻意不感知。用同步 existsSync（一次对话最多调一次，代价可忽略）。
+ *
+ * @param {string} slug 装扮 slug
+ */
+function photoExists(kind, slug, relPath) {
+  try {
+    /*
+     * relPath 由 shared 的 photoPathsOf 按类目拼好 ——
+     * 直接用，不再自己拼名字，免得两处命名规则漂移。
+     * 形如 `photos/yuki-photo-jk-2.png`（服饰照片）
+     * 或 `photos/life/g08-1.png`（生活照）。
+     */
+    const rel = relPath || `photos/yuki-photo-${slug}.png`
+    return existsSync(join(ROOT, 'dist', rel))
+  } catch {
+    return false
+  }
+}
+
 /* ---------- 生命周期 ---------- */
 
 const gotLock = app.requestSingleInstanceLock()
@@ -726,7 +752,7 @@ if (!gotLock) {
   app.whenReady().then(() => {
     const userData = app.getPath('userData')
     mkdirSync(userData, { recursive: true })
-    service = createService(join(userData, 'desk-pet.db'), { loadSelfPortrait })
+    service = createService(join(userData, 'desk-pet.db'), { loadSelfPortrait, photoExists })
     /* 节假日表异步拉取，失败不影响启动（没有表就退回只看周末） */
     service
       .ensureHolidays()

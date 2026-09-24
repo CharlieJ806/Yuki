@@ -528,12 +528,22 @@ function rotateIdlePose() {
   const next = pickLine(usable, lastPose, Math.random)
   lastPose = next
   idlePose.value = next
-  /* 维持 20-50 秒再换，太频繁会显得躁动 */
-  const hold = 20_000 + Math.random() * 30_000
+  /*
+   * 展示 20-40 秒，然后**空一到两轮**再换下一张。
+   *
+   * 节奏：一轮 = 展示 + 间隔，约 60-100 秒换一次。
+   * 之前是「展示 20-50 秒 + 间隔 30-90 秒」，平均 45 秒就变一次，
+   * 用户反馈「切换太快、来不及看清」。
+   *
+   * 空档期间回落到「当前穿着」立绘（idlePose 置空），
+   * 这样她不是一直在换姿势，而是「做事 → 站好 → 再做下一件事」，
+   * 比连续切图更像真人。
+   */
+  const hold = 20_000 + Math.random() * 20_000
   if (idlePoseTimer) window.clearTimeout(idlePoseTimer)
   idlePoseTimer = window.setTimeout(() => {
     idlePose.value = ''
-    idlePoseTimer = window.setTimeout(rotateIdlePose, 30_000 + Math.random() * 60_000)
+    idlePoseTimer = window.setTimeout(rotateIdlePose, 40_000 + Math.random() * 60_000)
   }, hold)
 }
 
