@@ -2,7 +2,7 @@
  * Tauri 运行时的数据层 —— openStore（src/main/store.js）的同 surface 异步实现。
  *
  * 与 node:sqlite 版的差异只有一处：SQL 经 IPC 交给 Rust 的 rusqlite 桥
- * （db_exec / db_select / db_txn_*，见 src-tauri/src/db.rs）执行，
+ * （db_exec / db_select，见 src-tauri/src/db.rs）执行，
  * 连接与事务状态都在 Rust 侧。schema 的单一来源是 src/shared/db-schema.js，
  * 首次使用前由本模块建表；行映射与 store.js 共用 store-maps.js，防行为漂移。
  *

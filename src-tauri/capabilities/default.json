@@ -6,8 +6,7 @@
     "pet",
     "panel",
     "chat",
-    "chatpet",
-    "spike"
+    "chatpet"
   ],
   "permissions": [
     "core:default",

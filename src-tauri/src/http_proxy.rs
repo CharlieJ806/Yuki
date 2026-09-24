@@ -7,7 +7,7 @@
 //! 三个命令：
 //! - `http_fetch_stream` 流式：按完整行（'\n'）切分后逐条推送。字节安全的关键
 //!   在 UTF-8 的性质——多字节序列不含 0x0A，按字节找 '\n' 永远不会切断中文
-//!   （spike 验证过 `Channel<Vec<u8>>` 原始字节路径在 WebView2 不送达，
+//!   （迁移验证确认 `Channel<Vec<u8>>` 原始字节路径在 WebView2 不送达，
 //!   文本行是定型方案，JS 侧 TextEncoder 转回字节后 parseSSE 零改动）。
 //! - `http_fetch_once` 整包：非流式对话 / 节假日表 / 测试连接用。
 //! - `http_abort` 取消：id → 取消令牌，select 竞速让读循环立即退出。

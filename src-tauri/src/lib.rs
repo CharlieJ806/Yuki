@@ -5,7 +5,6 @@
 //! - `tray`     托盘图标/动态菜单/单击兜底/通知
 //! - `scale`    apply_pet_scale 唯一缩放路径 + pet:* 缩放 command
 //! - `position` 定位纯函数（cargo test 覆盖）
-//! - `spike`    迁移验证命令（回归页用）
 //! - `db`       rusqlite 桥（业务总线宿主专用）
 //! - `http_proxy` HTTP 流代理（webview fetch 的 CORS/UA 缺口）
 
@@ -13,7 +12,6 @@ mod db;
 mod http_proxy;
 mod position;
 mod scale;
-mod spike;
 mod tray;
 mod windows;
 
@@ -50,8 +48,6 @@ pub fn run() {
             app.manage(http_proxy::HttpPool::new());
             windows::create_pet(app.handle())?;
             tray::create(app.handle())?;
-            /* 迁移期回归验证窗 */
-            spike::create_window(app.handle())?;
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -72,16 +68,11 @@ pub fn run() {
             /* rusqlite 桥（仅业务总线宿主使用） */
             db::db_exec,
             db::db_select,
-            db::db_txn_begin,
-            db::db_txn_commit,
-            db::db_txn_rollback,
             tray::tray_update_snapshot,
             /* HTTP 流代理（webview fetch 的 CORS/UA 缺口） */
             http_proxy::http_fetch_stream,
             http_proxy::http_fetch_once,
             http_proxy::http_abort,
-            /* spike 验证命令（回归页） */
-            spike::http_stream,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")

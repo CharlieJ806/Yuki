@@ -47,7 +47,7 @@
   - desk 方法面：preload 56 方法在 shim 全部存在且通道一致（窗口类为 snake_case command）。
   - 审查发现并修复 1 个真实缺口：create_pet 未读持久化 petScale（Electron 会读），缩放后重启热区错位——已修并实测闭环（写 1.3 重启精确恢复 442×910 逻辑）。
 - **Phase 2 双视角逐行比对（2026-09-23）**：按业务数据层 / 外壳层+简化空间两个视角静态逐行比对，产出 `REVIEW_FINDINGS.md`：4 高 + 4 中 + 10 低 + 5 简化，已全部处置（20 修 / 2 记录为有意偏差 / 1 计划内）。要点：总线 15s 超时误伤流式对话、bus:ready 一次性广播导致后开窗口每次调用白等 20s（修后实测首调 35ms）、全窗销毁即整体退出击穿找回入口硬规则（改 RunEvent::ExitRequested 拦截，实测 Alt+F4 关桌宠应用存活、pet_quit 仍可退出）、WebView2 调试端口默认常开（收敛为 DESK_DEBUG_PORT env-only，spike 窗随之移入 Rust 创建）、Electron 壳补串行队列、补卡改单条多行 INSERT 消除事务卷入面、ShellState 冗余层删除等。Service.js 剥离 await/async 后词级 diff 共 166 片段全部为机械改造，无逻辑漂移。
-- **下一步**：双路线维护期——功能开发落在共享 JS 层，Tauri 壳层同步验证；可选收尾项：spike 验证窗清理、README/AGENTS 双路线章节改写、本文归档。切换前最后一轮人工复验清单见上。
+- **下一步**：双路线维护期——功能开发落在共享 JS 层，Tauri 壳层同步验证；可选收尾项：README/AGENTS 双路线章节改写、本文归档。spike 验证窗与无调用方的 db_txn 事务命令已清理。切换前最后一轮人工复验清单见上。
 - **复验方法**：仓库根 `npx tauri build --no-bundle`（exe 被旧进程占用时先 `taskkill //IM app.exe //F`）→ `DESK_DEBUG_PORT=9224 ./app.exe` 启动（调试端口默认关闭，H4 修复后必须显式设 env 才有 CDP）→ CDP 9224 断言（工具 `.tmp-yuki/cdp-act.mjs`；联调靶子 `node scripts/fake-llm.js 8788`，BaseURL 填 http://127.0.0.1:8788/v1，model 随意，127.0.0.1 免 Key）；Electron 回归 = `DESK_DEBUG_PORT=9223 npm run dev` + CDP 9223（同机勿双版本同时跑，共享 DB 有并发写风险）；Node 侧 `npm test` 必须全绿。
 - **本机事实**：无系统代理（需要时绑 `127.0.0.1:10808`）；dpr=200%；vite dev server 仅绑 IPv6 localhost；本机屏幕 2880×1800 物理 / 1440×900 逻辑。
 

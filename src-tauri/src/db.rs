@@ -6,9 +6,6 @@
 //! - Rust 不懂业务：只执行 JS 给来的 SQL。schema 的单一来源是
 //!   `src/shared/db-schema.js`，由 JS 侧建表；本模块只负责打开连接与 PRAGMA。
 //! - `Mutex<Connection>` 串行化：JS 宿主（pet 窗）单线程顺序调用，天然单写者。
-//! - 事务用显式的 begin/commit/rollback 三命令：补卡要「逐天查重再插入」，
-//!   语句依赖前一步查询结果，没法打包成一个批量语句。同一时刻只允许一个事务，
-//!   与 JS 侧的串行调用约定配对。
 //! - 传入参数仅支持标量（null/bool/数字/字符串）。业务层一律 JSON.stringify
 //!   后存 TEXT，对象参数到这里就是用法错误，直接报错暴露。
 
@@ -21,7 +18,6 @@ use serde_json::{Map, Value as Json};
 
 struct ConnState {
     conn: Connection,
-    in_txn: bool,
 }
 
 /// 可克隆的连接句柄；每个 command 克隆 Arc 进 spawn_blocking。
@@ -46,7 +42,7 @@ pub fn open_at(path: &Path) -> Result<Db, String> {
     /* 与 store.js（Electron/Node 版）完全一致的 PRAGMA */
     conn.execute_batch("PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON;")
         .map_err(|e| format!("设置 PRAGMA 失败: {e}"))?;
-    Ok(Db(Arc::new(Mutex::new(ConnState { conn, in_txn: false }))))
+    Ok(Db(Arc::new(Mutex::new(ConnState { conn }))))
 }
 
 /* ---------- JSON ↔ SQLite 值转换 ---------- */
@@ -123,35 +119,6 @@ impl Db {
         Ok(out)
     }
 
-    pub fn txn_begin(&self) -> Result<(), String> {
-        let mut st = self.0.lock().map_err(|_| "数据库连接锁中毒".to_string())?;
-        if st.in_txn {
-            return Err("已有进行中的事务（JS 侧应串行调用）".into());
-        }
-        st.conn.execute_batch("BEGIN").map_err(|e| e.to_string())?;
-        st.in_txn = true;
-        Ok(())
-    }
-
-    pub fn txn_commit(&self) -> Result<(), String> {
-        let mut st = self.0.lock().map_err(|_| "数据库连接锁中毒".to_string())?;
-        if !st.in_txn {
-            return Err("没有进行中的事务".into());
-        }
-        st.conn.execute_batch("COMMIT").map_err(|e| e.to_string())?;
-        st.in_txn = false;
-        Ok(())
-    }
-
-    /// 没有事务时静默成功（崩溃恢复语义）。
-    pub fn txn_rollback(&self) -> Result<(), String> {
-        let mut st = self.0.lock().map_err(|_| "数据库连接锁中毒".to_string())?;
-        if st.in_txn {
-            st.conn.execute_batch("ROLLBACK").map_err(|e| e.to_string())?;
-            st.in_txn = false;
-        }
-        Ok(())
-    }
 }
 
 /// `db:exec` —— 写语句（INSERT/UPDATE/DELETE/DDL/PRAGMA）。
@@ -170,33 +137,6 @@ pub async fn db_select(db: tauri::State<'_, Db>, sql: String, params: Option<Vec
     let db = db.inner().clone();
     let p = params_to_sql(params)?;
     tauri::async_runtime::spawn_blocking(move || db.select_raw(&sql, p))
-        .await
-        .map_err(|e| format!("执行任务失败: {e}"))?
-}
-
-/// `db:txnBegin` —— 开启事务（同一时刻只允许一个）。
-#[tauri::command]
-pub async fn db_txn_begin(db: tauri::State<'_, Db>) -> Result<(), String> {
-    let db = db.inner().clone();
-    tauri::async_runtime::spawn_blocking(move || db.txn_begin())
-        .await
-        .map_err(|e| format!("执行任务失败: {e}"))?
-}
-
-/// `db:txnCommit` —— 提交当前事务。
-#[tauri::command]
-pub async fn db_txn_commit(db: tauri::State<'_, Db>) -> Result<(), String> {
-    let db = db.inner().clone();
-    tauri::async_runtime::spawn_blocking(move || db.txn_commit())
-        .await
-        .map_err(|e| format!("执行任务失败: {e}"))?
-}
-
-/// `db:txnRollback` —— 回滚当前事务；没有事务时静默成功（崩溃恢复语义）。
-#[tauri::command]
-pub async fn db_txn_rollback(db: tauri::State<'_, Db>) -> Result<(), String> {
-    let db = db.inner().clone();
-    tauri::async_runtime::spawn_blocking(move || db.txn_rollback())
         .await
         .map_err(|e| format!("执行任务失败: {e}"))?
 }
@@ -277,27 +217,6 @@ mod tests {
         /* bool 参数按 Integer 落库 */
         let rows = db.select_raw("SELECT ?1 AS v", vec![json_to_sql(&json!(true)).unwrap()]).unwrap();
         assert_eq!(rows[0]["v"], json!(1));
-    }
-
-    #[test]
-    fn txn_commit_and_rollback() {
-        let db = temp_db();
-        db.exec_raw("CREATE TABLE t (v INTEGER)", vec![]).unwrap();
-        db.txn_begin().unwrap();
-        db.exec_raw("INSERT INTO t VALUES (1)", vec![]).unwrap();
-        db.txn_commit().unwrap();
-        assert_eq!(db.select_raw("SELECT COUNT(*) AS n FROM t", vec![]).unwrap()[0]["n"], json!(1));
-
-        db.txn_begin().unwrap();
-        db.exec_raw("INSERT INTO t VALUES (2)", vec![]).unwrap();
-        db.txn_rollback().unwrap();
-        assert_eq!(db.select_raw("SELECT COUNT(*) AS n FROM t", vec![]).unwrap()[0]["n"], json!(1));
-
-        /* 重复 begin 报错；无事务时 rollback 静默成功 */
-        assert!(db.txn_begin().is_ok());
-        assert!(db.txn_begin().is_err());
-        db.txn_rollback().unwrap();
-        assert!(db.txn_rollback().is_ok());
     }
 
     #[test]

@@ -2,7 +2,7 @@
  * Tauri 运行时的 HTTP transport —— 把 fetch 语义包到 Rust http 代理上
  * （TAURI_MIGRATION.md §2.2 决策 5，service-host 启动时 installTauriTransport()）。
  *
- * 流式形态是 spike 验证的定型：Rust 按 '\n' 切完整行（字节安全），经
+ * 流式形态经迁移验证定型：Rust 按 '\n' 切完整行（字节安全），经
  * Channel 推帧 → 这里把行转回字节流。parseSSE 与 chat-test 因此零改动。
  *
  * 帧协议（http_proxy.rs StreamFrame，status 必须先于数据行——chat.js 在消费
