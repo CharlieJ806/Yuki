@@ -867,10 +867,26 @@ onBeforeUnmount(() => {
           把手那部分 drag 区就被挖掉，拖拽失效（实测复现 + 逐条 CSS 二分确认）。
           所以把手单独占一行，排在被缩放前的容器里、桌宠正上方。
         -->
+        <!--
+          拖拽把手必须和 .pet **完全不重叠**。
+          Electron 文档原文：no-drag「reenables pointer events by excluding a
+          rectangular area from a draggable region」—— 它不是只标记自己那块，
+          而是从重叠的 drag 区域里**挖掉**一块矩形。
+          .pet 为了可点击设了 no-drag，只要把手和它有任何重叠，
+          把手那部分 drag 区就被挖掉，拖拽失效（实测复现 + 逐条 CSS 二分确认）。
+          所以把手单独占一行，排在被缩放前的容器里、桌宠正上方。
+
+          Tauri（WebView2）语义差异：data-tauri-drag-region 按「事件 target
+          自身」判定，且拖拽检测是 document 级 mousedown 监听 —— 所以
+          ① 把手内部三个装饰点用 pointer-events:none 穿透，保证 target
+             始终是把手本身（Electron 的 app-region 是子元素继承，无需处理）；
+          ② 把手上不能有任何 mousedown.stop —— 会阻断拖拽监听
+             （Electron 下该 stop 本来就是死代码：drag 区不派发 DOM 事件）。
+        -->
         <span
           class="pet-grip"
           title="按住这里拖动窗口"
-          @mousedown.stop
+          data-tauri-drag-region
           @click.stop
           @dblclick.stop
           @contextmenu.stop
@@ -1095,7 +1111,9 @@ onBeforeUnmount(() => {
   justify-content: center;
   gap: 3px;
   transition: background 0.16s ease;
-  /* 只有这一小块负责移动窗口 */
+  /* 只有这一小块负责移动窗口。双运行时注解：
+     -webkit-app-region 给 Electron（合成器级拖拽），
+     data-tauri-drag-region（模板上）给 Tauri（target 自身判定）。 */
   -webkit-app-region: drag;
   app-region: drag;
 }
@@ -1110,6 +1128,8 @@ onBeforeUnmount(() => {
   height: 3px;
   border-radius: 50%;
   background: rgba(255, 255, 255, 0.9);
+  /* Tauri 按 target 自身判定拖拽：装饰点必须穿透，否则点在点上拖不动 */
+  pointer-events: none;
 }
 .pet.dragging {
   cursor: grabbing;

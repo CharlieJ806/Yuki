@@ -12,95 +12,20 @@ import { randomUUID } from 'node:crypto'
 import { mkdirSync } from 'node:fs'
 import { dirname } from 'node:path'
 import { DEFAULT_SETTINGS } from '../shared/moyu.js'
-import { parseStoredContent, serializeContent } from '../shared/content.js'
+import { serializeContent } from '../shared/content.js'
+import { SCHEMA } from '../shared/db-schema.js'
+import {
+  mapCheckin,
+  mapMessage,
+  mapPersona,
+  mapSession,
+  safeParse,
+  streakFromKeys,
+  toKey,
+} from '../shared/bridge/store-maps.js'
 
 const require = createRequire(import.meta.url)
 const { DatabaseSync } = require('node:sqlite')
-
-const SCHEMA = `
-CREATE TABLE IF NOT EXISTS settings (
-  key       TEXT PRIMARY KEY,
-  value     TEXT NOT NULL,
-  updatedAt INTEGER NOT NULL,
-  syncState TEXT NOT NULL DEFAULT 'local'
-);
-
-CREATE TABLE IF NOT EXISTS checkins (
-  id        TEXT PRIMARY KEY,
-  dateKey   TEXT NOT NULL UNIQUE,
-  createdAt INTEGER NOT NULL,
-  note      TEXT,
-  updatedAt INTEGER NOT NULL,
-  deletedAt INTEGER,
-  syncState TEXT NOT NULL DEFAULT 'local'
-);
-CREATE INDEX IF NOT EXISTS idx_checkins_date ON checkins(dateKey);
-
-CREATE TABLE IF NOT EXISTS worklogs (
-  id        TEXT PRIMARY KEY,
-  dateKey   TEXT NOT NULL,
-  minutes   INTEGER NOT NULL,
-  kind      TEXT NOT NULL,
-  createdAt INTEGER NOT NULL,
-  updatedAt INTEGER NOT NULL,
-  deletedAt INTEGER,
-  syncState TEXT NOT NULL DEFAULT 'local'
-);
-CREATE INDEX IF NOT EXISTS idx_worklogs_date ON worklogs(dateKey);
-
-CREATE TABLE IF NOT EXISTS events (
-  id        TEXT PRIMARY KEY,
-  type      TEXT NOT NULL,
-  payload   TEXT,
-  createdAt INTEGER NOT NULL
-);
-CREATE INDEX IF NOT EXISTS idx_events_type ON events(type, createdAt);
-
-CREATE TABLE IF NOT EXISTS meta (
-  key   TEXT PRIMARY KEY,
-  value TEXT NOT NULL
-);
-
-/*
- * 自定义人设：内置人设写死在 CHAT_PERSONAS，这里只存用户自建的。
- * sortOrder 决定展示顺序，内置的排在前面。
- */
-CREATE TABLE IF NOT EXISTS personas (
-  id        TEXT PRIMARY KEY,
-  label     TEXT NOT NULL,
-  prompt    TEXT NOT NULL,
-  sortOrder INTEGER NOT NULL DEFAULT 0,
-  createdAt INTEGER NOT NULL,
-  updatedAt INTEGER NOT NULL,
-  deletedAt INTEGER,
-  syncState TEXT NOT NULL DEFAULT 'local'
-);
-
-CREATE TABLE IF NOT EXISTS chat_sessions (
-  id        TEXT PRIMARY KEY,
-  title     TEXT NOT NULL,
-  createdAt INTEGER NOT NULL,
-  updatedAt INTEGER NOT NULL,
-  deletedAt INTEGER,
-  syncState TEXT NOT NULL DEFAULT 'local'
-);
-CREATE INDEX IF NOT EXISTS idx_chat_sessions_updated ON chat_sessions(updatedAt DESC);
-
-CREATE TABLE IF NOT EXISTS chat_messages (
-  id        TEXT PRIMARY KEY,
-  sessionId TEXT NOT NULL,
-  role      TEXT NOT NULL,
-  content   TEXT NOT NULL,
-  model     TEXT,
-  error     INTEGER NOT NULL DEFAULT 0,
-  createdAt INTEGER NOT NULL,
-  updatedAt INTEGER NOT NULL,
-  deletedAt INTEGER,
-  syncState TEXT NOT NULL DEFAULT 'local',
-  FOREIGN KEY (sessionId) REFERENCES chat_sessions(id) ON DELETE CASCADE
-);
-CREATE INDEX IF NOT EXISTS idx_chat_messages_session ON chat_messages(sessionId, createdAt);
-`
 
 export function openStore(filePath) {
   if (filePath !== ':memory:') mkdirSync(dirname(filePath), { recursive: true })
@@ -221,31 +146,14 @@ export function openStore(filePath) {
    * 必须按**日历天**连推，但 `skip` 里的日子（休息日）不算断档也不计入 ——
    * 否则周五打了卡、周一一来「连续」就变成 1 天，用户会以为记录丢了。
    * 休息日由调用方（service 层）按节假日表算好传进来，store 不碰日历规则。
+   * 逐日推进的算法在 shared/bridge/store-maps.js（与 Tauri 桥接版共用）。
    *
    * @param {string} todayKey 'YYYY-MM-DD'
    * @param {(date: Date) => boolean} [isRest] 判断某天是否为休息日
    */
   function streak(todayKey, isRest = null) {
     const all = db.prepare('SELECT dateKey FROM checkins WHERE deletedAt IS NULL ORDER BY dateKey DESC').all()
-    const set = new Set(all.map((r) => r.dateKey))
-    if (set.size === 0) return 0
-    const cursor = new Date(`${todayKey}T00:00:00`)
-    /* 今天还没打卡不算断档，从昨天算起 */
-    if (!set.has(todayKey)) cursor.setDate(cursor.getDate() - 1)
-    let n = 0
-    /* 只回看有限天数：休息日可以连续很多天，但不能无限循环下去 */
-    for (let guard = 0; guard < 3660; guard++) {
-      const key = toKey(cursor)
-      if (set.has(key)) {
-        n++
-      } else if (isRest && isRest(cursor)) {
-        /* 休息日：跳过，既不计入也不断档 */
-      } else {
-        break
-      }
-      cursor.setDate(cursor.getDate() - 1)
-    }
-    return n
+    return streakFromKeys(all.map((r) => r.dateKey), todayKey, isRest)
   }
 
   /* ---------- worklogs ---------- */
@@ -526,61 +434,5 @@ export function openStore(filePath) {
     updatePersona,
     deletePersona,
     close: () => db.close(),
-  }
-}
-
-function mapPersona(row) {
-  return {
-    id: row.id,
-    label: row.label,
-    prompt: row.prompt,
-    sortOrder: Number(row.sortOrder) || 0,
-    createdAt: row.createdAt,
-    updatedAt: row.updatedAt,
-    custom: true,
-  }
-}
-
-function mapSession(row) {
-  return {
-    id: row.id,
-    title: row.title,
-    createdAt: row.createdAt,
-    updatedAt: row.updatedAt,
-  }
-}
-
-function mapMessage(row) {
-  return {
-    id: row.id,
-    sessionId: row.sessionId,
-    role: row.role,
-    content: parseStoredContent(row.content),
-    model: row.model ?? null,
-    error: Boolean(row.error),
-    createdAt: row.createdAt,
-  }
-}
-
-function mapCheckin(row) {
-  return {
-    id: row.id,
-    dateKey: row.dateKey,
-    createdAt: row.createdAt,
-    note: row.note,
-    updatedAt: row.updatedAt,
-  }
-}
-
-function toKey(date) {
-  const p = (n) => String(n).padStart(2, '0')
-  return `${date.getFullYear()}-${p(date.getMonth() + 1)}-${p(date.getDate())}`
-}
-
-function safeParse(text) {
-  try {
-    return JSON.parse(text)
-  } catch {
-    return null
   }
 }

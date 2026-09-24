@@ -81,20 +81,20 @@ function approx(label, actual, expected, tolerance = 0.01) {
 
 const dir = mkdtempSync(join(tmpdir(), 'desk-smoke-'))
 const dbPath = join(dir, 'test.db')
-let service = createService(dbPath)
+let service = createService(openStore(dbPath))
 
 try {
   /* ---------- 1. 默认设置 ---------- */
-  const settings = service.getSettings()
+  const settings = await service.getSettings()
   check('默认工作时间', [settings.workStart, settings.workEnd], ['08:30', '17:30'])
   check('默认月薪', settings.salary, 10000)
   check('默认月休方式', settings.restPattern, 'double')
 
   /* ---------- 2. 摸鱼收入换算 ---------- */
-  service.updateSettings({ salary: 21750, workStart: '09:00', workEnd: '18:00', dailyRestHours: 2, restPattern: 'double' })
+  await service.updateSettings({ salary: 21750, workStart: '09:00', workEnd: '18:00', dailyRestHours: 2, restPattern: 'double' })
   /* 2025-06-04 是周三，6 月双休 => 21 个工作日 */
   const afternoon = new Date(2025, 5, 4, 14, 0, 0)
-  const snap = todaySnapshot(service.getSettings(), afternoon)
+  const snap = todaySnapshot(await service.getSettings(), afternoon)
   check('本月工作日（2025-06 双休）', snap.workDaysInMonth, 21)
   approx('日薪 = 21750/21', snap.dailySalary, 21750 / 21)
   /* 09:00-18:00 在岗 540 分钟，扣 120 分钟休息 => 计薪 420 分钟 */
@@ -105,9 +105,9 @@ try {
   check('状态：摸鱼进行中', snap.statusKind, 'working')
 
   /* 尚未开工 / 已赚满 的边界 */
-  check('08:00 尚未开工', todaySnapshot(service.getSettings(), new Date(2025, 5, 4, 8, 0)).statusKind, 'before-work')
-  check('19:00 今日已赚满', todaySnapshot(service.getSettings(), new Date(2025, 5, 4, 19, 0)).statusKind, 'completed')
-  check('19:00 进度 100%', todaySnapshot(service.getSettings(), new Date(2025, 5, 4, 19, 0)).progressPercent, 100)
+  check('08:00 尚未开工', todaySnapshot(await service.getSettings(), new Date(2025, 5, 4, 8, 0)).statusKind, 'before-work')
+  check('19:00 今日已赚满', todaySnapshot(await service.getSettings(), new Date(2025, 5, 4, 19, 0)).statusKind, 'completed')
+  check('19:00 进度 100%', todaySnapshot(await service.getSettings(), new Date(2025, 5, 4, 19, 0)).progressPercent, 100)
 
   /*
    * 「还有多久下班」必须走墙上时钟口径，不能用计薪剩余。
@@ -116,51 +116,51 @@ try {
    *   墙上剩余 = 18:00 - 17:00 = 60 分钟
    * 两者差 13 分钟，用户会以为算错了。
    */
-  const at17 = todaySnapshot(service.getSettings(), new Date(2025, 5, 4, 17, 0))
+  const at17 = todaySnapshot(await service.getSettings(), new Date(2025, 5, 4, 17, 0))
   approx('17:00 计薪剩余', at17.remainingPaidMinutes, 420 - 480 * (420 / 540))
   check('17:00 墙上剩余 60 分钟', Math.round(at17.remainingWorkMinutes), 60)
   /* 未上班时，剩余应为整天在岗时长 */
-  check('08:00 剩余整天在岗', Math.round(todaySnapshot(service.getSettings(), new Date(2025, 5, 4, 8, 0)).remainingWorkMinutes), 540)
+  check('08:00 剩余整天在岗', Math.round(todaySnapshot(await service.getSettings(), new Date(2025, 5, 4, 8, 0)).remainingWorkMinutes), 540)
   /* 下班后归零，不出现负数 */
-  check('19:00 剩余归零', Math.round(todaySnapshot(service.getSettings(), new Date(2025, 5, 4, 19, 0)).remainingWorkMinutes), 0)
+  check('19:00 剩余归零', Math.round(todaySnapshot(await service.getSettings(), new Date(2025, 5, 4, 19, 0)).remainingWorkMinutes), 0)
   /* 正好到点下班也归零 */
-  check('18:00 整点归零', Math.round(todaySnapshot(service.getSettings(), new Date(2025, 5, 4, 18, 0)).remainingWorkMinutes), 0)
+  check('18:00 整点归零', Math.round(todaySnapshot(await service.getSettings(), new Date(2025, 5, 4, 18, 0)).remainingWorkMinutes), 0)
 
   /* 休息日：2025-06-07 是周六 */
-  const weekend = todaySnapshot(service.getSettings(), new Date(2025, 5, 7, 14, 0))
+  const weekend = todaySnapshot(await service.getSettings(), new Date(2025, 5, 7, 14, 0))
   check('周六状态', weekend.statusKind, 'rest-day')
   check('周六收入为 0', weekend.todayEarned, 0)
 
   /* ---------- 3. 单休 / 大小周 / 不定休 工作日数（2025-06：30 天，9 个周末日） ---------- */
-  service.updateSettings({ restPattern: 'single' })
-  check('单休本月工作日（2025-06）', todaySnapshot(service.getSettings(), afternoon).workDaysInMonth, 25)
-  service.updateSettings({ restPattern: 'alternate' })
-  check('大小周本月工作日（2025-06）', todaySnapshot(service.getSettings(), afternoon).workDaysInMonth, 23)
-  service.updateSettings({ restPattern: 'irregular', customRestDays: 4 })
-  check('不定休本月工作日（月休 4 天）', todaySnapshot(service.getSettings(), afternoon).workDaysInMonth, 26)
-  service.updateSettings({ restPattern: 'double' })
+  await service.updateSettings({ restPattern: 'single' })
+  check('单休本月工作日（2025-06）', todaySnapshot(await service.getSettings(), afternoon).workDaysInMonth, 25)
+  await service.updateSettings({ restPattern: 'alternate' })
+  check('大小周本月工作日（2025-06）', todaySnapshot(await service.getSettings(), afternoon).workDaysInMonth, 23)
+  await service.updateSettings({ restPattern: 'irregular', customRestDays: 4 })
+  check('不定休本月工作日（月休 4 天）', todaySnapshot(await service.getSettings(), afternoon).workDaysInMonth, 26)
+  await service.updateSettings({ restPattern: 'double' })
 
   /* 跨月稳定性：日薪必须随当月真实工作日数变化 */
   check('2025-01 双休工作日', workDaysInMonth({ restPattern: 'double' }, 2025, 1), 23)
   check('2025-02 双休工作日', workDaysInMonth({ restPattern: 'double' }, 2025, 2), 20)
 
   /* ---------- 4. 打卡 ---------- */
-  const before = service.getState(afternoon)
+  const before = await service.getState(afternoon)
   check('初始累计天数', before.days, 0)
   check('初始未打卡', before.checkedInToday, false)
 
-  const first = service.checkIn(afternoon)
+  const first = await service.checkIn(afternoon)
   check('首次打卡 created', first.created, true)
   check('打卡后累计天数', first.state.days, 1)
   check('打卡后已打卡', first.state.checkedInToday, true)
 
-  const second = service.checkIn(afternoon)
+  const second = await service.checkIn(afternoon)
   check('同日重复打卡幂等', second.created, false)
   check('重复打卡不增天数', second.state.days, 1)
 
   /* 昨天补一条，验证连续天数 */
-  service.checkIn(new Date(2025, 5, 3, 10, 0))
-  check('连续打卡天数', service.getState(afternoon).streak, 2)
+  await service.checkIn(new Date(2025, 5, 3, 10, 0))
+  check('连续打卡天数', (await await service.getState(afternoon)).streak, 2)
 
   /* ---------- 5. 等级 ---------- */
   check('0 天等级', levelOf(0).level.name, '职场萌新')
@@ -169,90 +169,90 @@ try {
   check('满级', levelOf(9999).isMaxLevel, true)
 
   /* ---------- 6. 补记摸鱼时长 ---------- */
-  service.logMoyu(45, afternoon)
-  check('补记时长累计', service.getState(afternoon).loggedMinutesToday, 45)
-  service.logMoyu(15, afternoon)
-  check('补记时长累加', service.getState(afternoon).loggedMinutesToday, 60)
+  await service.logMoyu(45, afternoon)
+  check('补记时长累计', (await await service.getState(afternoon)).loggedMinutesToday, 45)
+  await service.logMoyu(15, afternoon)
+  check('补记时长累加', (await await service.getState(afternoon)).loggedMinutesToday, 60)
 
   /* ---------- 7. 持久化（重开数据库） ---------- */
   const dateKey = toDateKey(afternoon)
-  service.close()
-  service = createService(dbPath)
-  const reopened = service.getState(afternoon)
+  await service.close()
+  service = createService(openStore(dbPath))
+  const reopened = await service.getState(afternoon)
   check('重启后设置仍在', reopened.settings.salary, 21750)
   check('重启后打卡仍在', reopened.checkedInToday, true)
   check('重启后累计天数', reopened.days, 2)
   check('重启后补记仍在', reopened.loggedMinutesToday, 60)
 
   /* ---------- 8. 同步记账 ---------- */
-  const pending = service.pendingChanges()
+  const pending = await service.pendingChanges()
   check('存在待同步记录', pending.checkins.length > 0 && pending.settings.length > 0, true)
-  service.markSynced({ checkins: pending.checkins.map((c) => c.id) })
-  check('标记后打卡无待同步', service.pendingChanges().checkins.length, 0)
+  await service.markSynced({ checkins: pending.checkins.map((c) => c.id) })
+  check('标记后打卡无待同步', (await await service.pendingChanges()).checkins.length, 0)
 
   /* ---------- 10. 未知设置键被忽略 ---------- */
-  service.updateSettings({ hackerKey: 'boom' })
-  check('未知键不写入', service.getSettings().hackerKey, undefined)
+  await service.updateSettings({ hackerKey: 'boom' })
+  check('未知键不写入', (await await service.getSettings()).hackerKey, undefined)
 
   /* ---------- 11. 对话：会话与消息 ---------- */
-  const session = service.ensureChatSession()
+  const session = await service.ensureChatSession()
   check('自动建会话', typeof session?.id === 'string' && session.id.length > 0, true)
-  check('ensure 幂等（仍只有一个）', service.listChatSessions().length, 1)
+  check('ensure 幂等（仍只有一个）', (await await service.listChatSessions()).length, 1)
 
-  const empty = service.loadChatSession(session.id)
+  const empty = await service.loadChatSession(session.id)
   check('新会话无消息', empty.messages.length, 0)
 
-  service.addChatMessage(session.id, 'user', '你好')
-  service.addChatMessage(session.id, 'assistant', '摸鱼快乐')
-  const loaded = service.loadChatSession(session.id)
+  await service.addChatMessage(session.id, 'user', '你好')
+  await service.addChatMessage(session.id, 'assistant', '摸鱼快乐')
+  const loaded = await service.loadChatSession(session.id)
   check('消息按时间正序', loaded.messages.map((m) => m.role), ['user', 'assistant'])
   check('消息内容正确', loaded.messages[0].content, '你好')
 
   /* 出错的消息不应进入上下文 */
-  const errMsg = service.addChatMessage(session.id, 'assistant', 'API Key 无效', { error: true })
+  const errMsg = await service.addChatMessage(session.id, 'assistant', 'API Key 无效', { error: true })
   check('错误消息标记 error', errMsg.error, true)
-  check('错误消息被排除出上下文', service.recentChatMessages(session.id, 10).length, 2)
+  check('错误消息被排除出上下文', (await await service.recentChatMessages(session.id, 10)).length, 2)
 
   /* 上下文窗口截断：只取最近 N 条且保持时间正序 */
-  for (let i = 0; i < 6; i++) service.addChatMessage(session.id, 'user', `第${i}条`)
-  const recent = service.recentChatMessages(session.id, 3)
+  for (let i = 0; i < 6; i++) await service.addChatMessage(session.id, 'user', `第${i}条`)
+  const recent = await service.recentChatMessages(session.id, 3)
   check('上下文按 limit 截断', recent.length, 3)
   check('截断后仍为正序（最后一条最新）', recent[2].content, '第5条')
 
   /* 会话管理 */
-  const s2 = service.createChatSession('第二个会话')
-  check('新建会话数', service.listChatSessions().length, 2)
-  check('新会话标题', service.renameChatSession(s2.id, '改过的标题').title, '改过的标题')
-  check('重命名截断到 60 字', service.renameChatSession(s2.id, 'x'.repeat(100)).title.length, 60)
-  check('空标题回退', service.renameChatSession(s2.id, '   ').title, '新的对话')
+  const s2 = await service.createChatSession('第二个会话')
+  check('新建会话数', (await await service.listChatSessions()).length, 2)
+  check('新会话标题', (await await service.renameChatSession(s2.id, '改过的标题')).title, '改过的标题')
+  check('重命名截断到 60 字', (await await service.renameChatSession(s2.id, 'x'.repeat(100))).title.length, 60)
+  check('空标题回退', (await await service.renameChatSession(s2.id, '   ')).title, '新的对话')
 
-  service.deleteChatSession(s2.id)
-  check('删除后会话数', service.listChatSessions().length, 1)
-  check('删除后消息一并软删', service.listChatMessages(s2.id).length, 0)
+  await service.deleteChatSession(s2.id)
+  check('删除后会话数', (await await service.listChatSessions()).length, 1)
+  check('删除后消息一并软删', (await await service.listChatMessages(s2.id)).length, 0)
 
   /* 持久化 */
-  service.close()
-  service = createService(dbPath)
-  check('重启后会话还在', service.listChatSessions().length >= 1, true)
-  const after = service.loadChatSession(session.id)
+  await service.close()
+  service = createService(openStore(dbPath))
+  check('重启后会话还在', (await await service.listChatSessions()).length >= 1, true)
+  const after = await service.loadChatSession(session.id)
   check('重启后消息还在', after.messages.length >= 8, true)
 
   /* ---------- 12. 对话配置校验 ---------- */
-  service.updateSettings({ chatBaseUrl: '', chatApiKey: '' })
-  check('空 BaseURL 不可用', service.chatStatus().ready, false)
-  service.updateSettings({ chatBaseUrl: 'https://api.deepseek.com', chatApiKey: '' })
-  check('缺 Key 不可用', service.chatStatus().ready, false)
-  check('缺 Key 提示准确', service.chatStatus().reason.includes('API Key'), true)
-  service.updateSettings({ chatBaseUrl: 'https://api.deepseek.com', chatApiKey: 'sk-test' })
-  check('配置完整可用', service.chatStatus().ready, true)
-  service.updateSettings({ chatBaseUrl: 'http://127.0.0.1:11434/v1', chatApiKey: '' })
-  check('本地地址免 Key', service.chatStatus().ready, true)
-  check('本地不需 Key 标记', service.chatStatus().needsApiKey, false)
+  await service.updateSettings({ chatBaseUrl: '', chatApiKey: '' })
+  check('空 BaseURL 不可用', (await await service.chatStatus()).ready, false)
+  await service.updateSettings({ chatBaseUrl: 'https://api.deepseek.com', chatApiKey: '' })
+  check('缺 Key 不可用', (await await service.chatStatus()).ready, false)
+  check('缺 Key 提示准确', (await await service.chatStatus()).reason.includes('API Key'), true)
+  await service.updateSettings({ chatBaseUrl: 'https://api.deepseek.com', chatApiKey: 'sk-test' })
+  check('配置完整可用', (await await service.chatStatus()).ready, true)
+  await service.updateSettings({ chatBaseUrl: 'http://127.0.0.1:11434/v1', chatApiKey: '' })
+  check('本地地址免 Key', (await await service.chatStatus()).ready, true)
+  check('本地不需 Key 标记', (await await service.chatStatus()).needsApiKey, false)
 
   /* ---------- 13. 全链路自检 ---------- */
   /* 指向一个必然连不上的地址：应逐项失败且不抛异常 */
-  service.updateSettings({ chatBaseUrl: 'http://127.0.0.1:9/v1', chatApiKey: '' })
-  const diag = await service.chatDiagnose()
+  await service.updateSettings({ chatBaseUrl: 'http://127.0.0.1:9/v1', chatApiKey: '' })
+  const diag = await await service.chatDiagnose()
   check('自检返回 ok=false', diag.ok, false)
   check('自检有步骤明细', Array.isArray(diag.steps) && diag.steps.length >= 4, true)
   check('前两步（本地校验）通过', diag.steps.slice(0, 3).every((s) => s.ok), true)
@@ -260,7 +260,7 @@ try {
   check('失败步骤带原因', diag.steps.find((s) => !s.ok).detail.length > 0, true)
 
   /* ---------- 14. 节假日 / 调休 ---------- */
-  service.updateSettings({ restPattern: 'double', salary: 21750 })
+  await service.updateSettings({ restPattern: 'double', salary: 21750 })
   {
     /* 手造一张表，避免测试依赖外网 */
     const table = {
@@ -269,35 +269,35 @@ try {
       '09-20': { isHoliday: false, isMakeup: true, name: '中秋节前补班' },
       '10-01': { isHoliday: true, isMakeup: false, name: '国庆节' },
     }
-    const S = (y, m, d) => todaySnapshot(service.getSettings(), new Date(y, m - 1, d, 14, 0), table)
+    const S = async (y, m, d) => todaySnapshot(await service.getSettings(), new Date(y, m - 1, d, 14, 0), table)
 
     /* 补班日：周日也要上班（这是修复前的 bug，会误判成休息） */
-    const makeup = S(2026, 9, 20)
+    const makeup = await S(2026, 9, 20)
     check('补班日不算休息', makeup.restDay, false)
     check('补班日状态为工作中', makeup.statusKind, 'working')
     check('补班日有收入', makeup.todayEarned > 0, true)
     check('补班日标记 isMakeupDay', makeup.isMakeupDay, true)
 
     /* 法定假日：工作日也要休息 */
-    const holiday = S(2026, 10, 1)
+    const holiday = await S(2026, 10, 1)
     check('法定假日算休息', holiday.restDay, true)
     check('法定假日状态为休息', holiday.statusKind, 'rest-day')
     check('法定假日收入为 0', holiday.todayEarned, 0)
     check('法定假日带节日名', holiday.holidayName, '国庆节')
 
     /* 普通周末不受影响 */
-    check('普通周六仍休息', S(2026, 9, 26).restDay, true)
+    check('普通周六仍休息', (await S(2026, 9, 26)).restDay, true)
     /* 普通工作日不受影响 */
-    check('普通工作日仍上班', S(2026, 9, 22).restDay, false)
+    check('普通工作日仍上班', (await S(2026, 9, 22)).restDay, false)
 
     /* 没有表时退回纯周末规则 */
-    const noTable = todaySnapshot(service.getSettings(), new Date(2026, 8, 20, 14, 0), null)
+    const noTable = todaySnapshot(await service.getSettings(), new Date(2026, 8, 20, 14, 0), null)
     check('无表时退回周末规则', noTable.restDay, true)
     check('无表时不带补班标记', noTable.isMakeupDay, false)
 
     /* 月度统计要跟着变：有表的 9 月多一个工作日 */
-    const withTable = workDaysInMonth(service.getSettings(), 2026, 9, table)
-    const without = workDaysInMonth(service.getSettings(), 2026, 9)
+    const withTable = workDaysInMonth(await service.getSettings(), 2026, 9, table)
+    const without = workDaysInMonth(await service.getSettings(), 2026, 9)
     check('补班使本月工作日 +1', withTable - without, 1)
   }
 
@@ -868,102 +868,102 @@ try {
     /* 手动互动不受聊天配额约束 */
     check('摸头不受聊天配额影响', affinityGain(capUsed, 2, '2026-09-21', { chatCap: CHAT_AFFINITY_DAILY_CAP }), 2)
 
-    const before = service.affinity().points
-    service.addAffinity(7)
-    check('亲密度累加', service.affinity().points, before + 7)
-    check('连续天数为 1', service.affinity().streakDays, 1)
-    check('getState 带亲密度', service.getState().affinity.points, before + 7)
+    const before = (await await service.affinity()).points
+    await service.addAffinity(7)
+    check('亲密度累加', (await await service.affinity()).points, before + 7)
+    check('连续天数为 1', (await await service.affinity()).streakDays, 1)
+    check('getState 带亲密度', (await await service.getState()).affinity.points, before + 7)
     /* 上限：到顶后继续互动不再涨，避免等级卡在最后一档还以为在涨 */
-    for (let i = 0; i < 400; i++) service.addAffinity(10)
-    check('亲密度封顶', service.affinity().points, AFFINITY_MAX_POINTS)
-    check('封顶后 isMax', service.affinity().isMax, true)
-    service.resetAffinity()
-    check('重置归零', service.affinity().points, 0)
-    check('重置清空聊天配额', service.affinity().chatToday, 0)
+    for (let i = 0; i < 400; i++) await service.addAffinity(10)
+    check('亲密度封顶', (await await service.affinity()).points, AFFINITY_MAX_POINTS)
+    check('封顶后 isMax', (await await service.affinity()).isMax, true)
+    await service.resetAffinity()
+    check('重置归零', (await await service.affinity()).points, 0)
+    check('重置清空聊天配额', (await await service.affinity()).chatToday, 0)
   }
 
   /* ---------- 16b. 聊天记亲密度 ---------- */
   {
-    service.resetAffinity()
+    await service.resetAffinity()
     /*
      * 对话是提升亲密度最主要的途径，必须真的落库。
      * 用假接口时会失败，所以只验证「记账」这一步本身。
      */
-    const before = service.affinity().points
-    const chatSession = service.ensureChatSession()
-    service.addChatMessage(chatSession.id, 'user', '在吗')
-    service.addAffinity(AFFINITY_GAIN.chatMessage, { kind: 'chat' })
-    check('聊天加分生效', service.affinity().points, before + AFFINITY_GAIN.chatMessage)
-    check('聊天计入当日配额', service.affinity().chatToday, AFFINITY_GAIN.chatMessage)
+    const before = (await await service.affinity()).points
+    const chatSession = await service.ensureChatSession()
+    await service.addChatMessage(chatSession.id, 'user', '在吗')
+    await service.addAffinity(AFFINITY_GAIN.chatMessage, { kind: 'chat' })
+    check('聊天加分生效', (await await service.affinity()).points, before + AFFINITY_GAIN.chatMessage)
+    check('聊天计入当日配额', (await await service.affinity()).chatToday, AFFINITY_GAIN.chatMessage)
 
     /* 配额用完后再聊不加分，但其他互动照常 */
-    service.addAffinity(CHAT_AFFINITY_DAILY_CAP * 10, { kind: 'chat' })
-    const capped = service.affinity().points
-    check('聊天配额封顶', service.affinity().chatToday, CHAT_AFFINITY_DAILY_CAP)
-    service.addAffinity(AFFINITY_GAIN.chatMessage, { kind: 'chat' })
-    check('配额用尽后聊天不加分', service.affinity().points, capped)
-    service.addAffinity(AFFINITY_GAIN.pet)
-    check('配额用尽后摸头仍加分', service.affinity().points, capped + AFFINITY_GAIN.pet)
+    await service.addAffinity(CHAT_AFFINITY_DAILY_CAP * 10, { kind: 'chat' })
+    const capped = (await await service.affinity()).points
+    check('聊天配额封顶', (await await service.affinity()).chatToday, CHAT_AFFINITY_DAILY_CAP)
+    await service.addAffinity(AFFINITY_GAIN.chatMessage, { kind: 'chat' })
+    check('配额用尽后聊天不加分', (await await service.affinity()).points, capped)
+    await service.addAffinity(AFFINITY_GAIN.pet)
+    check('配额用尽后摸头仍加分', (await await service.affinity()).points, capped + AFFINITY_GAIN.pet)
 
     /* meta 要下发规则，否则设置页只能写死文案 */
-    const meta = service.meta()
+    const meta = await service.meta()
     check('meta 带亲密度等级表', meta.affinity.levels.length, affinityLevel(0).level ? 5 : 0)
     check('meta 带聊天日上限', meta.affinity.chatDailyCap, CHAT_AFFINITY_DAILY_CAP)
     check('meta 带得分规则', meta.affinity.gain.chatRound, AFFINITY_GAIN.chatRound)
-    service.resetAffinity()
+    await service.resetAffinity()
   }
 
   /* ---------- 16c. 补卡 ---------- */
   {
-    service.resetAffinity()
+    await service.resetAffinity()
     const today = new Date(2026, 8, 21, 14, 0) // 2026-09-21 周一
-    service.updateSettings({ restPattern: 'double' })
+    await service.updateSettings({ restPattern: 'double' })
 
     /*
      * 没有表时只能按周末判工作日 —— 这是补卡口径的下限，
      * 有节假日表（下面第二个 case）时补班日/法定假日要正确区分。
      */
-    const noTable = service.previewBackfill('2026-09-14', new Date(2026, 8, 21, 14, 0))
+    const noTable = await service.previewBackfill('2026-09-14', new Date(2026, 8, 21, 14, 0))
     check('预览区间端点', [noTable.from, noTable.to], ['2026-09-14', '2026-09-21'])
     /* 9/14 周一 ~ 9/21 周一：去掉 9/19、9/20 周末 => 6 天 */
     check('按周末算出 6 天', noTable.count, 6)
     check('预览不含周末', noTable.days.some((d) => ['2026-09-19', '2026-09-20'].includes(d.dateKey)), false)
 
-    const applied = service.applyBackfill('2026-09-14', new Date(2026, 8, 21, 14, 0))
+    const applied = await service.applyBackfill('2026-09-14', new Date(2026, 8, 21, 14, 0))
     check('补卡写入天数', applied.created.length, 6)
-    check('补卡后累计天数', service.getState(new Date(2026, 8, 21, 14, 0)).days >= 6, true)
-    check('补卡记录带补卡备注', service.listCheckins({ year: 2026, month: 9 }).find((c) => c.dateKey === '2026-09-14').note, '补卡')
+    check('补卡后累计天数', (await await service.getState(new Date(2026, 8, 21, 14, 0))).days >= 6, true)
+    check('补卡记录带补卡备注', (await await service.listCheckins({ year: 2026, month: 9 })).find((c) => c.dateKey === '2026-09-14').note, '补卡')
 
     /* 幂等：已经补过的日期第二次预览必须为空，不能重复计数 */
-    const again = service.previewBackfill('2026-09-14', new Date(2026, 8, 21, 14, 0))
+    const again = await service.previewBackfill('2026-09-14', new Date(2026, 8, 21, 14, 0))
     check('补卡幂等（二次预览为空）', again.count, 0)
-    check('二次执行不写入', service.applyBackfill('2026-09-14', new Date(2026, 8, 21, 14, 0)).created.length, 0)
+    check('二次执行不写入', (await await service.applyBackfill('2026-09-14', new Date(2026, 8, 21, 14, 0))).created.length, 0)
 
     /* 补卡后连续天数要连起来，否则「连续打卡」会显示成 1 */
-    check('补卡后连续天数连贯', service.getState(new Date(2026, 8, 21, 14, 0)).streak >= 6, true)
+    check('补卡后连续天数连贯', (await await service.getState(new Date(2026, 8, 21, 14, 0))).streak >= 6, true)
 
     /*
      * 周末不断档：这是补卡带来的真实场景 —— 只有工作日有记录，
      * 按日历天数连推会在周六停下，用户周五+周一都打了卡却看到「连续 1 天」。
      * 用独立的库文件，避免和上面的打卡记录串在一起。
      */
-    service.close()
-    service = createService(join(mkdtempSync(join(tmpdir(), 'desk-streak-')), 'a.db'))
-    service.updateSettings({ restPattern: 'double' })
+    await service.close()
+    service = createService(openStore(join(mkdtempSync(join(tmpdir(), 'desk-streak-')), 'a.db')))
+    await service.updateSettings({ restPattern: 'double' })
     const fri = new Date(2026, 8, 18, 14, 0)
     const mon = new Date(2026, 8, 21, 14, 0)
-    service.applyBackfill('2026-09-14', mon)
+    await service.applyBackfill('2026-09-14', mon)
     /* 区间含今天，周一自己也有记录 → 从今天起回看到 9/14 共 6 个工作日 */
-    check('跨周末连续 = 补卡天数', service.getState(mon).streak, 6)
+    check('跨周末连续 = 补卡天数', (await await service.getState(mon)).streak, 6)
     /* 周五视角只回看到 9/14，是 5 天 */
-    check('周五当天为 5 天', service.getState(fri).streak, 5)
+    check('周五当天为 5 天', (await await service.getState(fri)).streak, 5)
     /* 中间缺一天工作日就必须断档 */
-    service.close()
-    service = createService(join(mkdtempSync(join(tmpdir(), 'desk-streak2-')), 'b.db'))
-    service.updateSettings({ restPattern: 'double' })
-    service.checkIn(new Date(2026, 8, 14, 10, 0)) // 周一
-    service.checkIn(new Date(2026, 8, 16, 10, 0)) // 周三，跳过周二
-    check('缺工作日则断档', service.getState(new Date(2026, 8, 16, 14, 0)).streak, 1)
+    await service.close()
+    service = createService(openStore(join(mkdtempSync(join(tmpdir(), 'desk-streak2-')), 'b.db')))
+    await service.updateSettings({ restPattern: 'double' })
+    await service.checkIn(new Date(2026, 8, 14, 10, 0)) // 周一
+    await service.checkIn(new Date(2026, 8, 16, 10, 0)) // 周三，跳过周二
+    check('缺工作日则断档', (await await service.getState(new Date(2026, 8, 16, 14, 0))).streak, 1)
 
     /*
      * 法定假日/补班日：9/20 是周日但补班（要补），10/1 是周四但放假（不补）。
@@ -972,36 +972,36 @@ try {
      * 注意 service 内部有节假日内存缓存，直接写 meta 不会被读到，
      * 所以这里换一个干净的库并重建 service，让它按新表重新读。
      */
-    service.close()
+    await service.close()
     const holidayDb = join(mkdtempSync(join(tmpdir(), 'desk-holiday-')), 'h.db')
-    service = createService(holidayDb)
-    service.updateSettings({ restPattern: 'double' })
-    service.setMeta('holiday-2026', {
+    service = createService(openStore(holidayDb))
+    await service.updateSettings({ restPattern: 'double' })
+    await service.setMeta('holiday-2026', {
       fetchedAt: Date.now(),
       table: {
         '09-20': { isHoliday: false, isMakeup: true, name: '中秋前补班' },
         '10-01': { isHoliday: true, isMakeup: false, name: '国庆节' },
       },
     })
-    service.close()
-    service = createService(holidayDb)
-    const withTable = service.previewBackfill('2026-09-19', new Date(2026, 9, 2, 14, 0))
+    await service.close()
+    service = createService(openStore(holidayDb))
+    const withTable = await service.previewBackfill('2026-09-19', new Date(2026, 9, 2, 14, 0))
     check('补班日算工作日', withTable.days.some((d) => d.dateKey === '2026-09-20'), true)
     check('补班日带标记', withTable.days.find((d) => d.dateKey === '2026-09-20')?.isMakeup, true)
     check('法定假日跳过', withTable.days.some((d) => d.dateKey === '2026-10-01'), false)
 
     /* 边界：起止同一天、开始日晚于今天都要能正确处理 */
-    check('单日区间', service.previewBackfill('2026-09-21', new Date(2026, 8, 21, 14, 0)).count <= 1, true)
+    check('单日区间', (await await service.previewBackfill('2026-09-21', new Date(2026, 8, 21, 14, 0))).count <= 1, true)
     let threw = false
     try {
-      service.previewBackfill('2026-09-22', new Date(2026, 8, 21, 14, 0))
+      await service.previewBackfill('2026-09-22', new Date(2026, 8, 21, 14, 0))
     } catch {
       threw = true
     }
     check('开始日晚于今天报错', threw, true)
     threw = false
     try {
-      service.previewBackfill('2026/09/01', new Date(2026, 8, 21, 14, 0))
+      await service.previewBackfill('2026/09/01', new Date(2026, 8, 21, 14, 0))
     } catch {
       threw = true
     }
@@ -1010,26 +1010,26 @@ try {
 
   /* ---------- 17. 自定义人设 ---------- */
   {
-    check('内置人设已就绪', service.listPersonas().length, 3)
-    check('内置人设为非自定义', service.listPersonas().every((p) => !p.custom), true)
+    check('内置人设已就绪', (await await service.listPersonas()).length, 3)
+    check('内置人设为非自定义', (await await service.listPersonas()).every((p) => !p.custom), true)
 
-    const created = service.createPersona({ label: '测试人设', prompt: '测试提示词' })
+    const created = await service.createPersona({ label: '测试人设', prompt: '测试提示词' })
     check('新建人设', created.label, '测试人设')
-    check('新建后总数 +1', service.listPersonas().length, 4)
+    check('新建后总数 +1', (await await service.listPersonas()).length, 4)
 
-    const dup = service.duplicatePersona('yuki')
+    const dup = await service.duplicatePersona('yuki')
     check('复制内置人设', dup.prompt.length > 400, true)
     check('副本名称带后缀', dup.label.endsWith('副本'), true)
 
-    service.updatePersona(created.id, { prompt: '改过的提示词' })
-    check('更新人设提示词', service.listPersonas().find((p) => p.id === created.id).prompt, '改过的提示词')
-    service.updatePersona(created.id, { label: '' })
-    check('空名称不覆盖原名', service.listPersonas().find((p) => p.id === created.id).label, '测试人设')
+    await service.updatePersona(created.id, { prompt: '改过的提示词' })
+    check('更新人设提示词', (await await service.listPersonas()).find((p) => p.id === created.id).prompt, '改过的提示词')
+    await service.updatePersona(created.id, { label: '' })
+    check('空名称不覆盖原名', (await await service.listPersonas()).find((p) => p.id === created.id).label, '测试人设')
 
     /* 关键：自定义人设必须能被对话层解析到，否则会静默回落成 Yuki */
-    service.updateSettings({ chatPersona: created.id })
-    const custom = service.listPersonas().filter((p) => p.custom)
-    const cfg = resolveChatConfig(service.getSettings(), custom)
+    await service.updateSettings({ chatPersona: created.id })
+    const custom = (await await service.listPersonas()).filter((p) => p.custom)
+    const cfg = resolveChatConfig(await service.getSettings(), custom)
     check('自定义人设被解析', cfg.personaId, created.id)
     /* system 现在是「时间块 + 人设」，人设本身要原样保留在末尾 */
     /*
@@ -1040,29 +1040,29 @@ try {
     check('自定义人设也注入时间块', cfg.systemPrompt.includes('当前时间'), true)
 
     /* 删掉正在用的人设要回落到默认，不能让人设变成空白 */
-    service.deletePersona(created.id)
-    check('删除后回落到默认人设', service.getSettings().chatPersona, 'yuki')
+    await service.deletePersona(created.id)
+    check('删除后回落到默认人设', (await await service.getSettings()).chatPersona, 'yuki')
 
     /* 复制品也删掉，保持测试隔离 */
-    service.deletePersona(dup.id)
-    check('自定义人设已清空', service.listPersonas().filter((p) => p.custom).length, 0)
+    await service.deletePersona(dup.id)
+    check('自定义人设已清空', (await await service.listPersonas()).filter((p) => p.custom).length, 0)
   }
 
   /* ---------- 18. 退出收尾：关库之后不能再被回调碰到 ---------- */
   {
     /*
      * 真实崩溃：点「退出」时 before-quit 先关掉了数据库，紧接着桌宠窗口
-     * 触发 closed → rebuildTrayMenu() → service.getState() → 在已关闭的库上
+     * 触发 closed → rebuildTrayMenu() → await service.getState() → 在已关闭的库上
      * getSettings()，弹出一个原生「database is not open」错误框。
      * 这里固定住两条契约：关库后读状态必须抛（说明竞态真实存在），
      * 且 close 必须能重复调用（退出流程里有多个入口都会关）。
      */
-    const shutdown = createService(join(mkdtempSync(join(tmpdir(), 'desk-quit-')), 'q.db'))
+    const shutdown = createService(openStore(join(mkdtempSync(join(tmpdir(), 'desk-quit-')), 'q.db')))
     shutdown.close()
 
     let threw = null
     try {
-      shutdown.getState()
+      await shutdown.getState()
     } catch (err) {
       threw = err
     }
@@ -1125,7 +1125,7 @@ try {
      */
     {
       /* 用 service 的设置即可；这条只关心顺序，不关心具体人设内容 */
-      const cfgOrder = resolveChatConfig(service.getSettings(), [], { now: new Date(2026, 8, 21, 14, 15), ...opts })
+      const cfgOrder = resolveChatConfig(await service.getSettings(), [], { now: new Date(2026, 8, 21, 14, 15), ...opts })
       const iPersona = cfgOrder.systemPrompt.indexOf('你叫 Yuki')
       const iClock = cfgOrder.systemPrompt.indexOf('当前时间')
       check('人设在时间块之前（缓存友好）', iPersona >= 0 && iPersona < iClock, true)
@@ -1277,7 +1277,7 @@ try {
   console.error('✗ 运行异常:', err)
 } finally {
   try {
-    service.close()
+    await service.close()
   } catch {
     /* ignore */
   }

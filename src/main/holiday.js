@@ -12,6 +12,8 @@
  * 只按星期判断会误报成休息日，摸鱼收入算成 0。
  */
 
+import { httpTransport } from '../shared/bridge/transport.js'
+
 const API_BASE = 'https://timor.tech/api/holiday'
 const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) desk-pet'
 
@@ -34,7 +36,7 @@ export async function fetchHolidayYear(year, { timeoutMs = 12_000 } = {}) {
   const ctrl = new AbortController()
   const timer = setTimeout(() => ctrl.abort(), timeoutMs)
   try {
-    const res = await fetch(`${API_BASE}/year/${year}`, {
+    const res = await httpTransport()(`${API_BASE}/year/${year}`, {
       headers: { 'User-Agent': UA, Accept: 'application/json' },
       signal: ctrl.signal,
     })

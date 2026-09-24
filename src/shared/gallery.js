@@ -86,8 +86,8 @@ export const galleryTotal = (kind) => Object.keys(galleryTable(kind)).length
  * @param {()=>Promise<Array<{role:string,content:string}>>} opts.recentMessages 最近对话（纯文本）
  * @param {(args:{system:string,messages:Array})=>Promise<string>} opts.completeOnce
  * @param {()=>Promise<boolean>} opts.isReady 模型是否配好
- * @param {()=>number} [opts.points] 亲密度（供条件解锁用）
- * @param {()=>string} [opts.currentOutfit] 她此刻穿着的 slug —— 判定条件②要用
+ * @param {()=>Promise<number|Promise<number>>} [opts.points] 亲密度（供条件解锁用）
+ * @param {()=>Promise<string|Promise<string>>} [opts.currentOutfit] 她此刻穿着的 slug —— 判定条件②要用
  */
 export function createGalleryRunner(opts) {
   const {
@@ -110,10 +110,10 @@ export function createGalleryRunner(opts) {
 
     const unlocked = await listUnlocked(kind)
 
-    /* ① 条件解锁（零成本） */
+    /* ① 条件解锁（零成本）。points 允许同步值或 Promise（桌面端 store 异步化后是后者） */
     const ctxHits = spec.conditionUnlocks(
       {
-        points: points(),
+        points: await points(),
         hour: now.getHours(),
         isRestDay: [0, 6].includes(now.getDay()),
       },
@@ -145,7 +145,7 @@ export function createGalleryRunner(opts) {
              * 传入「她此刻穿着」：条件②「状态吻合」要靠它对账。
              * 不传的话模型只能猜，而它倾向猜「吻合」，等于放水。
              */
-            content: spec.buildJudgePrompt(recent, candidates, currentOutfit()),
+            content: spec.buildJudgePrompt(recent, candidates, await currentOutfit()),
           },
         ],
         maxTokens: 100,

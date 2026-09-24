@@ -6,7 +6,9 @@ import { app, BrowserWindow, Menu, Tray, ipcMain, nativeImage, screen } from 'el
 import { fileURLToPath } from 'node:url'
 import { dirname, join } from 'node:path'
 import { mkdirSync, readFileSync } from 'node:fs'
+import { openStore } from './store.js'
 import { createService } from './service.js'
+import { createIpcHandlers } from './ipc-handlers.js'
 import { SELF_PORTRAIT_SLUG } from '../shared/content.js'
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..', '..')
@@ -27,13 +29,9 @@ let panelWindow = null
 let chatWindow = null
 
 /*
- * 当前活跃会话 id —— 桌宠跟着它走（换装/亲密度都按会话隔离）。
- *
- * 桌宠是常驻窗，自己不知道用户正在聊哪个会话，所以由对话窗切换时
- * 通过 IPC 告知。**持久化**到 meta：重启后桌宠应该还是同一个她，
- * 不能每次开机都回落到「第一个会话」。
+ * 当前活跃会话 id 的存取已并入 ipc-handlers.js 业务表（双端共用），
+ * 这里不再持有副本。
  */
-let activeSessionId = null
 let chatPetWindow = null
 let tray = null
 let service = null
@@ -61,14 +59,26 @@ function loadRenderer(win, route) {
   return win.loadFile(join(ROOT, 'dist', 'index.html'), { query: { route } })
 }
 
+/* 建窗互斥：createPetWindow 现在异步读设置，两次快速触发（如连点托盘）
+   会各自走到建窗分支，创建出两个桌宠窗——复用同一份进行中的 promise。 */
+let petCreating = null
+
 function createPetWindow() {
+  if (petCreating) return petCreating
+  petCreating = createPetWindowImpl().finally(() => {
+    petCreating = null
+  })
+  return petCreating
+}
+
+async function createPetWindowImpl() {
   const { workArea } = screen.getPrimaryDisplay()
-  const settings = service.getSettings()
+  const settings = await service.getSettings()
   const scale = Math.max(0.6, Math.min(2, Number(settings.petScale) || 1))
   const W = Math.round(PET_SIZE.width * scale)
   const H = Math.round(PET_SIZE.height * scale)
 
-  const saved = service.getMeta('petPosition', null)
+  const saved = await service.getMeta('petPosition', null)
   /* 保存的位置若完全落在可视区外（换分辨率 / 拔掉外接屏），回退到右下角默认位 */
   const onScreen =
     saved &&
@@ -112,7 +122,7 @@ function createPetWindow() {
     if (!petWindow || petWindow.isDestroyed()) return
     const [px, py] = petWindow.getPosition()
     petState = { x: px, y: py }
-    service.setMeta('petPosition', petState)
+    service.setMeta('petPosition', petState).catch(() => {})
   }
   petWindow.on('moved', rememberPosition)
   petWindow.on('closed', () => {
@@ -479,11 +489,13 @@ function createTray() {
 let quitting = false
 
 /** 托盘菜单需要跟随状态刷新；与广播解耦，避免托盘创建失败时状态不同步 */
-function rebuildTrayMenu() {
+async function rebuildTrayMenu() {
   /* 退出中不再刷新：托盘马上就没了，刷新反而会碰到已关闭的数据库 */
   if (quitting) return
   if (!tray || tray.isDestroyed?.()) return
-  const state = service.getState()
+  const state = await service.getState()
+  /* 等待期间可能已开始退出：state 拿到后不再碰已关闭的数据库 */
+  if (quitting) return
   const petAlive = petWindow && !petWindow.isDestroyed()
   const petVisible = petAlive && petWindow.isVisible()
   const panelOpen = panelWindow && !panelWindow.isDestroyed() && panelWindow.isVisible()
@@ -533,94 +545,34 @@ function bindStateBridge() {
 /* ---------- IPC ---------- */
 
 function registerIpc() {
-  /* 恢复上次的活跃会话，桌上那只才是「同一个她」 */
-  try {
-    activeSessionId = service.getMeta?.('activeSessionId', null) ?? null
-  } catch {
-    activeSessionId = null
+  /*
+   * 业务类通道：与 Tauri 总线宿主共用同一张表（ipc-handlers.js）。
+   * 表里的处理器不带 event 首参，这里包一层剥掉再进表。
+   *
+   * 串行队列：service 异步化后，基线同步 IPC「单 handler 一个事件循环
+   * turn 内完成」的原子性要靠队列保持（读改写序列不能与并发 handler 交错）。
+   * 长操作与 Tauri 总线同口径绕开——它们本就长时间 await 网络，队列挡不住。
+   */
+  const business = createIpcHandlers(service, {
+    /* 重置会把 petScale 恢复成 1，窗口尺寸必须跟着回去，
+       否则立绘是 1× 但窗口还是放大后的尺寸，热区对不上 */
+    onAfterReset: (next) => applyPetScale(next.settings.petScale),
+  })
+  const LONG_RUNNING = new Set(['chat:send', 'chat:diagnose', 'chat:test', 'chat:chatterLine'])
+  let tail = Promise.resolve()
+  const enqueue = (fn) => {
+    const p = tail.then(fn)
+    tail = p.catch(() => {})
+    return p
+  }
+  for (const [channel, fn] of Object.entries(business)) {
+    ipcMain.handle(channel, (_e, ...args) =>
+      LONG_RUNNING.has(channel) ? fn(...args) : enqueue(() => fn(...args)),
+    )
   }
 
-  const handlers = {
-    'state:get': () => service.getState(),
-    'meta:get': () => service.meta(),
-    'checkin:create': () => service.checkIn(),
-    'checkin:list': (_e, args) => service.listCheckins(args ?? {}),
-    'settings:update': (_e, patch, sessionId) => service.updateSettings(patch, sessionId),
-    'settings:reset': () => {
-      const next = service.resetSettings()
-      /* 重置会把 petScale 恢复成 1，窗口尺寸必须跟着回去，
-         否则立绘是 1× 但窗口还是放大后的尺寸，热区对不上 */
-      applyPetScale(next.settings.petScale)
-      broadcast('state', next)
-      return next
-    },
-    'moyu:log': (_e, minutes) => service.logMoyu(minutes),
-    'worklog:list': (_e, dateKey) => service.listWorklogs(dateKey),
-    'sync:pending': () => service.pendingChanges(),
-    'sync:mark': (_e, ids) => service.markSynced(ids),
-
-    /* 节假日 */
-    'holiday:info': (_e, dateKey) => service.holidayInfo(dateKey),
-    'holiday:month': (_e, year, month) => service.monthSummary(year, month),
-    'holiday:refresh': (_e, year) => service.refreshHolidays(year ?? new Date().getFullYear(), { force: true }),
-
-    /* 亲密度 */
-    'affinity:get': () => service.affinity(),
-    'affinity:level': () => service.affinityLevel(),
-    'affinity:add': (_e, delta, opts, sessionId) => service.addAffinity(delta, opts, sessionId),
-    'affinity:reset': (_e, sessionId) => service.resetAffinity(sessionId),
-    /*
-     * 当前活跃会话 —— 桌宠跟它走。
-     *
-     * 桌宠是常驻窗，本身不知道用户在聊哪个会话；由对话窗在切换时
-     * 显式告知。存下来后桌宠/面板都能读到同一个值。
-     */
-    'session:getActive': () => activeSessionId,
-    'session:setActive': (_e, sessionId) => {
-      activeSessionId = sessionId ?? null
-      /* 持久化：重启后桌宠还是同一个她，不回落成「第一个会话」 */
-      try {
-        service.setMeta('activeSessionId', activeSessionId)
-      } catch {
-        /* 记不上不影响本次运行 */
-      }
-      /* 广播给所有窗口：桌宠要跟着换衣服、面板要刷新图鉴 */
-      broadcast('session-active', { sessionId: activeSessionId })
-      return activeSessionId
-    },
-
-    /* 逐会话状态：渲染端切换会话时必须传 sessionId */
-    'session:affinity': (_e, sessionId) => service.sessionAffinity(sessionId),
-    'session:settings': (_e, sessionId) => service.sessionSettings(sessionId),
-    'session:setSetting': (_e, sessionId, key, value) => service.setSessionSetting(sessionId, key, value),
-    'gallery:get': (_e, sessionId) => service.sessionGallery(sessionId),
-    'gallery:clear': (_e, sessionId) => service.clearSessionGallery(sessionId),
-    'gallery:explain': (_e, text, sessionId) => service.explainTriggers(text, sessionId),
-
-    /* 补卡 */
-    'backfill:preview': (_e, fromKey) => service.previewBackfill(fromKey),
-    'backfill:apply': (_e, fromKey) => service.applyBackfill(fromKey),
-
-    /* 人设 */
-    'persona:list': () => service.listPersonas(),
-    'persona:create': (_e, payload) => service.createPersona(payload),
-    'persona:duplicate': (_e, id) => service.duplicatePersona(id),
-    'persona:update': (_e, id, patch) => service.updatePersona(id, patch),
-    'persona:delete': (_e, id) => service.deletePersona(id),
-
-    /* 对话 */
-    'chat:status': () => service.chatStatus(),
-    'chat:test': () => service.chatTest(),
-    'chat:diagnose': () => service.chatDiagnose(),
-    'chat:sessions': () => service.listChatSessions(),
-    'chat:ensure': () => service.ensureChatSession(),
-    'chat:create': (_e, title) => service.createChatSession(title),
-    'chat:rename': (_e, id, title) => service.renameChatSession(id, title),
-    'chat:delete': (_e, id) => service.deleteChatSession(id),
-    'chat:load': (_e, id) => service.loadChatSession(id),
-    'chat:chatterLine': () => service.generateChatterLine(),
-    'chat:send': (_e, payload) => service.sendChat(payload ?? {}),
-    'chat:abort': (_e, requestId) => service.abortChat(requestId),
+  /* 窗口/系统类：窗口状态只有主进程知道，留在壳层（Tauri 侧是 Rust command） */
+  const windowHandlers = {
     'chat:openWindow': () => {
       createChatWindow()
       return true
@@ -664,16 +616,16 @@ function registerIpc() {
       BrowserWindow.fromWebContents(e.sender)?.minimize()
       return true
     },
-    'pet:setScale': (_e, scale) => {
+    'pet:setScale': async (_e, scale) => {
       const s = Math.max(0.6, Math.min(2, Number(scale) || 1))
-      service.updateSettings({ petScale: s })
+      await service.updateSettings({ petScale: s })
       applyPetScale(s)
       /*
        * 必须广播新状态：桌宠的立绘尺寸由 settings.petScale 推导，
        * 不广播的话它要等下一次轮询（15s）才会重排，
        * 期间窗口已经是新尺寸、图还是旧的，点击热区就对不上了。
        */
-      broadcast('state', service.getState())
+      broadcast('state', await service.getState())
       return s
     },
     'pet:setAlwaysOnTop': (_e, flag) => {
@@ -689,7 +641,7 @@ function registerIpc() {
     },
   }
 
-  for (const [channel, fn] of Object.entries(handlers)) {
+  for (const [channel, fn] of Object.entries(windowHandlers)) {
     ipcMain.handle(channel, fn)
   }
 }
@@ -726,14 +678,14 @@ if (!gotLock) {
   app.whenReady().then(() => {
     const userData = app.getPath('userData')
     mkdirSync(userData, { recursive: true })
-    service = createService(join(userData, 'desk-pet.db'), { loadSelfPortrait })
+    service = createService(openStore(join(userData, 'desk-pet.db')), { loadSelfPortrait })
     /* 节假日表异步拉取，失败不影响启动（没有表就退回只看周末） */
     service
       .ensureHolidays()
-      .then((r) => {
+      .then(async (r) => {
         if (r.ok) console.log(`[desk-pet] 节假日表就绪（${r.count} 天${r.cached ? '，来自缓存' : ''}）`)
         else console.warn(`[desk-pet] 节假日表获取失败，暂用周末规则：${r.reason}`)
-        broadcast('state', service.getState())
+        broadcast('state', await service.getState())
       })
       .catch(() => {})
     registerIpc()

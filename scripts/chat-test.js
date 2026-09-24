@@ -23,6 +23,7 @@ import {
   withSelfPortrait,
 } from '../src/shared/content.js'
 import { createService } from '../src/main/service.js'
+import { openStore } from '../src/main/store.js'
 
 let failures = 0
 let checks = 0
@@ -307,10 +308,10 @@ await withServer(
       res.end(JSON.stringify({ choices: [{ message: { content: '刚才说不困，现在有点困了' } }] }))
     },
     async (baseUrl) => {
-      const svc = createService(join(mkdtempSync(join(tmpdir(), 'desk-chatter-')), 'c.db'))
-      svc.updateSettings({ chatBaseUrl: baseUrl, chatApiKey: '', chatPersona: 'yuki' })
-      const sid = svc.ensureChatSession().id
-      svc.addChatMessage(sid, 'user', '你还没睡吗')
+      const svc = createService(openStore(join(mkdtempSync(join(tmpdir(), 'desk-chatter-')), 'c.db')))
+      await svc.updateSettings({ chatBaseUrl: baseUrl, chatApiKey: '', chatPersona: 'yuki' })
+      const sid = (await svc.ensureChatSession()).id
+      await svc.addChatMessage(sid, 'user', '你还没睡吗')
       svc.addChatMessage(sid, 'assistant', '我今天好累，改了一下午图')
       svc.addChatMessage(sid, 'user', '那你早点休息')
 
@@ -740,6 +741,144 @@ await withServer(
     checkIncludes('ping 失败带原因', r.reason, 'API Key')
   },
 )
+
+console.log('\n--- Tauri transport 包装（Rust http 代理的 JS 侧） ---')
+
+/*
+ * 用 Node fetch 模拟 http_proxy.rs 的帧协议（status 先行 / 按行推 line / end 收尾，
+ * http_abort 映射到 AbortController），验证切面 = tauri-transport.js 的包装层：
+ * 帧流 → ReadableStream 的转换、text/json 聚合、abort 本地竞速。
+ * Rust 侧行切分的字节安全性由 cargo test 覆盖（lines_* 用例），两端各自盯一半。
+ */
+{
+  const aborts = new Map()
+  const mockInvoke = async (cmd, args = {}) => {
+    if (cmd === 'http_abort') {
+      const ctrl = aborts.get(args.id)
+      if (ctrl) ctrl.abort()
+      return aborts.has(args.id)
+    }
+    if (cmd !== 'http_fetch_stream') throw new Error(`mock 未实现命令: ${cmd}`)
+    const { id, url, method, headers, body, onFrame } = args
+    const ctrl = new AbortController()
+    aborts.set(id, ctrl)
+    try {
+      const res = await fetch(url, { method, headers, body: body || undefined, signal: ctrl.signal })
+      onFrame.onmessage({ event: 'status', status: res.status })
+      const reader = res.body.getReader()
+      const dec = new TextDecoder()
+      let buf = ''
+      for (;;) {
+        const { done, value } = await reader.read()
+        if (done) break
+        buf += dec.decode(value, { stream: true })
+        let idx
+        while ((idx = buf.indexOf('\n')) >= 0) {
+          onFrame.onmessage({ event: 'line', data: buf.slice(0, idx + 1) })
+          buf = buf.slice(idx + 1)
+        }
+      }
+      if (buf) onFrame.onmessage({ event: 'line', data: buf })
+      onFrame.onmessage({ event: 'end', ok: true })
+      return { ok: true, chunks: 0, bytes: 0 }
+    } catch (e) {
+      /* 与 Rust 一致：错误以 Err(String) 形态回传 */
+      throw new Error(String(e?.message ?? e).slice(0, 200))
+    } finally {
+      aborts.delete(id)
+    }
+  }
+  class MockChannel {}
+
+  globalThis.window = globalThis.window ?? {}
+  window.__TAURI__ = { core: { invoke: mockInvoke, Channel: MockChannel } }
+
+  const { installTauriTransport } = await import('../src/renderer/src/lib/tauri-transport.js')
+  const { setHttpTransport } = await import('../src/shared/bridge/transport.js')
+  installTauriTransport()
+
+  /* 流式：内容与默认 fetch 路径完全一致 */
+  await withServer(
+    (_req, res) => sse(res, [delta('经'), delta('代理'), 'data: [DONE]\n\n']),
+    async (baseUrl) => {
+      let streamed = ''
+      const r = await streamChat({
+        settings: { ...settings, chatBaseUrl: baseUrl },
+        messages: [{ role: 'user', content: 'hi' }],
+        onDelta: (_d, full) => (streamed = full),
+      })
+      check('Tauri 流式拼接正确', r.content, '经代理')
+      check('Tauri onDelta 累计一致', streamed, '经代理')
+    },
+  )
+
+  /* 中文跨行完整性：Rust 按行推、这里转回字节，多字节字符不能坏 */
+  await withServer(
+    (_req, res) => sse(res, [delta('摸鱼中的「鱼」是三字节'), 'data: [DONE]\n\n']),
+    async (baseUrl) => {
+      const r = await streamChat({
+        settings: { ...settings, chatBaseUrl: baseUrl },
+        messages: [{ role: 'user', content: 'hi' }],
+      })
+      check('Tauri 流式中文完整', r.content, '摸鱼中的「鱼」是三字节')
+    },
+  )
+
+  /* 错误翻译走聚合 text()：!res.ok → safeText(res) → describeHttpError */
+  await withServer(
+    (_req, res) => {
+      res.writeHead(429, { 'Content-Type': 'application/json' })
+      res.end(JSON.stringify({ error: { message: 'rate limited' } }))
+    },
+    async (baseUrl) => {
+      let err = null
+      await streamChat({
+        settings: { ...settings, chatBaseUrl: baseUrl },
+        messages: [],
+      }).catch((e) => (err = e))
+      check('Tauri 流式 429 翻译', [err instanceof ChatError, err?.status], [true, 429])
+      checkIncludes('Tauri 429 提示太频繁', err?.message, '太频繁')
+    },
+  )
+
+  /* 非流式（pingChat）走同一条流式命令 + json() 聚合 */
+  await withServer(
+    (_req, res) => {
+      res.writeHead(200, { 'Content-Type': 'application/json' })
+      res.end(JSON.stringify({ model: 'deepseek-chat', choices: [{ message: { content: 'pong' } }] }))
+    },
+    async (baseUrl) => {
+      const r = await pingChat({ settings: { ...settings, chatBaseUrl: baseUrl } })
+      check('Tauri ping 成功', r.ok, true)
+      check('Tauri ping 回读内容', r.reply, 'pong')
+    },
+  )
+
+  /* 中断：signal.abort() 本地竞速抛 aborted，不等 Rust 回包 */
+  await withServer(
+    (_req, res) => {
+      res.writeHead(200, { 'Content-Type': 'text/event-stream' })
+      res.write(delta('开'))
+      setTimeout(() => res.end(), 4000)
+    },
+    async (baseUrl) => {
+      const controller = new AbortController()
+      let caught = null
+      const p = streamChat({
+        settings: { ...settings, chatBaseUrl: baseUrl },
+        messages: [{ role: 'user', content: 'hi' }],
+        signal: controller.signal,
+      }).catch((e) => (caught = e))
+      setTimeout(() => controller.abort(), 300)
+      await p
+      check('Tauri 取消时抛 aborted', caught?.kind ?? caught?.name, 'aborted')
+      check('Tauri 取消时是 ChatError', caught instanceof ChatError, true)
+    },
+  )
+
+  /* 还原默认 transport，防污染（本节之后无其他用例，属防御性收尾） */
+  setHttpTransport(null)
+}
 
 console.log(`\n${checks - failures}/${checks} 通过`)
 process.exit(failures > 0 ? 1 : 0)

@@ -80,8 +80,10 @@ onBeforeUnmount(() => {
 </script>
 
 <template>
-  <!-- 整窗可拖，方便用户挪开 -->
-  <div class="cp-root">
+  <!-- 整窗可拖，方便用户挪开。data-tauri-drag-region 给 Tauri（target 自身
+       判定：立绘/标签/换装面板都是 target 且不带属性，天然不拖，
+       与 Electron 的 no-drag 语义一致） -->
+  <div class="cp-root" data-tauri-drag-region>
     <div class="cp-stage" @click="pickerOpen = !pickerOpen" title="点击换装">
       <img class="cp-img" :src="currentOutfitImage" :alt="currentOutfitLabel" draggable="false" />
     </div>

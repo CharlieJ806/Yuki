@@ -1,10 +1,13 @@
 /**
  * 应用服务层 —— 把 store + 摸鱼算法组装成渲染进程可直接消费的模型。
- * 不依赖 electron，便于用 node 直接跑冒烟脚本。
+ * 不依赖 electron 也不依赖具体 store 实现，便于用 node 直接跑冒烟脚本。
+ *
+ * 双 store 后端（TAURI_MIGRATION.md §2.2 决策 2）：
+ *   - Node / Electron：注入 openStore()（node:sqlite，同步）
+ *   - Tauri：注入 openStoreBridge()（IPC → rusqlite，异步）
+ * store 全是异步接口，本层所有方法随之 async；
+ * 调用方（ipc-handlers / 总线宿主 / smoke）一律 await。
  */
-import { mkdirSync } from 'node:fs'
-import { dirname } from 'node:path'
-import { openStore } from './store.js'
 import { streamChat, pingChat, validateConfig, ChatError, completeOnce } from './chat.js'
 import { buildContent, validateImageDataUrl, checkImagesForModel } from '../shared/content.js'
 import { createGalleryRunner, galleryTotal, explainCandidates } from '../shared/gallery.js'
@@ -41,14 +44,13 @@ import {
 } from '../shared/interactions.js'
 
 /**
- * @param {string} dbPath
+ * @param {object} store 已打开的数据层实例（openStore(...) 或 openStoreBridge()）
  * @param {object} [deps]
  * @param {() => string} [deps.loadSelfPortrait] 返回她自己的参考图（data URL）。
  *   通过参数注入而不是在 service 里直接读文件：service 刻意不依赖 electron、
- *   也不假设自己的资源路径，让打包后的路径解析留给调用方（主进程）决定。
+ *   也不假设自己的资源路径，让打包后的路径解析留给调用方（宿主）决定。
  */
-export function createService(dbPath, deps = {}) {
-  const store = openStore(dbPath)
+export function createService(store, deps = {}) {
   const listeners = new Set()
   /** 进行中的对话请求：requestId -> AbortController，用于「停止生成」 */
   const activeRequests = new Map()
@@ -77,23 +79,23 @@ export function createService(dbPath, deps = {}) {
    */
   const holidayMemory = new Map()
 
-  function holidayTableFor(year) {
+  async function holidayTableFor(year) {
     if (holidayMemory.has(year)) return holidayMemory.get(year)
-    const cached = store.getMeta(`holiday-${year}`, null)
+    const cached = await store.getMeta(`holiday-${year}`, null)
     const table = isCacheFresh(cached) ? cached.table : null
     holidayMemory.set(year, table)
     return table
   }
 
   async function refreshHolidays(year, { force = false } = {}) {
-    const cached = store.getMeta(`holiday-${year}`, null)
+    const cached = await store.getMeta(`holiday-${year}`, null)
     if (!force && isCacheFresh(cached)) {
       holidayMemory.set(year, cached.table)
       return { ok: true, cached: true, count: Object.keys(cached.table ?? {}).length }
     }
     try {
       const table = await fetchHolidayYear(year)
-      store.setMeta(`holiday-${year}`, { fetchedAt: Date.now(), table })
+      await store.setMeta(`holiday-${year}`, { fetchedAt: Date.now(), table })
       holidayMemory.set(year, table)
       return { ok: true, cached: false, count: Object.keys(table).length }
     } catch (err) {
@@ -116,9 +118,9 @@ export function createService(dbPath, deps = {}) {
    * 把「现在几点、今天休不休息、他的作息」一起交给对话层，
    * 让它拼进 system 提示词 —— 不喂这些，模型就会在早上九点说去吃午饭。
    */
-  function chatRuntime(now = new Date()) {
-    const settings = store.getSettings()
-    const table = holidayTableFor(now.getFullYear())
+  async function chatRuntime(now = new Date()) {
+    const settings = await store.getSettings()
+    const table = await holidayTableFor(now.getFullYear())
     return {
       now,
       workStart: settings.workStart,
@@ -171,8 +173,8 @@ export function createService(dbPath, deps = {}) {
    * 统一回落到「最近更新的会话」—— 和用户视角一致：
    * 他正在看的那个就是当前的。
    */
-  function currentSessionId() {
-    return store.listSessions()[0]?.id ?? null
+  async function currentSessionId() {
+    return (await store.listSessions())[0]?.id ?? null
   }
 
   /**
@@ -181,27 +183,28 @@ export function createService(dbPath, deps = {}) {
    * 迁移只在「新键不存在且旧全局键有值」时发生，且写完就删旧键 ——
    * 否则第二个会话也会拿到同一份历史进度。
    */
-  function readScoped(base, fallback, sessionId = currentSessionId()) {
-    const key = scopedKey(base, sessionId)
-    const scoped = store.getMeta(key, null)
+  async function readScoped(base, fallback, sessionId) {
+    const sid = sessionId === undefined ? await currentSessionId() : sessionId
+    const key = scopedKey(base, sid)
+    const scoped = await store.getMeta(key, null)
     if (scoped != null) return scoped
 
-    const legacy = store.getMeta(base, null)
-    if (legacy != null && sessionId) {
+    const legacy = await store.getMeta(base, null)
+    if (legacy != null && sid) {
       /* 把老进度交给现在这个会话，然后删掉全局键，避免被别的会话重复领走 */
-      store.setMeta(key, legacy)
-      store.setMeta(base, null)
+      await store.setMeta(key, legacy)
+      await store.setMeta(base, null)
       return legacy
     }
     return fallback
   }
 
-  function writeScoped(base, value, sessionId = currentSessionId()) {
-    store.setMeta(scopedKey(base, sessionId), value)
+  async function writeScoped(base, value, sessionId) {
+    await store.setMeta(scopedKey(base, sessionId), value)
   }
 
-  function readAffinity(sessionId = currentSessionId()) {
-    const data = readScoped('affinity', null, sessionId)
+  async function readAffinity(sessionId) {
+    const data = await readScoped('affinity', null, sessionId)
     return {
       points: Math.max(0, Number(data?.points) || 0),
       lastDay: data?.lastDay ?? null,
@@ -211,8 +214,8 @@ export function createService(dbPath, deps = {}) {
     }
   }
 
-  function getAffinity(now = new Date(), sessionId = currentSessionId()) {
-    const data = readAffinity(sessionId)
+  async function getAffinity(now = new Date(), sessionId) {
+    const data = await readAffinity(sessionId)
     const today = toDateKey(now)
     return {
       points: data.points,
@@ -222,7 +225,7 @@ export function createService(dbPath, deps = {}) {
       max: AFFINITY_MAX_POINTS,
       isMax: data.points >= AFFINITY_MAX_POINTS,
       /** 前端要按会话显示，带上 id 才知道这份是谁的 */
-      sessionId,
+      sessionId: sessionId === undefined ? await currentSessionId() : sessionId,
     }
   }
 
@@ -235,10 +238,10 @@ export function createService(dbPath, deps = {}) {
    *   kind='chat' 的得分受 `CHAT_AFFINITY_DAILY_CAP` 约束，
    *   避免一口气聊几十条就把关系刷满。
    */
-  function addAffinity(delta, now = new Date(), opts = {}) {
+  async function addAffinity(delta, now = new Date(), opts = {}) {
     /* 会话 id 也接受从 opts 传（内部调用点较多），但显式参数优先 */
-    const sid = opts.sessionId ?? currentSessionId()
-    const cur = readAffinity(sid)
+    const sid = opts.sessionId ?? (await currentSessionId())
+    const cur = await readAffinity(sid)
     const today = toDateKey(now)
     const gain = affinityGain(cur, delta, today, { chat: opts.kind === 'chat' })
 
@@ -261,10 +264,10 @@ export function createService(dbPath, deps = {}) {
       chatDay: today,
       chatToday,
     }
-    writeScoped('affinity', next, sid)
+    await writeScoped('affinity', next, sid)
 
     /* 无进展（已满级 / 聊天配额用完）就不用广播了，省得前端白刷一次 */
-    const seen = getAffinity(now, sid)
+    const seen = await getAffinity(now, sid)
     if (gain > 0 || !opts.silent) emit('affinity', seen)
     return seen
   }
@@ -286,25 +289,27 @@ export function createService(dbPath, deps = {}) {
   const PER_SESSION_SETTINGS = ['chatPersona', 'outfitMode', 'outfitSlug', 'petStories']
 
   /** 读设置时，把逐会话的键替换成当前会话的值 */
-  function settingsForSession(sessionId = currentSessionId()) {
-    const base = store.getSettings()
-    if (!sessionId) return base
+  async function settingsForSession(sessionId) {
+    const base = await store.getSettings()
+    const sid = sessionId === undefined ? await currentSessionId() : sessionId
+    if (!sid) return base
     const out = { ...base }
     for (const key of PER_SESSION_SETTINGS) {
-      const v = readScoped(`set:${key}`, undefined, sessionId)
+      const v = await readScoped(`set:${key}`, undefined, sid)
       if (v !== undefined) out[key] = v
     }
     return out
   }
 
   /** 写设置时，逐会话的键写进会话命名空间，其余写全局 */
-  function setSetting(key, value, sessionId = currentSessionId()) {
-    if (PER_SESSION_SETTINGS.includes(key) && sessionId) {
-      writeScoped(`set:${key}`, value, sessionId)
+  async function setSetting(key, value, sessionId) {
+    const sid = sessionId === undefined ? await currentSessionId() : sessionId
+    if (PER_SESSION_SETTINGS.includes(key) && sid) {
+      await writeScoped(`set:${key}`, value, sid)
       return
     }
     /* store 层是 saveSettings(patch)，不是 setSetting(key, value) */
-    store.saveSettings({ [key]: value })
+    await store.saveSettings({ [key]: value })
   }
 
   /* ---------- 图鉴解锁（对话触发） ---------- */
@@ -322,10 +327,10 @@ export function createService(dbPath, deps = {}) {
     video: { list: 'unlockedVideos', mem: 'videoMemories' },
   }
 
-  function listUnlocked(kind, sessionId = currentSessionId()) {
+  async function listUnlocked(kind, sessionId) {
     const k = GALLERY_KEYS[kind]
     if (!k) return []
-    const v = readScoped(k.list, [], sessionId)
+    const v = await readScoped(k.list, [], sessionId)
     return Array.isArray(v) ? v : []
   }
 
@@ -333,34 +338,36 @@ export function createService(dbPath, deps = {}) {
    * 解锁一项并记下触发细节（成为她的长期记忆）。
    * 已解锁过则返回 null —— 这是「一次性」语义的落点。
    */
-  function unlockItem(kind, slug, line = '', title = '', sessionId = currentSessionId()) {
+  async function unlockItem(kind, slug, line = '', title = '', sessionId) {
     const k = GALLERY_KEYS[kind]
     if (!k) return null
-    const cur = listUnlocked(kind, sessionId)
+    const sid = sessionId === undefined ? await currentSessionId() : sessionId
+    const cur = await listUnlocked(kind, sid)
     if (cur.includes(slug)) return null
-    writeScoped(k.list, [...cur, slug], sessionId)
-    const mem = readScoped(k.mem, {}, sessionId) ?? {}
+    await writeScoped(k.list, [...cur, slug], sid)
+    const mem = (await readScoped(k.mem, {}, sid)) ?? {}
     mem[slug] = { at: Date.now(), line, title }
-    writeScoped(k.mem, mem, sessionId)
-    return { kind, slug, at: mem[slug].at, line, title, sessionId }
+    await writeScoped(k.mem, mem, sid)
+    return { kind, slug, at: mem[slug].at, line, title, sessionId: sid }
   }
 
-  const listMemories = (kind, sessionId = currentSessionId()) =>
-    readScoped(GALLERY_KEYS[kind]?.mem ?? '', {}, sessionId) ?? {}
+  const listMemories = async (kind, sessionId) =>
+    (await readScoped(GALLERY_KEYS[kind]?.mem ?? '', {}, sessionId)) ?? {}
 
   /**
    * 图鉴快照：给渲染端渲染用。
    *
    * 返回**渲染所需的一切**（内容表、已解锁、记忆、进度），
    * 而不是让前端自己去拼 —— 拼的话两端会各写一套，
-   * 而且前端拿不到 OUTFIT_STORIES 这类只有主进程能 import 的数据。
+   * 而且前端拿不到 OUTFIT_STORIES 这类只有宿主侧能 import 的数据。
    */
-  function gallerySnapshot(sessionId = currentSessionId()) {
+  async function gallerySnapshot(sessionId) {
+    const sid = sessionId === undefined ? await currentSessionId() : sessionId
     /* 读之前先补齐初始内容，老会话也能拿到 */
-    seedSessionIfNeeded(sessionId)
-    const build = (kind, table) => {
-      const unlocked = listUnlocked(kind, sessionId)
-      const mem = listMemories(kind, sessionId)
+    await seedSessionIfNeeded(sid)
+    const build = async (kind, table) => {
+      const unlocked = await listUnlocked(kind, sid)
+      const mem = await listMemories(kind, sid)
       return {
         kind,
         total: Object.keys(table).length,
@@ -382,9 +389,9 @@ export function createService(dbPath, deps = {}) {
       }
     }
     return {
-      sessionId,
-      outfit: build('outfit', OUTFIT_STORIES),
-      video: build('video', VIDEO_STORIES),
+      sessionId: sid,
+      outfit: await build('outfit', OUTFIT_STORIES),
+      video: await build('video', VIDEO_STORIES),
     }
   }
 
@@ -397,9 +404,9 @@ export function createService(dbPath, deps = {}) {
    * 注意 `ensureChatSession` 在**已有会话**时直接返回，不走这里：
    * 那类会话（升级前就存在的）由 seedSessionIfNeeded 单独补。
    */
-  function createSessionSeeded(title) {
-    const s = store.createSession(title)
-    seedSessionIfNeeded(s.id)
+  async function createSessionSeeded(title) {
+    const s = await store.createSession(title)
+    await seedSessionIfNeeded(s.id)
     return s
   }
 
@@ -410,12 +417,12 @@ export function createService(dbPath, deps = {}) {
    * 这样**升级前就存在的会话**也能拿到初始装扮 ——
    * 只在建会话时补的话，老会话永远是空的。
    */
-  function seedSessionIfNeeded(sessionId) {
+  async function seedSessionIfNeeded(sessionId) {
     if (!sessionId) return
     try {
-      const unlocked = listUnlocked('outfit', sessionId)
+      const unlocked = await listUnlocked('outfit', sessionId)
       if (unlocked.includes('casual')) return
-      unlockItem(
+      await unlockItem(
         'outfit',
         'casual',
         OUTFIT_STORIES.casual?.story ?? '',
@@ -428,39 +435,40 @@ export function createService(dbPath, deps = {}) {
   }
 
   /** 清空图鉴进度（「重置」时一起清） */
-  function clearGallery(sessionId = currentSessionId()) {
+  async function clearGallery(sessionId) {
+    const sid = sessionId === undefined ? await currentSessionId() : sessionId
     for (const k of Object.values(GALLERY_KEYS)) {
-      writeScoped(k.list, [], sessionId)
-      writeScoped(k.mem, {}, sessionId)
+      await writeScoped(k.list, [], sid)
+      await writeScoped(k.mem, {}, sid)
     }
     /* 顺手把老全局键也清掉，否则下一个会话会把它当「可迁移的历史」领走 */
-    store.setMeta('unlockedOutfits', null)
-    store.setMeta('outfitMemories', null)
-    store.setMeta('unlockedVideos', null)
-    store.setMeta('videoMemories', null)
+    await store.setMeta('unlockedOutfits', null)
+    await store.setMeta('outfitMemories', null)
+    await store.setMeta('unlockedVideos', null)
+    await store.setMeta('videoMemories', null)
   }
 
   /**
    * 解锁执行器 —— 三层管线的实现来自 shared/gallery.js，两端共用。
    *
-   * 这里只提供「主进程版」的四个依赖：读写 meta、取最近对话、
-   * 调一次短生成、判断配置是否就绪。
+   * 这里只提供「宿主侧」的依赖：读写 meta、取最近对话、
+   * 调一次短生成、判断配置是否就绪。依赖全部异步（store 为异步接口），
+   * shared/gallery.js 对每个依赖都 await，同步实现也兼容。
    */
   /*
-   * runner 的回调是同步取值的，所以每次检查前把当前会话 id 放这里，
+   * runner 的回调是取值时求值的，所以每次检查前把当前会话 id 放这里，
    * 让 listUnlocked / unlock / recentMessages 都作用在同一个会话上。
    */
   let lastGallerySession = null
 
   const galleryRunner = createGalleryRunner({
-    listUnlocked: (kind) => listUnlocked(kind, lastGallerySession ?? currentSessionId()),
+    listUnlocked: async (kind) => listUnlocked(kind, lastGallerySession ?? (await currentSessionId())),
     unlock: (kind, slug, line, title) =>
-      unlockItem(kind, slug, line, title, lastGallerySession ?? currentSessionId()),
+      unlockItem(kind, slug, line, title, lastGallerySession ?? undefined),
     recentMessages: async () => {
-      const sid = lastGallerySession ?? currentSessionId()
+      const sid = lastGallerySession ?? (await currentSessionId())
       if (!sid) return []
-      return store
-        .recentMessages(sid, 10)
+      return (await store.recentMessages(sid, 10))
         .filter((m) => m.role === 'user' || m.role === 'assistant')
         .map((m) => {
           const content =
@@ -473,27 +481,28 @@ export function createService(dbPath, deps = {}) {
           return { role: m.role, content }
         })
     },
-    completeOnce: ({ system, messages, maxTokens }) =>
+    completeOnce: async ({ system, messages, maxTokens }) =>
       completeOnce({
-        settings: store.getSettings(),
+        settings: await store.getSettings(),
         system,
         messages,
         maxTokens,
-        runtime: chatRuntime(),
+        runtime: await chatRuntime(),
       }),
-    isReady: () => validateConfig(store.getSettings(), customPersonas(), chatRuntime()).ok,
-    points: () => readAffinity(lastGallerySession ?? currentSessionId()).points,
+    isReady: async () =>
+      (await validateConfig(await store.getSettings(), await customPersonas(), await chatRuntime())).ok,
+    points: async () => (await readAffinity(lastGallerySession ?? undefined)).points,
     /*
      * 她此刻穿什么 —— 判定条件②「状态吻合」用。
      *
      * 取当前会话的设置：固定模式用 outfitSlug；自动模式按时间算。
      * 两者都要走 settingsForSession，否则读到的是别的会话的穿着。
      */
-    currentOutfit: () => {
-      const sid = lastGallerySession ?? currentSessionId()
-      const st = settingsForSession(sid)
+    currentOutfit: async () => {
+      const sid = lastGallerySession ?? (await currentSessionId())
+      const st = await settingsForSession(sid)
       if (st.outfitMode === 'fixed' && st.outfitSlug) return st.outfitSlug
-      return outfitForTime(new Date(), listUnlocked('outfit', sid))
+      return outfitForTime(new Date(), await listUnlocked('outfit', sid))
     },
   })
 
@@ -504,7 +513,7 @@ export function createService(dbPath, deps = {}) {
    * 只看用户那一条往往不够（她的回复里常带上文）。
    */
   async function checkUnlockAfterReply(text, sessionId) {
-    const settings = store.getSettings()
+    const settings = await store.getSettings()
     if (settings.petStories === false) return null
     /*
      * 显式传入会话 id 而不是让 runner 自己回落 ——
@@ -525,11 +534,12 @@ export function createService(dbPath, deps = {}) {
    * 顺带把老的全局键也清掉，否则下一个新建的会话会把它当
    * 「可迁移的历史进度」领走，一开局就有分。
    */
-  function resetAffinity(sessionId = currentSessionId()) {
+  async function resetAffinity(sessionId) {
+    const sid = sessionId === undefined ? await currentSessionId() : sessionId
     const blank = { points: 0, lastDay: null, streakDays: 0, chatDay: null, chatToday: 0 }
-    writeScoped('affinity', blank, sessionId)
-    store.setMeta('affinity', null)
-    const next = getAffinity(new Date(), sessionId)
+    await writeScoped('affinity', blank, sid)
+    await store.setMeta('affinity', null)
+    const next = await getAffinity(new Date(), sid)
     emit('affinity', next)
     return next
   }
@@ -554,14 +564,22 @@ export function createService(dbPath, deps = {}) {
    * 表现成「对话窗换装点了，立绘窗没反应」。
    * 这是那个 bug 的最后一环。
    */
-  function getState(now = new Date(), sessionId = currentSessionId()) {
-    const settings = settingsForSession(sessionId)
-    const table = holidayTableFor(now.getFullYear())
+  async function getState(now = new Date(), sessionId) {
+    const sid = sessionId === undefined ? await currentSessionId() : sessionId
+    const settings = await settingsForSession(sid)
+    const table = await holidayTableFor(now.getFullYear())
     const snapshot = todaySnapshot(settings, now, table)
-    const days = store.moyuDays()
+    const days = await store.moyuDays()
     const level = levelOf(days)
     const payday = paydayCountdown(settings, now)
-    const checkin = store.getCheckin(snapshot.dateKey)
+    const checkin = await store.getCheckin(snapshot.dateKey)
+    /*
+     * streak 的 isRest 回调是同步的（逐日推进在 store 层），拿不到 await ——
+     * 预把回看窗口（guard 3660 天 ≈ 10 年）内可能跨到的年份表载入内存缓存。
+     * 原实现（同步 store）在回调里能直接查库，这里预载是等价替身；
+     * 已缓存的年份零成本，meta miss 也只是几次点查。
+     */
+    for (let y = 1; y <= 10; y++) await holidayTableFor(now.getFullYear() - y)
     return {
       settings,
       snapshot,
@@ -570,8 +588,8 @@ export function createService(dbPath, deps = {}) {
        * 连续打卡按「工作日」连推：休息日既不计入也不算断档。
        * 否则周五打卡 + 周一打卡会显示成「连续 1 天」，而用户明明没漏。
        */
-      streak: store.streak(snapshot.dateKey, (date) => {
-        const t = holidayTableFor(date.getFullYear()) ?? table
+      streak: await store.streak(snapshot.dateKey, (date) => {
+        const t = holidayMemory.get(date.getFullYear()) ?? table
         return isRestDay(settings, date, t)
       }),
       level,
@@ -582,8 +600,8 @@ export function createService(dbPath, deps = {}) {
       todayEarnedText: formatMoney(snapshot.todayEarned, settings.salaryCurrency),
       dailySalaryText: formatMoney(snapshot.dailySalary, settings.salaryCurrency),
       salaryText: formatMoney(settings.salary, settings.salaryCurrency),
-      pendingSync: store.pendingChanges(),
-      loggedMinutesToday: store.worklogTotal(snapshot.dateKey),
+      pendingSync: await store.pendingChanges(),
+      loggedMinutesToday: await store.worklogTotal(snapshot.dateKey),
       /* 节假日状态：界面用来显示「春节」「补班」标签 */
       holiday: {
         name: snapshot.holidayName,
@@ -592,15 +610,15 @@ export function createService(dbPath, deps = {}) {
         hasTable: Boolean(table),
       },
       /* 亲密度：互动累计，用于解锁不同反应 */
-      affinity: getAffinity(now),
+      affinity: await getAffinity(now, sid),
     }
   }
 
-  function checkIn(now = new Date()) {
+  async function checkIn(now = new Date()) {
     const dateKey = toDateKey(now)
-    const { checkin, created } = store.addCheckin(dateKey)
-    if (created) store.addEvent('checkin.created', { dateKey })
-    const state = getState(now)
+    const { checkin, created } = await store.addCheckin(dateKey)
+    if (created) await store.addEvent('checkin.created', { dateKey })
+    const state = await getState(now)
     emit('state', state)
     return { created, dateKey, checkin, state }
   }
@@ -612,34 +630,35 @@ export function createService(dbPath, deps = {}) {
    * 不这样做的话：在会话 A 面板里改人设，会话 B 也跟着变 ——
    * 而人设就是「她是谁」，跟着变等于两个会话是同一个人。
    */
-  function updateSettings(patch, sessionId = currentSessionId()) {
+  async function updateSettings(patch, sessionId) {
+    const sid = sessionId === undefined ? await currentSessionId() : sessionId
     const perSession = {}
     const global = {}
     for (const [k, v] of Object.entries(patch ?? {})) {
       if (PER_SESSION_SETTINGS.includes(k)) perSession[k] = v
       else global[k] = v
     }
-    if (Object.keys(global).length) store.saveSettings(global)
-    for (const [k, v] of Object.entries(perSession)) setSetting(k, v, sessionId)
+    if (Object.keys(global).length) await store.saveSettings(global)
+    for (const [k, v] of Object.entries(perSession)) await setSetting(k, v, sid)
 
     /*
      * 广播时带上刚写的会话 —— 不带的话 getState 会去读「最近更新的会话」，
      * 而它未必是刚写的那个，于是广播出去的值还是旧的。
      */
-    const state = getState(new Date(), sessionId)
+    const state = await getState(new Date(), sid)
     emit('state', state)
     return state
   }
 
-  function resetSettings() {
+  async function resetSettings() {
     return updateSettings({ ...DEFAULT_SETTINGS })
   }
 
-  function logMoyu(minutes, now = new Date()) {
+  async function logMoyu(minutes, now = new Date()) {
     if (!Number.isFinite(minutes) || minutes <= 0) throw new Error('minutes must be a positive number')
     const dateKey = toDateKey(now)
-    store.addWorklog(dateKey, minutes, 'moyu')
-    const state = getState(now)
+    await store.addWorklog(dateKey, minutes, 'moyu')
+    const state = await getState(now)
     emit('state', state)
     return state
   }
@@ -648,20 +667,21 @@ export function createService(dbPath, deps = {}) {
 
   const BACKFILL_NOTE = '补卡'
   /** 从某天到今天之间，还没打卡的工作日（预览与执行共用同一份口径） */
-  function missingWorkdays(fromKey, now = new Date()) {
+  async function missingWorkdays(fromKey, now = new Date()) {
     const from = parseDateKey(fromKey)
     if (!from) throw new Error('开始日期格式应为 YYYY-MM-DD')
     const toKey = toDateKey(now)
     if (from > now) throw new Error('开始日期不能晚于今天')
-    const table = holidayTableFor(from.getFullYear()) ?? holidayTableFor(now.getFullYear())
+    const table = (await holidayTableFor(from.getFullYear())) ?? (await holidayTableFor(now.getFullYear()))
     /* 跨年时用起始年的表盖前一段、今年的表盖后一段 —— 这里按天各取自己的表 */
-    const existed = new Set(store.listCheckins().map((c) => c.dateKey))
+    const existed = new Set((await store.listCheckins()).map((c) => c.dateKey))
+    const settings = await store.getSettings()
     const days = []
     const cursor = new Date(from)
     while (cursor <= now) {
       const key = toDateKey(cursor)
-      const yearTable = holidayTableFor(cursor.getFullYear()) ?? table
-      if (!existed.has(key) && !isRestDay(store.getSettings(), cursor, yearTable)) {
+      const yearTable = (await holidayTableFor(cursor.getFullYear())) ?? table
+      if (!existed.has(key) && !isRestDay(settings, cursor, yearTable)) {
         const info = yearTable?.[key.slice(5)] ?? null
         days.push({
           dateKey: key,
@@ -679,31 +699,31 @@ export function createService(dbPath, deps = {}) {
    * 预览：不做任何写入，先把「会补几天、哪几天」摊开给用户确认。
    * 补卡是不可逆的历史写入，没有预览直接写风险太大。
    */
-  function previewBackfill(fromKey, now = new Date()) {
-    const days = missingWorkdays(fromKey, now)
+  async function previewBackfill(fromKey, now = new Date()) {
+    const days = await missingWorkdays(fromKey, now)
     return {
       from: parseDateKey(fromKey) ? fromKey : null,
       to: toDateKey(now),
       count: days.length,
       days,
       /* 有节假日表时工作日判定更准，没有表只能按周末算 */
-      hasHolidayTable: Boolean(holidayTableFor(now.getFullYear())),
+      hasHolidayTable: Boolean(await holidayTableFor(now.getFullYear())),
     }
   }
 
   /** 执行补卡：写入所有缺失的工作日 */
-  function applyBackfill(fromKey, now = new Date()) {
-    const preview = previewBackfill(fromKey, now)
-    const result = store.addCheckins(preview.days.map((d) => d.dateKey), BACKFILL_NOTE)
+  async function applyBackfill(fromKey, now = new Date()) {
+    const preview = await previewBackfill(fromKey, now)
+    const result = await store.addCheckins(preview.days.map((d) => d.dateKey), BACKFILL_NOTE)
     if (result.created.length > 0) {
-      store.addEvent('checkin.backfill', { from: preview.from, to: preview.to, count: result.created.length })
+      await store.addEvent('checkin.backfill', { from: preview.from, to: preview.to, count: result.created.length })
       /*
        * 桌宠蹦一下庆祝。跨窗口的观感反馈只能靠广播 ——
        * 补卡是在面板窗点的，但表情要在桌宠窗放。
        */
       emit('emote', { key: 'jump', holdMs: 2600 })
     }
-    const state = getState(now)
+    const state = await getState(now)
     emit('state', state)
     return { ...preview, created: result.created, skipped: result.skipped, state }
   }
@@ -717,12 +737,12 @@ export function createService(dbPath, deps = {}) {
      * 仍走全局，而那些位置（摸鱼、节假日）本来就只关心全局字段。
      */
     getSettings: (sessionId) => settingsForSession(sessionId),
-    listCheckins: (args) => store.listCheckins(args),
-    listWorklogs: (dateKey) => store.listWorklogs(dateKey),
+    listCheckins: async (args) => store.listCheckins(args),
+    listWorklogs: async (dateKey) => store.listWorklogs(dateKey),
 
-    /* 通用 meta 读写（主进程记「当前活跃会话」用） */
-    getMeta: (key, fallback = null) => store.getMeta(key, fallback),
-    setMeta: (key, value) => store.setMeta(key, value),
+    /* 通用 meta 读写（宿主记「当前活跃会话」等用） */
+    getMeta: async (key, fallback = null) => store.getMeta(key, fallback),
+    setMeta: async (key, value) => store.setMeta(key, value),
 
     /*
      * 逐会话状态的读写。
@@ -731,9 +751,9 @@ export function createService(dbPath, deps = {}) {
      * 「最近更新的会话」，切换的瞬间容易读到上一个人的数据。
      */
     sessionSettings: (sessionId) => settingsForSession(sessionId),
-    setSessionSetting: (sessionId, key, value) => {
-      setSetting(key, value, sessionId)
-      emit('state', getState())
+    setSessionSetting: async (sessionId, key, value) => {
+      await setSetting(key, value, sessionId)
+      emit('state', await getState())
     },
     /** 某会话的亲密度（含等级所需字段，前端直接渲染） */
     sessionAffinity: (sessionId) => getAffinity(new Date(), sessionId),
@@ -747,8 +767,8 @@ export function createService(dbPath, deps = {}) {
     updateSettings,
     resetSettings,
     logMoyu,
-    addEvent: (type, payload) => {
-      store.addEvent(type, payload)
+    addEvent: async (type, payload) => {
+      await store.addEvent(type, payload)
       return true
     },
 
@@ -757,24 +777,22 @@ export function createService(dbPath, deps = {}) {
     applyBackfill,
 
     /* 同步接口（云端未接入时是本地 no-op 记账） */
-    pendingChanges: () => store.pendingChanges(),
-    markSynced: (ids) => store.markSynced(ids),
-    getMeta: (k, d) => store.getMeta(k, d),
-    setMeta: (k, v) => store.setMeta(k, v),
+    pendingChanges: async () => store.pendingChanges(),
+    markSynced: async (ids) => store.markSynced(ids),
 
     /* 节假日 */
     ensureHolidays,
     refreshHolidays,
     holidayTableFor,
-    holidayInfo: (dateKey) => {
-      const table = holidayTableFor(Number(String(dateKey).slice(0, 4)))
+    holidayInfo: async (dateKey) => {
+      const table = await holidayTableFor(Number(String(dateKey).slice(0, 4)))
       const info = table?.[String(dateKey).slice(5)] ?? null
       return { dateKey, hasTable: Boolean(table), info }
     },
     /** 某月的休息/工作日统计，供打卡日历使用 */
-    monthSummary: (year, month) => {
-      const table = holidayTableFor(year)
-      const settings = store.getSettings()
+    monthSummary: async (year, month) => {
+      const table = await holidayTableFor(year)
+      const settings = await store.getSettings()
       const total = new Date(year, month, 0).getDate()
       const restDays = []
       const workDays = []
@@ -790,7 +808,7 @@ export function createService(dbPath, deps = {}) {
 
     /* ---------- 亲密度 ---------- */
     affinity: () => getAffinity(),
-    affinityLevel: () => affinityLevel(getAffinity().points),
+    affinityLevel: async () => affinityLevel((await getAffinity()).points),
     /* addAffinity 内部已 emit，不要再手动广播，否则前端收到两次 */
     /*
      * 第 3 个参数是 sessionId。
@@ -805,13 +823,13 @@ export function createService(dbPath, deps = {}) {
 
     /* ---------- 人设（内置 + 自定义） ---------- */
     /** 全部人设：内置在前，自定义在后 */
-    listPersonas: () => [
+    listPersonas: async () => [
       ...CHAT_PERSONAS.map((p) => ({ id: p.id, label: p.label, custom: false, prompt: p.prompt })),
-      ...store.listPersonas(),
+      ...(await store.listPersonas()),
     ],
 
-    createPersona: (payload) => {
-      const created = store.createPersona({
+    createPersona: async (payload) => {
+      const created = await store.createPersona({
         label: payload?.label ?? '自定义人设',
         prompt: payload?.prompt ?? '',
       })
@@ -820,14 +838,14 @@ export function createService(dbPath, deps = {}) {
     },
 
     /** 复制一份现有（内置或自定义）人设作为新的自定义人设 */
-    duplicatePersona: (sourceId) => {
+    duplicatePersona: async (sourceId) => {
       const all = [
         ...CHAT_PERSONAS.map((p) => ({ id: p.id, label: p.label, prompt: p.prompt })),
-        ...store.listPersonas(),
+        ...(await store.listPersonas()),
       ]
       const src = all.find((p) => p.id === sourceId)
       if (!src) return null
-      const created = store.createPersona({
+      const created = await store.createPersona({
         label: `${src.label} 副本`.slice(0, 40),
         prompt: src.prompt,
       })
@@ -835,27 +853,27 @@ export function createService(dbPath, deps = {}) {
       return created
     },
 
-    updatePersona: (id, patch) => {
-      const updated = store.updatePersona(id, patch ?? {})
+    updatePersona: async (id, patch) => {
+      const updated = await store.updatePersona(id, patch ?? {})
       emit('personas', { type: 'changed' })
       return updated
     },
 
-    deletePersona: (id) => {
-      store.deletePersona(id)
+    deletePersona: async (id) => {
+      await store.deletePersona(id)
       /* 删掉的正好是当前使用的人设时，回落到默认 */
-      const settings = store.getSettings()
-      if (settings.chatPersona === id) store.saveSettings({ chatPersona: CHAT_PERSONAS[0].id })
+      const settings = await store.getSettings()
+      if (settings.chatPersona === id) await store.saveSettings({ chatPersona: CHAT_PERSONAS[0].id })
       emit('personas', { type: 'changed' })
-      return { ok: true, personas: store.listPersonas() }
+      return { ok: true, personas: await store.listPersonas() }
     },
 
     /* ---------- 对话 ---------- */
 
     /** 当前可用的对话配置状态（不下发 apiKey 原文，只给是否已填） */
-    chatStatus: () => {
-      const settings = store.getSettings()
-      const check = validateConfig(settings, customPersonas(), chatRuntime())
+    chatStatus: async () => {
+      const settings = await store.getSettings()
+      const check = await validateConfig(settings, await customPersonas(), await chatRuntime())
       return {
         ready: check.ok,
         reason: check.ok ? null : check.reason,
@@ -867,20 +885,20 @@ export function createService(dbPath, deps = {}) {
       }
     },
 
-    chatTest: () => pingChat({ settings: store.getSettings(), customPersonas: customPersonas() }),
+    chatTest: async () => pingChat({ settings: await store.getSettings(), customPersonas: await customPersonas() }),
 
     /**
      * 一次跑完全链路自检，把每一步结果摊开，便于定位「测试连接成功但对话失败」。
      * 不落库、不改设置。
      */
     chatDiagnose: async () => {
-      const settings = store.getSettings()
+      const settings = await store.getSettings()
       const steps = []
       const push = (name, ok, detail) => steps.push({ name, ok, detail: String(detail ?? '') })
 
       push('读取设置', true, `provider=${settings.chatProvider} model=${settings.chatModel}`)
 
-      const check = validateConfig(settings, customPersonas(), chatRuntime())
+      const check = await validateConfig(settings, await customPersonas(), await chatRuntime())
       push('配置校验', check.ok, check.ok ? `BaseURL=${check.cfg.baseUrl}` : check.reason)
       if (!check.ok) return { ok: false, steps }
 
@@ -888,7 +906,7 @@ export function createService(dbPath, deps = {}) {
       push('API Key', key.length > 0 || !check.cfg.apiKey, key ? `已填，长度 ${key.length}，前缀 ${key.slice(0, 5)}…` : '为空（本地地址可接受）')
 
       /* 1) 非流式：等价于「测试连接」 */
-      const ping = await pingChat({ settings, customPersonas: customPersonas() })
+      const ping = await pingChat({ settings, customPersonas: await customPersonas() })
       push('非流式请求', ping.ok, ping.ok ? `model=${ping.model}` : ping.reason)
       if (!ping.ok) return { ok: false, steps }
 
@@ -899,8 +917,8 @@ export function createService(dbPath, deps = {}) {
       try {
         const r = await streamChat({
           settings,
-          customPersonas: customPersonas(),
-          runtime: chatRuntime(),
+          customPersonas: await customPersonas(),
+          runtime: await chatRuntime(),
           messages: [{ role: 'user', content: '请只回复两个字：正常' }],
           onDelta: (_d, full) => {
             streamed = full.length
@@ -916,11 +934,11 @@ export function createService(dbPath, deps = {}) {
 
       /* 3) 落库：确认数据库写得进去 */
       try {
-        const s = store.createSession('__diagnose__')
-        store.addMessage(s.id, 'user', 'diag')
-        store.addMessage(s.id, 'assistant', 'ok')
-        const n = store.listMessages(s.id).length
-        store.deleteSession(s.id)
+        const s = await store.createSession('__diagnose__')
+        await store.addMessage(s.id, 'user', 'diag')
+        await store.addMessage(s.id, 'assistant', 'ok')
+        const n = (await store.listMessages(s.id)).length
+        await store.deleteSession(s.id)
         push('数据库读写', n === 2, `写入并读回 ${n} 条消息`)
       } catch (err) {
         push('数据库读写', false, err.message)
@@ -929,35 +947,35 @@ export function createService(dbPath, deps = {}) {
       return { ok: steps.every((s) => s.ok), steps, reply: reply.slice(0, 60) }
     },
 
-    listChatSessions: () => store.listSessions(),
+    listChatSessions: async () => store.listSessions(),
 
     /** 没有会话就建一个，保证「对话」随时可用 */
-    ensureChatSession: () => {
-      const sessions = store.listSessions()
+    ensureChatSession: async () => {
+      const sessions = await store.listSessions()
       if (sessions.length > 0) return sessions[0]
       return createSessionSeeded()
     },
 
     createChatSession: (title) => createSessionSeeded(title),
 
-    renameChatSession: (id, title) => store.renameSession(id, title),
+    renameChatSession: async (id, title) => store.renameSession(id, title),
 
-    deleteChatSession: (id) => {
-      store.deleteSession(id)
+    deleteChatSession: async (id) => {
+      await store.deleteSession(id)
       emit('chat', { type: 'sessions' })
       return store.listSessions()
     },
 
-    loadChatSession: (id) => {
-      const session = store.getSession(id)
+    loadChatSession: async (id) => {
+      const session = await store.getSession(id)
       if (!session) return null
-      return { session, messages: store.listMessages(id) }
+      return { session, messages: await store.listMessages(id) }
     },
 
     /** 下面几个是给测试与后续功能用的底层入口 */
-    addChatMessage: (sessionId, role, content, opts) => store.addMessage(sessionId, role, content, opts),
-    recentChatMessages: (sessionId, limit) => store.recentMessages(sessionId, limit),
-    listChatMessages: (sessionId, limit) => store.listMessages(sessionId, limit),
+    addChatMessage: async (sessionId, role, content, opts) => store.addMessage(sessionId, role, content, opts),
+    recentChatMessages: async (sessionId, limit) => store.recentMessages(sessionId, limit),
+    listChatMessages: async (sessionId, limit) => store.listMessages(sessionId, limit),
 
     /**
      * 生成一句「跟最近对话有关」的挂机台词。
@@ -966,16 +984,16 @@ export function createService(dbPath, deps = {}) {
      * 挂机冒泡不该因为接口抖动就整个卡住。
      */
     generateChatterLine: async () => {
-      const settings = store.getSettings()
+      const settings = await store.getSettings()
       /*
        * 挂机台词不会因为接口没配就整个不冒泡 —— 调用方会回落到台词库。
        * 这里也返回一个 reason，便于「设置 → 全链路自检」定位。
        */
-      const check = validateConfig(settings, customPersonas(), chatRuntime())
+      const check = await validateConfig(settings, await customPersonas(), await chatRuntime())
       if (!check.ok) return { ok: false, reason: check.reason }
 
       /* 找最近有消息的会话，没聊过就直接放弃 */
-      const sessions = store.listSessions()
+      const sessions = await store.listSessions()
       if (!sessions.length) return { ok: false, reason: '还没有对话记录' }
       const latest = sessions[0]
 
@@ -988,7 +1006,7 @@ export function createService(dbPath, deps = {}) {
        * 时间界定「多久之前算旧事」，条数防止两天内聊了几百条撑爆上下文。
        */
       const since = Date.now() - CHATTER_WINDOW_MS
-      const history = store.messagesSince(latest.id, since, 200)
+      const history = await store.messagesSince(latest.id, since, 200)
       /*
        * 关键：按真实 role 重建多轮消息，不要把记录拼成一条 user 文本。
        * 后者会让模型分不清哪句是自己说的，表现为她对着自己说过的话发问。
@@ -1009,7 +1027,7 @@ export function createService(dbPath, deps = {}) {
             { role: 'user', content: '（以上是你和我的真实聊天。现在突然想起一件事，对我说一句相关的话，只输出那句话本身。）' },
           ],
           maxTokens: 80,
-          runtime: chatRuntime(),
+          runtime: await chatRuntime(),
         })
         const line = sanitizeChatter(raw)
         if (!line) return { ok: false, reason: '生成的台词为空' }
@@ -1034,9 +1052,9 @@ export function createService(dbPath, deps = {}) {
        * 的人设去回别人的消息 —— 两个窗口同时聊天时尤其明显。
        */
       let sid = sessionId
-      if (!sid || !store.getSession(sid)) sid = store.createSession().id
+      if (!sid || !(await store.getSession(sid))) sid = (await store.createSession()).id
 
-      const settings = settingsForSession(sid)
+      const settings = await settingsForSession(sid)
       const clean = String(text ?? '').trim()
       const pics = (Array.isArray(images) ? images : []).filter(Boolean)
       /* 允许「只发图不写字」，但不能两者都空 */
@@ -1059,12 +1077,12 @@ export function createService(dbPath, deps = {}) {
        * 这样绝大多数纯文本消息的表结构和以前完全一致。
        */
       const stored = pics.length ? buildContent(clean, pics) : clean
-      const userMsg = store.addMessage(sid, 'user', stored)
+      const userMsg = await store.addMessage(sid, 'user', stored)
       /* 首条用户消息拿来当会话标题；只有图时就叫「图片」 */
-      const session = store.getSession(sid)
-      if (session && store.countMessages(sid) === 1) {
+      const session = await store.getSession(sid)
+      if (session && (await store.countMessages(sid)) === 1) {
         const title = clean || '图片'
-        store.renameSession(sid, title.slice(0, 24))
+        await store.renameSession(sid, title.slice(0, 24))
       }
       emit('chat', { type: 'message', sessionId: sid, message: userMsg })
 
@@ -1072,23 +1090,22 @@ export function createService(dbPath, deps = {}) {
        * 聊天记亲密度 —— 对话是处关系的主要途径，比摸头值钱。
        * 受当日聊天配额约束（见 affinityGain），所以这里只报「想加多少」。
        */
-      const affinityAfterMessage = addAffinity(
+      const affinityAfterMessage = await addAffinity(
         AFFINITY_GAIN.chatMessage,
         new Date(),
         { kind: 'chat', silent: true, sessionId: sid },
       )
       emit('affinity', affinityAfterMessage)
 
-      const cfg = validateConfig(settings, customPersonas(), chatRuntime())
+      const cfg = await validateConfig(settings, await customPersonas(), await chatRuntime())
       if (!cfg.ok) {
-        const errMsg = store.addMessage(sid, 'assistant', cfg.reason, { error: true })
+        const errMsg = await store.addMessage(sid, 'assistant', cfg.reason, { error: true })
         emit('chat', { type: 'message', sessionId: sid, message: errMsg })
         emit('chat-done', { sessionId: sid, requestId, ok: false, reason: cfg.reason })
         return { ok: false, reason: cfg.reason, sessionId: sid }
       }
 
-      const history = store
-        .recentMessages(sid, cfg.cfg.maxHistory)
+      const history = (await store.recentMessages(sid, cfg.cfg.maxHistory))
         .filter((m) => m.role === 'user' || m.role === 'assistant')
         .map((m) => ({ role: m.role, content: m.content }))
 
@@ -1098,18 +1115,18 @@ export function createService(dbPath, deps = {}) {
       try {
         const result = await streamChat({
           settings,
-          customPersonas: customPersonas(),
-          runtime: chatRuntime(),
+          customPersonas: await customPersonas(),
+          runtime: await chatRuntime(),
           selfPortrait: selfPortrait(),
           messages: history,
           signal: controller.signal,
           onDelta: (_delta, full) => emit('chat-delta', { sessionId: sid, requestId, full }),
         })
-        const msg = store.addMessage(sid, 'assistant', result.content, { model: result.model })
-        store.touchSession(sid)
+        const msg = await store.addMessage(sid, 'assistant', result.content, { model: result.model })
+        await store.touchSession(sid)
         emit('chat', { type: 'message', sessionId: sid, message: msg })
         /* 一轮问答真正聊完，额外记一笔 —— 光发消息不算，得聊完 */
-        emit('affinity', addAffinity(AFFINITY_GAIN.chatRound, new Date(), { kind: 'chat', silent: true, sessionId: sid }))
+        emit('affinity', await addAffinity(AFFINITY_GAIN.chatRound, new Date(), { kind: 'chat', silent: true, sessionId: sid }))
 
         /*
          * 检查对话是否触发了图鉴解锁。
@@ -1131,7 +1148,7 @@ export function createService(dbPath, deps = {}) {
         const aborted = err instanceof ChatError && err.kind === 'aborted'
         const reason = aborted ? '已取消' : (err?.message ?? String(err))
         if (!aborted) {
-          const msg = store.addMessage(sid, 'assistant', reason, { error: true })
+          const msg = await store.addMessage(sid, 'assistant', reason, { error: true })
           emit('chat', { type: 'message', sessionId: sid, message: msg })
         }
         emit('chat-done', { sessionId: sid, requestId, ok: false, aborted, reason })
@@ -1150,14 +1167,14 @@ export function createService(dbPath, deps = {}) {
     },
 
     /* 元数据：前端渲染选项用 */
-    meta: () => ({
+    meta: async () => ({
       levels: LEVELS,
       restPatterns: REST_PATTERNS,
       defaults: DEFAULT_SETTINGS,
       chatProviders: CHAT_PROVIDERS,
       chatPersonas: [
         ...CHAT_PERSONAS.map((p) => ({ id: p.id, label: p.label, custom: false })),
-        ...store.listPersonas().map((p) => ({ id: p.id, label: p.label, custom: true })),
+        ...(await store.listPersonas()).map((p) => ({ id: p.id, label: p.label, custom: true })),
       ],
       /* 亲密度：等级表、上限、单次得分，前端要拿去渲染等级与收益说明 */
       affinity: {
@@ -1176,15 +1193,15 @@ export function createService(dbPath, deps = {}) {
      *
      * 返回**渲染所需的一切**（内容表、已解锁、记忆、进度），
      * 而不是让前端自己去拼 —— 拼的话两端会各写一套，
-     * 而且前端拿不到 OUTFIT_STORIES 这类只有主进程能 import 的数据。
+     * 而且前端拿不到 OUTFIT_STORIES 这类只有宿主侧能 import 的数据。
      */
     gallery: (sessionId) => gallerySnapshot(sessionId),
 
     /** 触发规则的调试视图：这段文本会命中哪些候选（排查「为什么没解锁」） */
-    explainTriggers: (text, sessionId) =>
+    explainTriggers: async (text, sessionId) =>
       explainCandidates(text, {
-        outfit: listUnlocked('outfit', sessionId),
-        video: listUnlocked('video', sessionId),
+        outfit: await listUnlocked('outfit', sessionId),
+        video: await listUnlocked('video', sessionId),
       }),
 
     /** 手动清空图鉴进度（不传则清当前会话） */

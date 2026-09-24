@@ -6,6 +6,7 @@
  */
 import { CHAT_PERSONAS, timeContextFor } from '../shared/moyu.js'
 import { normalizeForRequest, contentCost, modelSupportsImages, withSelfPortrait, buildRouteOptions } from '../shared/content.js'
+import { httpTransport } from '../shared/bridge/transport.js'
 
 /**
  * 组装 system 提示词：**稳定内容在前，易变内容在后**。
@@ -191,7 +192,7 @@ export async function streamChat({
 
   let res
   try {
-    res = await fetch(`${cfg.baseUrl}/chat/completions`, {
+    res = await httpTransport()(`${cfg.baseUrl}/chat/completions`, {
       method: 'POST',
       headers,
       body: JSON.stringify(body),
@@ -277,7 +278,7 @@ export async function completeOnce({ settings, system, messages, maxTokens = 64,
 
   const payload = [{ role: 'system', content: systemPrompt }, ...trimByChars(messages, cfg.maxChars, systemPrompt.length)]
 
-  const res = await fetch(`${cfg.baseUrl}/chat/completions`, {
+  const res = await httpTransport()(`${cfg.baseUrl}/chat/completions`, {
     method: 'POST',
     headers,
     body: JSON.stringify({
@@ -310,7 +311,7 @@ export async function pingChat({ settings, signal }) {
   const headers = { 'Content-Type': 'application/json' }
   if (cfg.apiKey) headers.Authorization = `Bearer ${cfg.apiKey}`
   try {
-    const res = await fetch(`${cfg.baseUrl}/chat/completions`, {
+    const res = await httpTransport()(`${cfg.baseUrl}/chat/completions`, {
       method: 'POST',
       headers,
       body: JSON.stringify({

@@ -454,8 +454,9 @@ watch(messages, scrollToBottom, { deep: true })
 
 <template>
   <div class="chat-shell">
-    <!-- 标题栏（可拖动窗口） -->
-    <header class="chat-head">
+    <!-- 标题栏（可拖动窗口）。data-tauri-drag-region 给 Tauri：
+         target 自身判定，所以左侧展示元素用 pointer-events:none 穿透（见 CSS） -->
+    <header class="chat-head" data-tauri-drag-region>
       <div class="head-left">
         <img class="head-avatar" :src="avatarSrc" alt="Yuki" />
         <div class="head-text">
@@ -723,13 +724,19 @@ watch(messages, scrollToBottom, { deep: true })
   gap: 10px;
   padding: 10px 12px;
   border-bottom: 1px solid rgba(0, 0, 0, 0.07);
+  /* Electron：整条标题栏交给系统拖拽 */
   -webkit-app-region: drag;
+  /* Tauri：data-tauri-drag-region 按 target 自身判定，
+     左侧纯展示元素（头像/文案/亲密度）穿透，让 mousedown 落在标题栏自身 */
 }
 .head-left {
   display: flex;
   align-items: center;
   gap: 9px;
   min-width: 0;
+  /* 见 .chat-head：Tauri 下展示区不拦截鼠标（Electron 下无副作用，
+     它本来就继承 drag） */
+  pointer-events: none;
 }
 .head-avatar {
   width: 30px;
@@ -771,6 +778,8 @@ watch(messages, scrollToBottom, { deep: true })
 .head-right {
   display: flex;
   gap: 4px;
+  /* Electron：按钮区显式排除拖拽；
+     Tauri：按钮是 target 且不带 drag 属性，天然不拖，无需处理 */
   -webkit-app-region: no-drag;
 }
 
