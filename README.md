@@ -7,43 +7,48 @@
 
 | 层 | 选型 | 说明 |
 |---|---|---|
-| 壳 | Electron 38 | 透明置顶窗口、托盘、无边框拖拽 |
-| 渲染 | Vue 3 + Vite 6 | 单份构建产物按 `?route=pet|panel` 挂载两个应用 |
-| 存储 | `node:sqlite` | Node 内置，零外部依赖；表结构自带同步字段 |
-| 图形 | 内联 SVG | 桌宠是手绘 SVG，无图片资源，可无限缩放 |
-| 打包 | @electron/packager | 免安装单文件 exe |
+| 壳 | Electron 38 + Tauri 2 | 双壳同构：同一份 JS 业务层跑两壳（Tauri 化历程见 TAURI_MIGRATION.md） |
+| 渲染 | Vue 3 + Vite 6 | 单份构建产物按 `?route=pet|panel|chat|chatpet|petmenu` 挂载五个应用 |
+| 存储 | Electron：`node:sqlite` / Tauri：rusqlite 桥 | 两壳共用表结构（自带同步字段）；service 层全异步以兼容双后端 |
+| 图形 | PNG 立绘 + CSS 动效 | 透明立绘按状态切换，无 3D、无骨骼 |
+| 打包 | @electron/packager / tauri build | 免安装单文件 exe（两壳各自出包） |
 
-> Electron 必须 ≥ 37（Node 22+），低版本没有 `node:sqlite`。
+> Electron 必须 ≥ 37（Node 22+，`node:sqlite` 所需）——该要求只约束 Electron 壳；Tauri 壳走 rusqlite。
 
 ## 目录
 
 ```
 src/
   main/
-    index.js      主进程：桌宠窗 / 面板窗 / 对话窗 / 托盘 / IPC
-    service.js    业务服务层（不依赖 electron，可被脚本直接调用）
-    store.js      SQLite 数据层（settings/checkins/worklogs/events/meta/chat_*）
+    index.js      Electron 主进程：桌宠窗 / 面板窗 / 对话窗 / 立绘窗 / 菜单窗 / 托盘 / IPC
+    service.js    业务服务层（双 store 后端，全异步，可被脚本直接调用）
+    store.js      SQLite 数据层（settings/checkins/worklogs/events/meta/personas/chat_*）
     chat.js       对话后端：SSE 流式解析 + 错误翻译（不依赖 electron）
+    ipc-handlers.js 业务通道表（Electron preload 与 Tauri 总线共用）
   preload/
-    index.cjs     contextBridge 桥（window.desk）
+    index.cjs     contextBridge 桥（window.desk，仅 Electron 壳）
   shared/
     moyu.js       摸鱼核心算法 + 对话预设（纯函数）
+    gallery.js / photoStories.js / photoMessage.js / tapLines.js / outfitStories.js …
   renderer/
     index.html    单页入口
     src/
-      main.js         按 route 挂载 pet / panel / chat
+      main.js         按 route 挂载 pet / panel / chat / chatpet / petmenu
       styles.css      主题变量（亮/暗、主题色）
-      stores/app.js   渲染侧状态容器（Electron / 浏览器 mock 双后端）
-      pet/PetApp.vue  桌宠：SVG 猫 + 气泡 + 拖拽 + 右键菜单
+      stores/app.js   渲染侧状态容器（Electron / Tauri 总线 / 浏览器 mock 多后端）
+      lib/            desk-shim（Tauri 版 window.desk）/ service-host（Tauri 业务宿主）/ service-bus（跨窗总线）
+      pet/PetApp.vue  桌宠：PNG 立绘 + 气泡 + 拖拽（右键菜单在独立小窗）
+      pet/MenuApp.vue 右键菜单窗宿主（共享组件 PetMenu.vue）
       chat/ChatApp.vue 对话窗：消息流 / 流式回复 / 历史会话
       panel/PanelApp.vue 面板外壳
       components/Sidebar.vue  侧边栏（导航 / 进度卡 / 等级 / 打卡）
-      views/*.vue     四个功能页
+      views/*.vue     功能页
 scripts/
   dev.js          vite dev + electron 联动
   smoke.js        核心算法与数据层冒烟测试（node 直跑）
   chat-test.js    SSE 解析 / 错误翻译 / 取消 的针对性测试
   build.js        打包免安装 exe
+src-tauri/        Tauri 壳（Rust：窗口 / 托盘 / rusqlite 桥 / HTTP 代理），见 TAURI_MIGRATION.md
 ```
 
 ## 命令
@@ -59,8 +64,11 @@ npm rebuild electron
 npm run smoke     # 核心算法 + 数据层冒烟测试
 npm test          # 冒烟 + 对话/SSE 测试
 npm run dev       # 开发（Vite HMR + Electron）
+npm run dev:web   # 仅 Vite（浏览器预览，mock 后端）
 npm start         # 生产构建并启动
 npm run pack      # 打包 exe 到 release/
+npm run tauri     # Tauri 壳（dev / build，见 TAURI_MIGRATION.md）
+npm run pack:mobile  # 打包 mobile/ 端产物
 ```
 
 无头验证真实 Electron 窗时开调试端口（默认关闭）：
@@ -72,6 +80,7 @@ DESK_DEBUG_PORT=9222 npm run dev      # 然后 curl 127.0.0.1:9222/json/list
 调试对话功能时可以用内置的假接口，不需要真 Key：
 
 ```bash
+node scripts/fake-llm.js 8788
 # 然后在「设置 → AI 对话」里把 BaseURL 填 http://127.0.0.1:8788/v1
 ```
 
@@ -194,7 +203,8 @@ node mobile/serve.js     # 或本地预览：手机连同一 WiFi 打开 http://
 **共享逻辑、独立数据**：
 
 ```
-mobile/chat.js ──▶ ../src/shared/{moyu,content,interactions}.js   ← 零复制
+mobile/chat.js ──▶ ../src/shared/{moyu,content,interactions,gallery,
+                     photoStories,photoMessage,tapLines,outfitStories,…}.js  ← 零复制
 ```
 
 改桌面端的人设或时段表，手机端重新 build 就同步生效。
@@ -292,8 +302,10 @@ release/
 - **错误翻译**：401/402/404/429 等状态码翻译成中文，并尽量提取上游 `error.message`。
 - **上下文**：只取最近 N 条**且排除 `error=1` 的消息**，避免把报错文本当成对话历史喂回去。
 
-配置存在 `settings` 表（`chatBaseUrl` / `chatApiKey` / `chatModel` / `chatPersona` 等），
+配置存在 `settings` 表（`chatBaseUrl` / `chatApiKey` / `chatModel` 等），
 `chatApiKey` 只落本地库，不下发到渲染进程（`chatStatus()` 只返回 `hasApiKey` 布尔值）。
+注意 `chatPersona` / `outfitMode` / `outfitSlug` / `petStories` 这几项是**逐会话**的
+（每个会话是独立的她），存在 meta 的 `set:<key>:<sessionId>` 键下，不在 settings 表。
 
 本地地址（`127.0.0.1` / `localhost`）不强制要求 Key，方便接 Ollama。
 
@@ -318,12 +330,13 @@ release/
 
 ### 角色设定
 
-`CHAT_PERSONAS` 在 `src/shared/moyu.js`，四个预设：
+`CHAT_PERSONAS` 在 `src/shared/moyu.js`，三个预设：
 
 - **Yuki（默认）** — 女大学生、活泼开朗、不黏人、不常生气
-- **女友（黏人型）** — 长篇人设定，规定关系状态、说话方式、情绪互动与底线
 - **学习助手（掩护模式）** — 正经工具口吻，防同事瞄屏
 - **通用助手** — 中性
+
+（曾有的「女友（黏人型）」预设已删除——与 Yuki 的朋友定位冲突，且模型默认就会演成黏人女友。）
 
 Yuki 的人设要点：把她当**朋友**而不是恋人。刻意写了「不追问『你为什么不回我』」
 「有自己生活，聊天是分享不是索取」「他忙的时候说『那你先忙』就好」，
@@ -394,14 +407,16 @@ PWA 图标由 `scripts/make-icons.js` 从切好的 `jk` 立绘生成（奶白底
 
 ### 照片（解锁装扮时的「她发来的照片」）
 
-每套装扮配一张**照片**。解锁时**两个地方同时出现**：
+每套装扮可配**多张照片**（`photoPathsOf` 按序号发现，缺的自动跳过——照片是分批生成的）。
+解锁时**两个地方同时出现**：
 
-1. **聊天记录里多一条她的消息**（主要效果）——
-   内容是 `[图片][配文]` 的块数组，往上翻还能重新看到，
-   和微信里对方发图一样
+1. **聊天记录里多出她的消息**（主要效果）——
+   配文一条、每张照片各一条，和微信里连拍一样；
+   往上翻还能重新看到
 2. **弹窗提示**（保留）—— 盖在聊天记录之上，关掉就能看到下面那条消息
 
-消息结构由 `shared/photoMessage.js` 统一构造，两端共用：
+消息结构由 `shared/photoMessage.js` 统一构造（`buildPhotoMessages` 拆分并给出
+逐条递增的 `offsetMs`，定死列表顺序）：
 ```js
 [{ type: 'text', text: '早八的课，她穿了 JK 制服拍了张照片' },
  { type: 'image_url', image_url: { url: 'photos/yuki-photo-jk.png' } }]
@@ -550,8 +565,8 @@ PC 端的图鉴在 `src/renderer/src/views/GalleryView.vue`，
 （多条连续落库若落在同一毫秒，列表排序会不稳定、照片跑到配文前面）。
 
 渲染层是**逐条出现**的，间隔取自相邻两条的 `createdAt` 差
-（主进程/手机端各自实现，见 `stores/app.js` 的 `enqueueMessage`
-与 `mobile/app.js` 的 `appendUnlockPhoto`）。相邻差超过 3 秒
+（拆分与落库在 `service.js` 的 `appendUnlockPhoto`；渲染层逐条出队的实现在
+`stores/app.js` 的 `enqueueMessage`，手机端在 `mobile/app.js`）。相邻差超过 3 秒
 视为普通对话、立即显示 —— 否则她会「迟到」几分钟才回话。
 
 拆分后的好处：每条消息里只有一张图，`bubble-images` 的
@@ -560,7 +575,7 @@ PC 端的图鉴在 `src/renderer/src/views/GalleryView.vue`，
 
 ### 表情系统
 
-12 张立绘分两类（`PET_EXPRESSIONS`）：
+25 个 key 分两类（`PET_EXPRESSIONS`）：
 
 **状态类**（由工作状态长期决定）
 
@@ -571,7 +586,8 @@ PC 端的图鉴在 `src/renderer/src/views/GalleryView.vue`，
 | `rest` | pose3 眨眼 | 休息日 |
 | `idle` | pose4 站姿 | 尚未开工 |
 
-**表情类**（互动临时触发，配合台词结束自动恢复）
+**表情类**（互动临时触发，配合台词结束自动恢复；另有 stretch / clap / read / nod /
+laugh / cry / doze 等扩展动作进入挂机池）
 
 | key | 图 | 触发 |
 |---|---|---|
@@ -579,7 +595,7 @@ PC 端的图鉴在 `src/renderer/src/views/GalleryView.vue`，
 | `angry` | 生气鼓腮 | 连点 4 次 |
 | `think` | 思考歪头 | 挂机说话 / 对话中 |
 | `sleep` | 抱膝睡觉 | 深夜 |
-| `jump` | 双手上举 | 打卡成功（备选） |
+| `jump` | 双手上举 | 打卡成功 / 补卡成功 |
 | `heart` | 比心 | 悬停搭话 / 早上问候 |
 | `surprise` | 睁大眼 | 双击 |
 | `shrug` | 摊手叹气 | 拖拽放下 / 快下班 |
@@ -588,7 +604,7 @@ PC 端的图鉴在 `src/renderer/src/views/GalleryView.vue`，
 | `coffee` | 递咖啡 | 久坐提醒 |
 | `wave` | 挥手再见 | 退出前 |
 | `yawn` | 打哈欠 | 深夜 / 早八，挂机轮换 |
-| `thumbsup` | 竖大拇指 | 打卡成功 |
+| `thumbsup` | 竖大拇指 | 聊天关键词「加油」等触发 |
 
 ### 挂机姿态轮换
 
@@ -597,21 +613,25 @@ PC 端的图鉴在 `src/renderer/src/views/GalleryView.vue`，
 
 | 档位 | 可用动作数 |
 |---|---|
-| 有点眼熟 | 4（snack / music / think / yawn） |
-| 熟络起来了 | 5（+ coffee） |
-| 好朋友 | 7（+ shrug / heart） |
-| 默契搭档 | 9（+ surprise / shy） |
-| 形影不离 | 10（+ sleep） |
+| 有点眼熟 | 4（read / snack / music / think） |
+| 熟络起来了 | 7（+ stretch / clap / nod …） |
+| 好朋友 | 10 |
+| 默契搭档 | 13 |
+| 形影不离 | 15（含 yawn / sleep 等） |
+
+加上服饰（0/1/4/8/24 套随档位解锁），挂机候选池合计 **4 → 8 → 14 → 21 → 39 项**。
 
 为什么这样改：原来 18 张立绘里 **9 张只能靠手动互动触发**，不点就永远看不到，
-其他图基本是废资源。现在挂机能自动轮到 14 张，剩下的 4 张是**语义上必须由事件触发**的：
+其他图基本是废资源。挂机能自动轮到大部分图，剩下 **6 张是语义上必须由事件触发**的：
 
 | 图 | 触发 |
 |---|---|
 | `angry` | 连点 4 次 |
 | `wave` | 退出前 |
-| `thumbsup` | 打卡成功 |
-| `jump` | 补卡成功（一次补齐多天） |
+| `jump` | 打卡成功 / 补卡成功 |
+| `thumbsup` | 聊天关键词触发 |
+| `clap` | 菜单打卡庆祝 |
+| `cry` | 惹她生气后的剧情 |
 
 把这几个塞进挂机池会很突兀（没事突然竖大拇指？），所以不解锁。
 
@@ -620,9 +640,9 @@ PC 端的图鉴在 `src/renderer/src/views/GalleryView.vue`，
 展示优先级：**互动表情 > 挂机姿态 > 状态心情**。
 轮换时会跳过有台词/表情的时刻，不抢画面。
 
-深夜和早八（`isTiredHour()`，即 23:00–09:00）只显示 `TIRED_POSES`
-（yawn / sleep / think），不轮换吃零食这类精神头很足的动作——时间不匹配会出戏。
-若过滤后池子为空会回落到完整池，不会卡住不轮换。
+深夜和早八（`isTiredHour()`，即 23:00–09:00）**不是硬过滤**，而是给困倦类动作
+（yawn / sleep / think）**加权**——出现概率更高，但不排除其他动作。
+池子为空时回落到完整池，不会卡住不轮换。
 
 `EMOTE_FOR` 把「情境 key → 表情 key」的映射单独抽出来，改台词不影响表情逻辑，
 也便于单测覆盖（`smoke.js` 会校验每个互动都配到了**实际存在**的图片文件）。
@@ -699,16 +719,25 @@ PC 端的图鉴在 `src/renderer/src/views/GalleryView.vue`，
 3. `settings:reset` 把 `petScale` 恢复成 1，但**没调用缩放的窗口调整**，
    于是 1× 的立绘留在放大后的窗口里。
 
-现在三条路径（菜单按钮 / 设置滑块 / 重置设置）统一走 `applyPetScale()`，
-并且在修改后广播状态。
+现在的机制：**窗口尺寸不再由壳层公式决定**——渲染层 ResizeObserver 量 `.stage`
+内容包围盒，报给壳层按右下角锚定重设窗口（`pet:refit`）；`pet:setScale` 只写设置
+并广播状态，立绘尺寸由广播驱动更新。三条路径（菜单按钮 / 设置滑块 / 重置设置）
+走的是同一份数据流，历史上有过三条路径各改各的三个 bug：
+窗口改了图没变（scale ref 没跟着更新）、改了窗口没广播（等 15 秒轮询才重排）、
+重置没调窗口调整（1× 立绘留在放大窗口里）——内容驱动贴合 + 单一数据流就是为根治它们。
 
-排查这类问题的关键：**分别量窗口尺寸和 `.pet` 的元素尺寸**，两者应当
-`340×700 : 118×136` 成比例；若窗口对而元素不对，就是 CSS 变量没更新。
+排查这类问题的关键：**分别量窗口尺寸和 `.pet` 的元素尺寸**。内容驱动贴合下
+窗口总是被渲染层量出的内容追平；若窗口对而元素不对，就是 CSS 变量没更新。
 
 ## 桌宠拖拽：必须交给系统，不能自己 setPosition
 
-桌宠移动用 `-webkit-app-region: drag`（见 `PetApp.vue` 的 `.pet`），**不要**改回
-「监听 mousemove → 调 IPC → `win.setPosition()`」的写法。原因：
+拖拽机制**两壳不同**：
+
+- Electron 壳：`-webkit-app-region: drag`（见 `PetApp.vue` 的 `.pet`）；
+- Tauri 壳：合成器级的 drag 区会连右键一起吞掉（自定义右键菜单收不到事件），
+  改用 `startDragging()`。
+
+**共同禁令**：不要改回「监听 mousemove → 调 IPC → `win.setPosition()`」的写法。原因：
 
 窗口一旦跟着指针移动，光标相对窗口的位置就在持续变化，Chromium 会在拖拽途中
 停止派发 `mousemove`（实测第二次移动之后事件就断了），表现为「拖不动 / 拖一下
@@ -716,12 +745,15 @@ PC 端的图鉴在 `src/renderer/src/views/GalleryView.vue`，
 
 交给窗口管理器后事件不经过渲染进程，拖拽全程顺滑；代价是：
 
-- 桌宠区域内的交互元素（菜单、气泡）必须显式设 `-webkit-app-region: no-drag`，
+- Electron 壳下桌宠区域内的交互元素（气泡）必须显式设 `-webkit-app-region: no-drag`，
   否则点不到。
 - 拖拽结束也会派发 `click`，需要一个位移标志区分「拖」和「点」。
 
-位置由主进程监听窗口 `moved` 事件写入 `meta.petPosition`，重启后恢复；
+位置由壳层写入 `meta.petPosition`：Electron 只在 `moved`（用户拖拽结束）时写，
+Tauri 在 Moved 事件持续写——两者都以**右下角锚点**为真值（v4：存顶角+当时尺寸，
+恢复按锚点−建窗尺寸落位；贴合是右下角锚定的，程序性移动写多少次都稳定）。
 恢复前会校验坐标是否落在当前显示器工作区内，避免换分辨率后桌宠跑到屏幕外。
+详见 FIX_PLAN.md §位置记忆 与 `petPosition.v=4` 的注释。
 
 ## 节假日与调休
 
@@ -759,8 +791,8 @@ isRestDay(settings, date, holidayTable)
 
 台词选择会避开上一句（`pickLine`），否则连续两次一样会很呆。
 
-亲密度存在 `meta.affinity` 而不是 `settings`：它是累计计数器，
-混进设置会让「重置设置」把互动记录一起清掉。
+亲密度存在 `meta.affinity:<sessionId>`（按会话隔离，每个会话是独立的她）
+而不是 `settings`：它是累计计数器，混进设置会让「重置设置」把互动记录一起清掉。
 
 ## 亲密度：数值必须变成行为，否则等于没有
 
@@ -781,8 +813,22 @@ isRestDay(settings, date, holidayTable)
 上限 300 点：**封顶是刻意的**。无限涨会让等级卡死在最后一档、进度条永远是满的，
 数值本身反而失去意义。
 
-**聊天另设日上限**（`CHAT_AFFINITY_DAILY_CAP = 60`）。不设的话一口气聊三十轮
-就能从 0 冲到「好朋友」，等级推进完全没有节奏。手动互动（摸头/双击）不受这个上限约束。
+**每日额度**（`AFFINITY_DAILY_CAP = 60`）：**所有来源合计**封顶——聊天、摸头、
+双击、点击全算。不设的话一口气聊三十轮就能从 0 冲到「好朋友」，一直点立绘
+也能无限刷，等级推进完全没有节奏。当日额度记在 `gainDay/gainToday`
+（旧字段 `chatDay/chatToday` 是「只封聊天」时代的遗产，读取时仍兼容——
+升级当天的额度不能凭空多出来）。
+
+**衰减**（`AFFINITY_DECAY`）：3 天没互动，之后每天 −1（降到 0 为止，
+`decaySettledDays` 记已结算天数，避免重复扣）。宽限期的存在让偶尔一天不摸鱼
+没有惩罚，久未互动才会缓慢回落——数值会流动，才像一段关系。
+
+**惹怒**（`isUpsetting` + `opts.upsetting`）：用户说了针对她的冒犯话（骂她、
+赶她走），当轮**只扣不加**（−2）。注意「用户自己诉苦」不算惹她——那该被安慰。
+判定只认「针对她」的冒犯，这条有单测。
+
+加减、扣、额度、衰减**全走 shared 的 `settleAffinity`**——与手机端同一套规则。
+两端各写一遍时改规则容易漏一处，表现为「电脑上掉了 3 点、手机上只掉 1 点」。
 
 **第二层 · 数值改变行为**（`AFFINITY_VOICE` + `linesFor`）
 
@@ -804,9 +850,40 @@ isRestDay(settings, date, holidayTable)
 
 **连续性**：`lastDay` 管「连续互动天数」，断档重新计数。
 
-**注意 API 形状**：service 暴露的是 `addAffinity(delta, opts)` 两参形式
-（`now` 由内部注入），`opts.kind === 'chat'` 才计入聊天配额。
-传错参数不会报错，只会静默漏记聊天配额 —— 单测覆盖了这条。
+**注意 API 形状**：service 暴露的是 `addAffinity(delta, opts, sessionId, now)`
+四参形式（`now` 允许调用方指定日期——单测靠它跨天验证额度重置）；
+额度规则对**所有来源**统一生效，不存在绕过额度的 kind。传错参数不会报错，
+只会静默漏记 —— 单测覆盖了这些。
+
+**存储形态**：亲密度按会话隔离，存 `meta.affinity:<sessionId>`
+（每个会话是独立的她），老的全局 `affinity` 键首次读取时迁移给当前会话后清除。
+`readAffinity` 对存储值**透传全部字段、只对数值做钳制**——逐字段白名单的写法
+曾经把新增的额度/衰减字段在读层丢掉，表现为「额度封顶形同虚设」（极隐蔽，有教训注释）。
+
+**第二层 · 数值改变行为**（`AFFINITY_VOICE` + `linesFor`）
+
+这是关键：只涨数字不改说话方式，用户感觉不到关系变近。
+
+| 档位 | 行为变化 |
+|---|---|
+| 有点眼熟 | 主动说话频率 ×1.15（还很生疏，少打扰） |
+| 熟络起来了 | 句首挂「诶，」前缀 |
+| 好朋友 | 频率 ×0.9，挂机台词池追加「主动分享自己」的句子 |
+| 默契搭档 | 频率 ×0.8，追加更懂你的句子 |
+| 形影不离 | 频率 ×0.7，切专属台词池（不再说客套话） |
+
+台词池不做「每档一套完整池子」——那要写五倍台词，写不细就会显得敷衍。
+通用池上挂前缀，只有最高档才切专属池。
+
+前缀会跳过语气词开头的句子：`诶嘿…` 加前缀会变成「诶，诶嘿…」。
+这条规则有单测（`语气词句跳过前缀`）。
+
+**连续性**：`lastDay` 管「连续互动天数」，断档重新计数。
+
+**注意 API 形状**：service 暴露的是 `addAffinity(delta, opts, sessionId, now)`
+四参形式（`now` 允许调用方指定日期——单测靠它跨天验证额度重置）；
+额度规则对**所有来源**统一生效，不存在绕过额度的 kind。传错参数不会报错，
+只会静默漏记 —— 单测覆盖了这些。
 
 ## 漏打补卡
 
@@ -882,7 +959,8 @@ service.applyBackfill(fromKey, now)     // 批量写入
 没有时间锚点，它只能从人设里随便挑一个场景 —— 于是时间线就乱了。
 
 **修法**：每次请求都注入一段实时时间块（`timeContextFor`，在 `src/shared/moyu.js`），
-拼在 system 提示词**最前面**（长上下文里模型对开头注意力更稳，而且要压过人设里的泛化描述）：
+拼在 system 提示词的**人设之后、末尾附近**——越靠近生成位置注意力越稳，
+而且不会被长对话历史稀释（提示词顺序的总原则见下方「稳定在前易变在后」章节）：
 
 ```
 【当前时间 — 必须严格遵守】
@@ -909,7 +987,9 @@ service.applyBackfill(fromKey, now)     // 批量写入
 
 ## 服饰系统（和动作正交的第二个维度）
 
-源素材里除了 18 张**动作**立绘，还有 17 张**服饰**立绘（便服/睡衣/旗袍/泳装/修女…）。
+## 服饰系统（和动作正交的第二个维度）
+
+源素材里除了动作立绘，还有大量**服饰**立绘（常服/便服/睡衣/旗袍/泳装/cosplay/JK…）。
 这两者是**正交维度**，不能混成一类：
 
 - 动作决定「她在做什么」（摸鱼 / 睡觉 / 生气…）
@@ -950,32 +1030,30 @@ slug 不撞名**，`install-pet-assets.js` 的 `ACTIONS` 白名单就是这道�
 粉吊带 / 连体衣 / 短睡裙）。
 
 所以现在改成**按完整文件名精确匹配**（`OUTFIT_FILES`），
-一张图一个 slug，共 **17 套**。两条纪律：
+一张图一个 slug，共 **24 套**。两条纪律：
 
 - 不做任何形式的「同款合并」——判断相同不能靠命名习惯，必须看内容
 - 遇到没登记的名字**直接报错中止**，不再静默丢弃（静默丢弃正是上次的根因）
 
 #### 解锁与换装
 
-服饰按亲密度分批解锁（和动作一样只增不减）：
+服饰按亲密度分批解锁（和动作一样只增不减），门槛由 `OUTFIT_MIN_POINTS`
+精确到每一套：
 
 | 档位 | 可用服饰 |
 |---|---|
 | 有点眼熟 | 无（刚认识不换装） |
-| 熟络起来了 | 便服 |
-| 好朋友 | + 红外套、荷边裙、居家清凉 |
-| 默契搭档 | + 黑白裙、深色制服、吊带、长裙 |
-| 形影不离 | 全部 17 套（含睡衣系列、旗袍、泳装、修女、cosplay） |
+| 熟络起来了（40 点） | 便服 |
+| 好朋友（120 点） | + 红外套、荷边裙、居家清凉 |
+| 默契搭档（300 点前档） | + 黑白裙、深色制服、吊带、长裙 |
+| 形影不离（满级） | 全部 24 套（含睡衣系列、旗袍、泳装、cosplay、JK 等） |
 
-于是挂机候选池（10 动作 + 服饰）随关系增长：**4 → 5 → 12 → 16 → 27 项**。
+于是挂机候选池（动作 + 服饰）随关系增长：**4 → 8 → 14 → 21 → 39 项**。
 
-时间自动换装规则刻意简单（换装是氛围，猜太细反而不合时宜）：
-
-| 时段 | 穿着 |
-|---|---|
-| 23:00–07:00 | 睡衣 |
-| 07:00–09:00 / 21:00–23:00 | 居家清凉 |
-| 其余 | 便服 |
+时间自动换装不再是固定三套——`outfitForTime` 按「**已解锁服饰** × 时段适配表
+（`OUTFIT_DAY_PARTS`）+ 稳定散列」从池子里挑：深夜偏向睡衣、工作时段偏向常服，
+同一时段内稳定不抖（散列键含小时），跨时段才换。旧的「23-07 睡衣 / 其余便服」
+三套规则只是没有任何解锁清单时的回落。
 
 `outfitMode: 'auto' | 'fixed'` + `outfitSlug` 存在 settings 里，
 所以桌宠菜单、对话窗、设置页三处读写的是**同一份**，改哪边都同步。
@@ -1041,7 +1119,7 @@ slug 不撞名**，`install-pet-assets.js` 的 `ACTIONS` 白名单就是这道�
 几何中心 ≠ 视觉重心，用户一眼就看出来了）。现在的 `SIDE/LEFT/TOP`
 是拿多个方案并排对比后定的，改之前请重新出对比图看一眼。
 
-## 图鉴系统（装扮 17 套 + 视频 7 段）
+## 图鉴系统（装扮 24 套 + 视频 15 段 + 生活照 23 组）
 
 聊天中自然解锁：聊到相关话题，她会主动发照片或视频给你。
 
@@ -1059,8 +1137,9 @@ slug 不撞名**，`install-pet-assets.js` 的 `ACTIONS` 白名单就是这道�
 - **关键词不命中就不调模型** —— 绝大多数轮次在 ② 就结束了
 - **一次请求判断全部候选** —— 不是每个候选调一次
 
-装扮和视频**共用同一份实现**（`checkGalleryUnlock` 按 `kind` 参数化）。
-复制两套的话，改一处忘一处，就会出现「装扮省了 token 但视频忘了省」。
+装扮、视频、生活照**共用同一份管线**（`shared/gallery.js` 的 `createGalleryRunner`，
+按 `kind` 参数化；类目表 `GALLERY_KEYS` 也在 shared，含 photo 类目）。
+复制三套的话，改一处忘两处，就会出现「装扮省了 token 但视频忘了省」。
 
 ### 视频处理（scripts/prepare-video.js）
 
@@ -1070,7 +1149,7 @@ slug 不撞名**，`install-pet-assets.js` 的 `ACTIONS` 白名单就是这道�
 |---|---|
 | `moov` 在 `mdat` 之后 → 手机要下完整个文件才能播 | `-movflags +faststart` 把索引前置 |
 | 视频未加载时是空白块 | 抽首帧存 jpg 当 poster |
-| 原片 0.7~2.0MB，7 段约 7.3MB | CRF 28 + AAC 96k，压到约 5.1MB |
+| 原片 0.7~2.0MB，15 段合计十余 MB | CRF 28 + AAC 96k 压缩 |
 
 中文源文件名（`摸头.mp4`）统一换成 slug（`headpat.mp4`）——
 中文进 URL 要百分号编码且跨平台易出问题。
@@ -1125,7 +1204,7 @@ DeepSeek 有**前缀缓存**：命中 $0.003/M，未命中 $0.15/M —— **差 
 
 **症状**：问她「现在几点/周几」，她含糊其辞或答错。
 
-**先排除的假设**：注入路径一直是好的 —— 时间块每轮都在 system 最前面，
+**先排除的假设**：注入路径一直是好的 —— 时间块每轮都注入 system 末尾，
 日期/星期/时刻都正确，长对话 30 轮后依然在。
 所以问题不在「没给她时间」，而在**提示词没让她意识到自己知道**。
 
@@ -1312,15 +1391,19 @@ const history = store.messagesSince(latest.id, since, 200)
 - `resolveChatConfig(settings, customPersonas)` **必须带上自定义列表**，
   否则自定义人设会被静默忽略、回落成 Yuki
 
-## 桌宠窗口尺寸约束
+## 桌宠窗口尺寸约束（内容驱动贴合）
 
-右键菜单、气泡、桌宠三者是**同一个无边框窗口内的 flex 列布局**（菜单在文档流里，
-不是 `position: absolute`）。窗口尺寸 `PET_SIZE` 必须同时容纳三者，否则菜单会被窗口
-上边界裁掉——早期版本用 220×260，菜单只能看见下半截（打卡和打开面板直接不可见）。
-当前为 **340×700**（菜单加了亲密度面板后内容约 420px，560 高会出现不易察觉的滚动条）；
-`petScale` 会同步缩放窗口并保持右下角锚定。
+右键菜单已迁**独立小窗**（petmenu，常驻隐藏、右键时定位到光标并按工作区钳制，
+失焦/Esc 收起），不再和桌宠挤同一个窗口——旧方案里「菜单+气泡+桌宠同窗、
+窗口尺寸要同时容纳三者」的约束随之作废（那段历史留痕：220×260 时代菜单只能
+看见下半截，后来 340×700 给菜单预留了整段高度，都是同一问题的迭代）。
 
-菜单本身带 `overflow-y: auto` 兜底：万一以后加项导致超长，它会自己滚动而不是把桌宠顶出窗口。
+现在桌宠窗 = **内容包围盒**：渲染层 ResizeObserver 量 `.stage`（气泡+把手+立绘）
+的实际尺寸，报给壳层按右下角锚定重设窗口（`pet:refit`）。壳层不维护尺寸公式，
+`petScale` 只影响渲染层的 CSS 缩放，窗口由内容自然撑开。
+
+菜单窗自己的高度也用同一套机制（`menu:resize`，渲染层量面板高度报给壳层，
+顶边不动），菜单内超长内容 `overflow-y: auto` 兜底。
 
 ## 摸鱼收入算法
 
@@ -1337,30 +1420,40 @@ const history = store.messagesSince(latest.id, since, 200)
 
 ## 数据与同步
 
-本地表全部带 `id / updatedAt / deletedAt / syncState`：
-
 ```sql
 checkins(id, dateKey UNIQUE, createdAt, note, updatedAt, deletedAt, syncState)
 worklogs(id, dateKey, minutes, kind, createdAt, updatedAt, deletedAt, syncState)
 settings(key, value, updatedAt, syncState)
 events(id, type, payload, createdAt)
 meta(key, value)
+personas(id, label, prompt, sortOrder, createdAt, updatedAt, deletedAt, syncState)
 chat_sessions(id, title, createdAt, updatedAt, deletedAt, syncState)
 chat_messages(id, sessionId, role, content, model, error, createdAt, updatedAt, deletedAt, syncState)
 ```
 
 补卡写入的 `checkins.note` 为「补卡」，和现场打卡区分开。
 
-`meta` 里存了几个跨表状态：`affinity`（亲密度与聊天配额计数）、
-`holiday-<year>`（按年缓存的节假日表）、`petPosition`（桌宠位置）。
+`meta` 里存了几个跨表状态：`affinity:<sessionId>`（亲密度，按会话隔离；旧全局
+`affinity` 键首次读取时迁移清除）、`activeSessionId`（当前活跃会话）、
+`set:<key>:<sessionId>`（逐会话设置：人设/穿着/图鉴开关）、
+`holiday-<year>`（按年缓存的节假日表）、`petPosition`（桌宠位置，
+`{x, y, w, h, v:4}`——右下角锚点语义，见「桌宠窗口尺寸约束」一节）。
 
 云端接入时只需：`pendingChanges()` 取增量 → 推送 → `markSynced(ids)`。
 不需要改表结构，也不影响离线使用。
 
-数据库落在 `%APPDATA%\desk-pet\desk-pet.db`。
+数据库落在 `%APPDATA%\desk-pet\desk-pet.db`（两壳共用同一份）。
 
 ## 安全边界
 
+**Electron 壳**：
+
 - `contextIsolation: true`、`nodeIntegration: false`，渲染进程只能用 preload 白名单暴露的 `window.desk`。
 - 主进程 IPC 全部走 `ipcMain.handle`，按 channel 白名单注册，无动态转发。
-- 不联网、不上传，全部本地读写。
+
+**Tauri 壳**：业务层跑在 pet 窗 webview 里（`service-host` 直建 service），
+其他窗经 `service-bus`（`bus:req`/`bus:res` 事件对，就绪 ping 门控）转发到 pet 窗；
+系统能力走显式注册的 Rust command（窗口/托盘/rusqlite 桥/HTTP 代理），
+contextIsolation 同样开启、无 Node 注入。
+
+两壳共同点：不联网、不上传，全部本地读写（节假日表与 AI 对话按用户配置出网）。
