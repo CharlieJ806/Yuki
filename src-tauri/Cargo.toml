@@ -37,3 +37,11 @@ dirs = "6"
 reqwest = { version = "0.12", features = ["stream"] }
 futures-util = "0.3"
 tokio = { version = "1", features = ["sync", "macros"] }
+
+# 实测结论（2026-09-24）：LTO+cgu1+opt-s+strip 全套试过——编译 1m13s→4m52s，
+# 69M→64M，strip 单独用 69M 不变。exe 体积由**内嵌资产**主导（照片 31M +
+# 立绘/视频等 dist 资源），编译器没有杠杆；要减体积只能动资产嵌入策略。
+# dev/test 档只留行号表：debuginfo 全量生成是重编译慢的大头之一，
+# 行号表足够抓 panic 位置，不装调试器也够用。
+[profile.dev]
+debug = "line-tables-only"
