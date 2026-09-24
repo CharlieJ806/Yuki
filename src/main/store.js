@@ -325,9 +325,17 @@ export function openStore(filePath) {
     return rows.reverse().map(mapMessage)
   }
 
-  function addMessage(sessionId, role, content, { model = null, error = false } = {}) {
+  function addMessage(sessionId, role, content, { model = null, error = false, createdAt = null } = {}) {
     const id = randomUUID()
-    const ts = now()
+    /*
+     * 默认取当前时间；`createdAt` 允许调用方指定。
+     *
+     * 为什么需要：一次解锁要落**多条**消息（配文一条、每张照片一条），
+     * 而 `now()` 是毫秒级 —— 循环里连续调用很可能拿到同一个值。
+     * 列表按 `ORDER BY createdAt ASC` 排，并列时顺序不保证，
+     * 配文和照片就会乱序。调用方按序传入递增的时间戳即可定死顺序。
+     */
+    const ts = createdAt ?? now()
     /*
      * content 列是 NOT NULL TEXT，而图文消息是块数组，所以要序列化。
      *

@@ -97,8 +97,46 @@ export const AFFINITY_GAIN = {
   daily: 1,
 }
 
-/** 同一天里「聊天」最多贡献多少点，防止无脑刷消息把关系刷满 */
-export const CHAT_AFFINITY_DAILY_CAP = 60
+/**
+ * 每天**所有来源合计**最多涨多少点。
+ *
+ * 早先只封聊天（`chatMessage`/`chatRound`），点击/摸头不计 ——
+ * 于是「一直点立绘」能无限涨，一天点 300 下就能从「有点眼熟」
+ * 冲到「默契搭档」，等级推进完全失去节奏。
+ *
+ * 现在全来源合计封顶。60 点约等于「聊 12 轮」或「点 60 下」，
+ * 是「认真互动一会儿」的量级，不至于随手就满。
+ */
+export const AFFINITY_DAILY_CAP = 60
+
+/** 兼容旧名（桌面端还在用） */
+export const CHAT_AFFINITY_DAILY_CAP = AFFINITY_DAILY_CAP
+
+/**
+ * 亲密度**下降**规则。
+ *
+ * ## 为什么要有下降
+ *
+ * 只会涨的关系没有张力 —— 用户没有任何理由「记得回来看看」，
+ * 而且「惹她生气」也不会有任何代价（说错话只影响这一轮的回复）。
+ * 加上下降之后，亲密度才真正表示「最近处得怎么样」。
+ *
+ * ## 两条规则
+ *
+ *   ① 久未互动：超过 `IDLE_DAYS` 天后，每天扣 `IDLE_DECAY_PER_DAY` 点
+ *   ② 惹她生气：当次聊天扣 `UPSET_PENALTY` 点（见 `affinityPenalty`）
+ *
+ * 都取**小额度**：扣得比涨得慢，正常用不会掉档；
+ * 只有长期不管或反复惹她才会真的降级。
+ */
+export const AFFINITY_DECAY = {
+  /** 多少天没互动开始衰减 */
+  IDLE_DAYS: 3,
+  /** 之后每天扣多少点 */
+  IDLE_PER_DAY: 1,
+  /** 单次惹她生气的扣分 */
+  UPSET: 2,
+}
 
 export function affinityLevel(points) {
   const p = Math.max(0, Number(points) || 0)
@@ -138,13 +176,232 @@ export function affinityGain(affinity, delta, today, opts = {}) {
   const room = Math.max(0, max - cur)
   if (room === 0) return 0
 
-  let allowed = Math.min(want, room)
-  if (opts.chat) {
-    const cap = Number(opts.chatCap) || CHAT_AFFINITY_DAILY_CAP
-    const used = affinity?.chatDay === today ? Number(affinity.chatToday) || 0 : 0
-    allowed = Math.min(allowed, Math.max(0, cap - used))
+  /*
+   * 当日已用掉的额度。
+   *
+   * `gainDay` 是**所有来源**共用的计数日；`chatDay`/`chatToday` 是
+   * 早期的「只算聊天」字段，保留读取是为了让升级前已有的数据
+   * 不会在当天突然多出一条额度（那天前半段的聊天没被计入新的日额度）。
+   */
+  const usedToday =
+    affinity?.gainDay === today
+      ? Number(affinity.gainToday) || 0
+      : affinity?.chatDay === today
+        ? Number(affinity.chatToday) || 0
+        : 0
+
+  const cap = Number(opts.cap) || AFFINITY_DAILY_CAP
+  return Math.min(Math.min(want, room), Math.max(0, cap - usedToday))
+}
+
+/**
+ * 算「久未互动」该扣多少点。
+ *
+ * ## 语义
+ *
+ * 从 `lastActive`（最后一次互动那天）到今天，**超过 IDLE_DAYS 之后**
+ * 的每一天扣一点。不是「一次性扣一大笔」——
+ * 那样用户隔一周回来会发现直接掉了一档，很像惩罚；
+ * 而「每天慢慢掉」的感觉是「关系在淡」，更符合直觉，也更容易挽回。
+ *
+ * ## 只结算「上次结算到哪」
+ *
+ * 用 `decayDay` 记录「衰减已经算到哪一天」，
+ * 否则同一天内每次互动都会重算一遍、反复扣。
+ *
+ * @param {object} affinity 亲密度记录
+ * @param {string} today 'YYYY-MM-DD'
+ * @returns {number} 本次该扣的点（0 表示不扣）
+ */
+export function affinityDecay(affinity, today) {
+  const last = affinity?.lastActive
+  if (!last || !today) return 0
+
+  const days = daysBetween(last, today)
+  if (days <= AFFINITY_DECAY.IDLE_DAYS) return 0
+
+  /*
+   * 已经结算过的部分不再扣。
+   * `decayDay` 为空说明从没结算过 —— 那时从「开始衰减的第一天」算起。
+   */
+  const settled = Number(affinity?.decaySettledDays) || 0
+  const totalIdleDays = days - AFFINITY_DECAY.IDLE_DAYS
+  const pending = Math.max(0, totalIdleDays - settled)
+  return pending * AFFINITY_DECAY.IDLE_PER_DAY
+}
+
+/**
+ * 今天到「上次结算」之间隔了几天。
+ *
+ * 用 UTC 零点算差再取整，避免夏令时/时区导致的 23h/25h 误差
+ * （那种情况下 `Math.round` 也够用，但用 UTC 更干净）。
+ */
+function daysBetween(fromKey, toKey) {
+  const [y1, m1, d1] = String(fromKey).split('-').map(Number)
+  const [y2, m2, d2] = String(toKey).split('-').map(Number)
+  if (!y1 || !y2) return 0
+  const a = Date.UTC(y1, m1 - 1, d1)
+  const b = Date.UTC(y2, m2 - 1, d2)
+  return Math.max(0, Math.round((b - a) / 86_400_000))
+}
+
+/**
+ * 「惹她生气」的判定词 —— **专门的一套，不能复用现有的情绪关键词**。
+ *
+ * ## 为什么不能复用 `CHAT_ACTION_RULES` 的 angry/cry
+ *
+ * 那两组是「**用户表达自己的情绪**」：
+ *   angry → 好气 / 烦死 / 气死
+ *   cry   → 想哭 / 委屈 / 好惨
+ *
+ * 这些是用户在诉苦，她的正确反应是**安慰**。
+ * 拿它判定「惹她生气」会完全反过来 ——
+ * 用户说「今天好委屈」，结果亲密度被扣，这是明确的误伤。
+ *
+ * ## 这套词只收「针对她」的冒犯
+ *
+ * 骂她、贬低她、冷暴力、赶她走。语气上的不耐烦（「烦死了」）
+ * 不算 —— 那多半是在说别的事，不是冲她。
+ *
+ * 词表刻意保守：**宁可漏判也不误判** —— 误扣亲密度是让人恼火的 bug，
+ * 漏判只是少一次惩罚。
+ */
+const UPSET_WORDS = [
+  /* 直接的否定与谩骂 */
+  '讨厌你', '烦你', '滚开', '走开', '别烦我', '闭嘴', '你很烦', '你好烦',
+  '不喜欢你', '不想理你', '别理我', '不理你了',
+  /* 贬低 */
+  '你真笨', '你好蠢', '真没用', '废物', '垃圾', '傻逼', '神经病',
+  /* 冷暴力 / 赶走 */
+  '别来找我', '不要你了', '换个', '卸载你', '删了你', '不要你了',
+  /* 分手式的 */
+  '不想跟你说话', '再也不想见',
+]
+
+/**
+ * 这轮用户消息是否「惹她生气」。
+ *
+ * 只看**用户说的话** —— 她的回复里出现「生气」不算
+ * （她在描述自己的情绪，不是用户在惹她）。
+ *
+ * @param {string} text 用户这轮发的内容
+ * @returns {boolean}
+ */
+export function isUpsetting(text) {
+  const s = String(text ?? '')
+  if (!s) return false
+  return UPSET_WORDS.some((w) => s.includes(w))
+}
+
+/** 单次惹她生气该扣多少 */
+export function affinityPenalty(upsetting) {
+  return upsetting ? AFFINITY_DECAY.UPSET : 0
+}
+
+/**
+ * 结算一次亲密度变化 —— **两端共用**，保证 PC 和手机的规则完全一致。
+ *
+ * ## 为什么合成一个函数
+ *
+ * 一次互动要处理四件事：加、减、每日额度、久未互动的衰减。
+ * 两端各写一遍的话，任何一处改规则（比如调整衰减天数）
+ * 都要记得改两处 —— 而漏改的表现是「手机上掉了 3 点、电脑上只掉 1 点」，
+ * 用户根本没法理解为什么。
+ *
+ * ## 结算顺序（有讲究）
+ *
+ *   ① 先算**久未互动的衰减**（基于上次互动日期）
+ *   ② 再算**本次互动**（加 or 扣）
+ *
+ * 不能反过来：如果先加、再按「上次互动日期」算衰减，
+ * 而这次互动刚好把日期推到了今天，衰减就永远算不出来了。
+ *
+ * ## 不变量
+ *
+ *   - 结果夹在 `[0, AFFINITY_MAX_POINTS]`
+ *   - `lastActive` 与 `gainDay` 只在**有正向互动**时推进
+ *     （纯扣分不该刷新「最近活跃」，否则冷暴力期间永远不会衰减）
+ *
+ * @param {object} affinity 当前记录
+ * @param {object} args
+ * @param {string} args.today 'YYYY-MM-DD'
+ * @param {number} [args.delta] 想加的点
+ * @param {boolean} [args.upsetting] 这轮是否惹她生气了
+ * @returns {{points:number, gainDay:string, gainToday:number, lastActive:string, decaySettledDays:number, gained:number, lost:number}}
+ */
+export function settleAffinity(affinity = {}, { today, delta = 0, upsetting = false } = {}) {
+  const max = AFFINITY_MAX_POINTS
+  const cur = Math.max(0, Math.min(max, Number(affinity.points) || 0))
+
+  /* ---------- ① 久未互动的衰减 ---------- */
+  const days = affinityDecay(affinity, today)
+  /*
+   * 衰减按「累计待扣天数」结算，并记下已结算到哪一天 ——
+   * 否则同一天里每次互动都会重算一遍、反复扣。
+   */
+  const idleDays = affinity?.lastActive
+    ? Math.max(0, daysBetween(affinity.lastActive, today) - AFFINITY_DECAY.IDLE_DAYS)
+    : 0
+  const lost = Math.min(cur, days)
+  let points = cur - lost
+
+  /* ---------- ② 本次互动 ---------- */
+  /*
+   * 惹她生气那轮**只扣不加**。
+   *
+   * 早先是「先扣 2 再按互动加分」，两者互相抵消 ——
+   * 说一句「讨厌你」净变化 0，等于没有惩罚。
+   * 现在生气当次的加分直接清零：这一轮就是负收益。
+   */
+  const upsetLoss = Math.min(points, affinityPenalty(upsetting))
+  points -= upsetLoss
+
+  /*
+   * 当日已用额度。
+   *
+   * **必须先判断「计数器是不是今天的」**，否则跨天不会重置：
+   * 第 2 天读到的还是第 1 天的 `gainToday: 60`，额度判定为「已用完」，
+   * 于是 `gained` 永远是 0、`gainDay` 永远不推进 —— 卡死在第一天。
+   * （这个 bug 的表现是「每天只能涨第一天的量」，很隐蔽。）
+   *
+   * 旧字段 `chatDay/chatToday` 也要认：升级当天的额度
+   * 不能因为换了字段名而凭空重置一截。
+   */
+  const sameDay = affinity.gainDay === today
+  const legacySameDay = !sameDay && affinity.chatDay === today
+  const usedToday = sameDay
+    ? Number(affinity.gainToday) || 0
+    : legacySameDay
+      ? Number(affinity.chatToday) || 0
+      : 0
+
+  const gained = upsetting
+    ? 0
+    : affinityGain({ ...affinity, points }, delta, today, { usedToday })
+  points = Math.min(max, points + gained)
+
+  /*
+   * 有正向互动才推进「最近活跃」——
+   * 惹她生气那天不算「互动」，否则冷暴力不会触发衰减。
+   */
+  const activeToday = gained > 0
+  const lastActive = activeToday ? today : (affinity.lastActive ?? today)
+
+  return {
+    points,
+    /*
+     * 当日额度计数：有加才累计。
+     * 用 `gainDay/gainToday` 而不是沿用旧的 `chatDay/chatToday` ——
+     * 后者的名字带「chat」，现在点击/摸头也计入，叫那个名会误导。
+     */
+    gainDay: gained > 0 ? today : (sameDay || legacySameDay ? today : affinity.gainDay),
+    gainToday: gained > 0 ? usedToday + gained : sameDay ? Number(affinity.gainToday) || 0 : 0,
+    lastActive,
+    decaySettledDays: idleDays,
+    gained,
+    /* 扣的总数（衰减 + 惹怒），调用方要用它决定要不要提示用户 */
+    lost: lost + upsetLoss,
   }
-  return allowed
 }
 
 /**
@@ -172,46 +429,45 @@ export function pickLine(pool, lastLine = null, rand = Math.random) {
  *   1. 挂机轮换池的候选（`outfit-*` 前缀的图直接参与轮换）
  *   2. 对话窗旁边的小立绘，按时间自动换 + 可手动指定
  *
- * slug 必须和 `prepare-yuki.js` 的 `OUTFIT_MAP` 保持一致。
+ * slug 必须与 `resources/pet/manifest.json` 里的 outfit 条目一致
+ * （由 `scripts/install-pet-assets.js` 从 resources/raw-cut 生成）。
  */
 export const OUTFITS = [
   /* 便服系列：都是「出门穿」的，风格不同 */
-  { slug: 'casual', label: '便服', emoji: '👕', hint: '白色针织裙，最日常的一套' },
-  { slug: 'casual-red', label: '红外套', emoji: '🧥', hint: '红色外套配制服裙' },
+  { slug: 'jk', label: 'JK 制服', emoji: '🎒', hint: '白衬衫黑背心裙，她最常穿的那套' },
+  { slug: 'casual-red', label: '红外套', emoji: '🧥', hint: '红色外套配短裙' },
   { slug: 'casual-lace', label: '荷边裙', emoji: '👗', hint: '白色荷叶边连衣裙' },
-  { slug: 'casual-mono', label: '黑白裙', emoji: '🖤', hint: '白上衣配黑裙' },
-  { slug: 'casual-dark', label: '深色制服', emoji: '🎩', hint: '深色制服，有点神秘' },
+  { slug: 'casual-mono', label: '黑白裙', emoji: '🖤', hint: '白衬衫配黑裙，很利落' },
+  { slug: 'casual-dark', label: '深色制服', emoji: '🎩', hint: '深色制服西装' },
 
   /* 睡衣系列：都是「在家躺平穿」的 */
-  { slug: 'pajamas', label: '睡裙', emoji: '🛌', hint: '白色蕾丝睡裙' },
-  { slug: 'pajamas-black', label: '黑吊带', emoji: '🌙', hint: '黑色吊带配长袜' },
-  { slug: 'pajamas-pink', label: '粉吊带', emoji: '🎀', hint: '粉色吊带睡衣' },
-  { slug: 'pajamas-bodysuit', label: '连体衣', emoji: '💤', hint: '连体睡衣' },
-  { slug: 'pajamas-shorts', label: '短睡裙', emoji: '🌸', hint: '短的粉色睡裙' },
+  { slug: 'pajamas', label: '睡裙', emoji: '🛌', hint: '灰色连帽家居裙' },
+  { slug: 'pajamas-black', label: '黑吊带', emoji: '🌙', hint: '黑色吊带配长袜，抱着猫' },
+  { slug: 'pajamas-pink', label: '粉吊带', emoji: '🎀', hint: '粉色蕾丝吊带睡裙' },
+  { slug: 'pajamas-bodysuit', label: '连体衣', emoji: '💤', hint: '灰色连体睡衣，盘腿坐着' },
+  { slug: 'pajamas-shorts', label: '短睡裙', emoji: '🌸', hint: '粉色短睡裙，抱着猫' },
 
   /* 特色款 */
-  { slug: 'homewear', label: '居家清凉', emoji: '🩳', hint: '在家窝着的时候' },
-  { slug: 'camisole', label: '吊带', emoji: '✨', hint: '吊带配短裤' },
+  { slug: 'camisole', label: '吊带', emoji: '✨', hint: '白色吊带配牛仔短裤' },
   { slug: 'longskirt', label: '长裙', emoji: '💃', hint: '紫色长裙，出门约会' },
   { slug: 'qipao', label: '旗袍', emoji: '🧧', hint: '开叉旗袍，正式场合' },
   { slug: 'nun', label: '修女', emoji: '⛪', hint: '修女服，偶尔的神奇搭配' },
-  { slug: 'swimsuit', label: '泳装', emoji: '🏖️', hint: '白色沙滩泳装' },
-  { slug: 'cosplay', label: 'cosplay', emoji: '🎭', hint: '想换个风格' },
-
-  /* 第二批素材 —— 与 scripts/prepare-yuki.js 的 OUTFIT_FILES 一一对应 */
-  { slug: 'jk', label: 'JK 制服', emoji: '🎒', hint: '早八的课，赶时间的打扮' },
-  { slug: 'campus', label: '清纯校园', emoji: '🌸', hint: '被当成大一新生的那种' },
+  { slug: 'swimsuit', label: '泳装', emoji: '🏖️', hint: '白色沙滩泳装配草帽' },
+  { slug: 'campus', label: '清纯校园', emoji: '🌸', hint: '米色开衫配百褶裙' },
   { slug: 'campus-idol', label: '校园偶像', emoji: '🎤', hint: '社团晚会上台的样子' },
   { slug: 'idol', label: '偶像风格', emoji: '🌟', hint: '想当一次舞台主角' },
   { slug: 'maid', label: '女仆', emoji: '🫖', hint: '女仆咖啡店体验' },
-  { slug: 'maid-two', label: '女仆装', emoji: '🍰', hint: '女仆装，端着盘子' },
-  { slug: 'interview', label: '实习面试', emoji: '💼', hint: '紧张到腿软的那天' },
-  { slug: 'ol', label: 'OL 制服', emoji: '🏢', hint: '想象毕业后的样子' },
-  { slug: 'stepmom', label: '小妈长裙', emoji: '🥀', hint: '成熟路线的长裙' },
+
+  /* 节日 / 场合款 */
+  { slug: 'xmas', label: '圣诞装', emoji: '🎄', hint: '圣诞红裙配驯鹿发饰' },
+  { slug: 'newyear', label: '新年旗袍', emoji: '🏮', hint: '红金旗袍，过年穿的' },
+  { slug: 'gown', label: '礼服', emoji: '👑', hint: '露肩晚宴礼服' },
+  { slug: 'formal', label: '西装', emoji: '💼', hint: '深色西装套裙' },
+  { slug: 'raincoat', label: '风衣', emoji: '☔', hint: '米色风衣配雨伞' },
 ]
 
-/** 默认（时间自动模式下无从判断时）穿哪套 */
-export const DEFAULT_OUTFIT = 'casual'
+/** 默认（时间自动模式下无从判断时）穿哪套 —— 用设定图的常服 */
+export const DEFAULT_OUTFIT = 'jk'
 
 export const OUTFIT_SLUGS = OUTFITS.map((o) => o.slug)
 
@@ -260,8 +516,7 @@ const OUTFIT_DAY_PARTS = {
   'pajamas-pink': ['sleep', 'home'],
   'pajamas-bodysuit': ['home', 'sleep'],
   'pajamas-shorts': ['sleep', 'home'],
-  homewear: ['home', 'sleep'],
-  casual: ['day', 'eve', 'home'],
+  jk: ['day'],
   'casual-red': ['day', 'eve'],
   'casual-lace': ['day', 'eve'],
   'casual-mono': ['day', 'eve'],
@@ -271,16 +526,15 @@ const OUTFIT_DAY_PARTS = {
   qipao: ['eve', 'day'],
   nun: ['day', 'eve'],
   swimsuit: ['day'],
-  cosplay: ['day', 'eve'],
-  jk: ['day'],
   campus: ['day'],
   'campus-idol': ['day', 'eve'],
   idol: ['eve', 'day'],
   maid: ['day'],
-  'maid-two': ['day'],
-  interview: ['day'],
-  ol: ['day'],
-  stepmom: ['eve', 'day'],
+  xmas: ['eve', 'home'],
+  newyear: ['eve', 'day'],
+  gown: ['eve'],
+  formal: ['day'],
+  raincoat: ['day', 'eve'],
 }
 
 /**
@@ -293,11 +547,10 @@ const OUTFIT_DAY_PARTS = {
 export function outfitForTime(now = new Date(), unlocked = null) {
   const part = dayPartOf(now)
 
-  /* 没给解锁清单（老调用点）时保持旧行为，避免影响既有测试 */
+  /* 没给解锁清单（老调用点）时按类别回落，避免影响既有测试 */
   if (!Array.isArray(unlocked) || !unlocked.length) {
-    if (part === 'sleep') return 'pajamas'
-    if (part === 'home') return 'homewear'
-    return 'casual'
+    if (part === 'sleep' || part === 'home') return 'pajamas'
+    return DEFAULT_OUTFIT
   }
 
   const fit = unlocked.filter((s) => (OUTFIT_DAY_PARTS[s] ?? ['day']).includes(part))
@@ -316,7 +569,13 @@ export function outfitForTime(now = new Date(), unlocked = null) {
   let h32 = (key ^ 0x9e3779b9) >>> 0
   h32 = Math.imul(h32 ^ (h32 >>> 15), 0x85ebca6b) >>> 0
   h32 = Math.imul(h32 ^ (h32 >>> 13), 0xc2b2ae35) >>> 0
-  return pool[(h32 ^ (h32 >>> 16)) % pool.length]
+  /*
+   * 最后一步必须再 `>>> 0`：JS 的位运算返回**有符号 int32**，
+   * 直接取模会得到负索引 -> `pool[-23]` = undefined -> 换装静默失效
+   * （实测 h=10 时 idx 为 -17，立绘不显示）。
+   */
+  const idx = ((h32 ^ (h32 >>> 16)) >>> 0) % pool.length
+  return pool[idx]
 }
 
 /** 服饰 key -> 展示信息（未知 key 回落默认） */
@@ -460,9 +719,9 @@ export function contextualScene(snapshot, now = new Date()) {
  */
 export const PET_EXPRESSIONS = {
   /* 状态类 */
-  work: 'pose1', // 握拳加油，摸鱼进行中
-  happy: 'pose2', // 蹦跳轻快，已赚满 / 心情好
-  rest: 'pose3', // 眨眼比心，休息日
+  work: 'read', // 抱书看，摸鱼进行中（在「做事」）
+  happy: 'pose2', // 站着笑，已赚满 / 心情好
+  rest: 'pose3', // 坐椅子上闭眼歇着，休息日
   idle: 'pose4', // 站姿安静，尚未开工
 
   /* 表情类 */
@@ -482,15 +741,30 @@ export const PET_EXPRESSIONS = {
   wave: 'wave', // 挥手再见，退出前
   yawn: 'yawn', // 打哈欠，早八 / 深夜
   thumbsup: 'thumbsup', // 竖大拇指，打卡成功
+
+  /* 第二批动作
+   * 与 `pose1..4` 这类「状态立绘」不同，这些是**具体行为**，
+   * 适合由事件触发，或进挂机池当「她自己在忙」 */
+  stretch: 'stretch', // 伸懒腰，久坐之后
+  clap: 'clap', // 拍手，打卡成功 / 完成目标
+  read: 'read', // 看书，安静陪伴
+  nod: 'nod', // 点头认可
+  laugh: 'laugh', // 笑，聊到开心的事
+  cry: 'cry', // 抱膝哭，被冷落 / 加班太久
+  doze: 'pose1', // 趴课桌打盹，挂机太久 / 午后犯困
 }
 
 /** 状态类表情（由 snapshot 决定） */
 export const MOOD_KEYS = ['work', 'happy', 'rest', 'idle']
 
+/** 全部表情 key（状态 + 表情），供对账用 */
+export const PET_EXPRESSIONS_KEYS = Object.keys(PET_EXPRESSIONS)
+
 /** 表情类表情（由互动临时触发） */
 export const EMOTE_KEYS = [
   'shy', 'angry', 'think', 'sleep', 'jump', 'heart', 'surprise', 'shrug',
   'snack', 'music', 'coffee', 'wave', 'yawn', 'thumbsup',
+  'stretch', 'clap', 'read', 'nod', 'laugh', 'cry', 'doze',
 ]
 
 /**
@@ -504,15 +778,15 @@ export const EMOTE_KEYS = [
  * 注意每张图都得适配「自己待着」的语义：举手、竖大拇指这类
  * 必须由事件触发（打卡成功），放挂机池里会很突兀，所以不收进来。
  */
-export const IDLE_POSES = ['snack', 'music', 'think', 'yawn']
+export const IDLE_POSES = ['snack', 'music', 'think', 'read']
 
 /** 挂机动作：按关系档位解锁 */
 export const IDLE_POSES_BY_VOICE = {
   stranger: IDLE_POSES,
-  familiar: [...IDLE_POSES, 'coffee'],
-  friend: [...IDLE_POSES, 'coffee', 'shrug', 'heart'],
-  close: [...IDLE_POSES, 'coffee', 'shrug', 'heart', 'surprise', 'shy'],
-  intimate: [...IDLE_POSES, 'coffee', 'shrug', 'heart', 'surprise', 'shy', 'sleep'],
+  familiar: [...IDLE_POSES, 'coffee', 'nod', 'doze'],
+  friend: [...IDLE_POSES, 'coffee', 'nod', 'doze', 'shrug', 'heart', 'stretch'],
+  close: [...IDLE_POSES, 'coffee', 'nod', 'doze', 'shrug', 'heart', 'stretch', 'surprise', 'shy', 'laugh'],
+  intimate: [...IDLE_POSES, 'coffee', 'nod', 'doze', 'shrug', 'heart', 'stretch', 'surprise', 'shy', 'laugh', 'sleep', 'yawn'],
 }
 
 /**
@@ -526,9 +800,9 @@ export const IDLE_POSES_BY_VOICE = {
  */
 export const OUTFITS_BY_VOICE = {
   stranger: [],
-  familiar: ['casual'],
-  friend: ['casual', 'casual-red', 'casual-lace', 'homewear'],
-  close: ['casual', 'casual-red', 'casual-lace', 'casual-mono', 'casual-dark', 'homewear', 'camisole', 'longskirt'],
+  familiar: ['jk'],
+  friend: ['jk', 'casual-red', 'casual-lace', 'pajamas'],
+  close: ['jk', 'casual-red', 'casual-lace', 'casual-mono', 'casual-dark', 'pajamas', 'camisole', 'longskirt'],
   intimate: OUTFIT_SLUGS,
 }
 
@@ -643,7 +917,7 @@ export const EMOTE_FOR = {
   offWork: 'wave',
   restDay: 'rest',
   idleChatter: 'think',
-  checkin: 'thumbsup', // 打卡成功竖大拇指
+  checkin: 'clap', // 打卡成功拍手
   /** 补卡成功：一次补一堆漏打的日子，值得蹦一下 */
   checkinBackfill: 'jump',
   chatting: 'think',
@@ -651,6 +925,8 @@ export const EMOTE_FOR = {
   snack: 'snack',
   /** 深夜 / 早八打哈欠 */
   tired: 'yawn',
+  /** 久坐提醒之后起身伸个懒腰 */
+  stretch: 'stretch',
   /** 退出前挥手 */
   quitting: 'wave',
 }
@@ -666,6 +942,153 @@ export const COFFEE_LINES = [
 export function emoteForScene(sceneKey) {
   return EMOTE_FOR[sceneKey] ?? null
 }
+
+/* ---------- 聊天关键词 -> 立绘动作 ---------- */
+
+/**
+ * 聊到相关话题时，让她**临时**摆出对应姿势（几秒后回到常态）。
+ *
+ * 为什么放在 shared：桌面端是主进程推 emote，手机端要在本地匹配 ——
+ * 但两边**认得的话题必须一致**，否则同一句话在两端表现不同。
+ *
+ * 匹配规则：
+ *   - `any` 里任意一个词命中即触发（子串匹配，够用且省算力）
+ *   - 每条带 `weight`：多个命中时取权重最高的，避免「既像在笑又像在哭」
+ *   - 关键词要**具体**，单字（如「哭」）会误伤「哭死我了」这类夸张用法；
+ *     两条以上备选写法时都列上
+ *
+ * 这些动作都必须在 `PET_EXPRESSIONS` 里有图，否则会出现空白立绘。
+ * `smoke.js` 有断言守着这层。
+ */
+export const CHAT_ACTION_RULES = [
+  {
+    emote: 'laugh',
+    weight: 10,
+    any: ['哈哈哈', '笑死', '笑不活了', '乐死', '好好笑', '太逗了', '笑出声', '哈哈'],
+  },
+  {
+    emote: 'cry',
+    weight: 9,
+    any: ['好难过', '想哭', '哭了', 'emo了', '委屈', '被欺负', '好惨', '心疼'],
+  },
+  {
+    emote: 'heart',
+    weight: 9,
+    any: ['喜欢你', '想你', '爱你', '比心', '抱抱', '亲亲', '么么', '贴贴'],
+  },
+  {
+    emote: 'angry',
+    weight: 8,
+    any: ['好气', '气死', '太讨厌', '烦死', '生气', '讨厌你', '不理你了'],
+  },
+  {
+    emote: 'surprise',
+    weight: 8,
+    any: ['真的假的', '不是吧', '震惊', '居然', '我去', '天呐', '不会吧'],
+  },
+  {
+    emote: 'clap',
+    weight: 7,
+    any: ['厉害', '太强了', '牛啊', '干得漂亮', '祝贺', '恭喜', '好棒'],
+  },
+  {
+    emote: 'thumbsup',
+    weight: 6,
+    any: ['加油', '可以的', '没问题', '支持你', '说得对', '赞成'],
+  },
+  {
+    emote: 'think',
+    weight: 5,
+    any: ['让我想想', '想想看', '思考', '怎么办', '有点纠结', '要不要'],
+  },
+  {
+    emote: 'yawn',
+    weight: 6,
+    any: ['好困', '困死', '想睡', '打哈欠', '睁不开眼'],
+  },
+  {
+    emote: 'sleep',
+    weight: 7,
+    any: ['晚安', '去睡了', '睡觉了', '我先睡', '困了睡'],
+  },
+  {
+    emote: 'shy',
+    weight: 6,
+    any: ['害羞', '不好意思', '别夸了', '脸红', '羞死了'],
+  },
+  {
+    emote: 'shrug',
+    weight: 4,
+    any: ['随便吧', '无所谓', '没办法', '不知道啊', '算了'],
+  },
+  {
+    emote: 'coffee',
+    weight: 5,
+    any: ['喝咖啡', '咖啡', '困得不行', '提神', '续命'],
+  },
+  {
+    emote: 'snack',
+    weight: 5,
+    any: ['吃零食', '好饿', '饿了', '吃点东西', '干饭', '外卖'],
+  },
+  {
+    emote: 'stretch',
+    weight: 4,
+    any: ['伸懒腰', '腰酸', '坐久了', '好累啊', '累死'],
+  },
+  {
+    emote: 'music',
+    weight: 4,
+    any: ['听歌', '耳机', '放首歌', '歌单', '在听什么'],
+  },
+  {
+    emote: 'read',
+    weight: 4,
+    any: ['看书', '读书', '学习', '写作业', '复习', '考试'],
+  },
+  {
+    emote: 'nod',
+    weight: 3,
+    any: ['嗯嗯', '好的', '明白', '懂了', '知道了'],
+  },
+]
+
+/**
+ * 从一段话里挑出该触发的动作。
+ *
+ * @param {string} text 用户的输入（或她刚说的话）
+ * @param {number} [now] 时间戳，用来避免同一动作连续重复
+ * @returns {string|null} emote key，没命中返回 null
+ */
+export function chatActionFor(text, now = Date.now()) {
+  const s = String(text ?? '')
+  if (!s) return null
+  let best = null
+  let bestWeight = 0
+  for (const rule of CHAT_ACTION_RULES) {
+    if (rule.any.some((kw) => s.includes(kw))) {
+      if (rule.weight > bestWeight) {
+        bestWeight = rule.weight
+        best = rule.emote
+      }
+    }
+  }
+  /*
+   * 命中后**冷却**：同一动作 20 秒内不重复触发。
+   * 不然连发几条「哈哈哈」会一直定格在笑的那个立绘上，
+   * 看起来像卡住了。
+   */
+  if (best) {
+    const last = lastChatAction[best] ?? 0
+    if (now - last < 20_000) return null
+    lastChatAction[best] = now
+  }
+  return best
+}
+
+/** emote -> 上次触发时间戳（冷却用，模块级即可，不需要持久化） */
+const lastChatAction = Object.create(null)
+
 
 /* ---------- 亲密度：关系变近之后说话方式也要跟着变 ---------- */
 

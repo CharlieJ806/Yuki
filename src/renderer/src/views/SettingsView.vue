@@ -28,6 +28,25 @@ const TABS = [
 ]
 const tab = ref('work')
 
+/**
+ * 角色设定图：高中 / 大学两个阶段。
+ *
+ * 图片在 `src/renderer/public/character/`（由 `resources/yuki-new/设定图*.png`
+ * 压到 700px、200 色而来）。摆在这里是为了让人设「长什么样」有个参照。
+ */
+const PROFILE_SHOTS = [
+  {
+    src: 'character/yuki-profile-1-highschool.png',
+    title: '高中时期',
+    caption: '安静害羞，穿白衬衫配黑背心裙的校服，个子约 150',
+  },
+  {
+    src: 'character/yuki-profile-2-university.png',
+    title: '大学时期（现在）',
+    caption: '深大金融系大二，深蓝开衫配格子裙，个子约 160',
+  },
+]
+
 const form = reactive({ ...DEFAULT_SETTINGS })
 const saving = ref(false)
 const savedAt = ref(null)
@@ -588,6 +607,27 @@ const syncStatus = computed(() => ({
           </span>
         </div>
 
+        <!--
+          角色设定图：两张分别对应高中 / 大学两个阶段。
+          放在这里是因为它解释「人设长什么样」—— 换人设、改外观时有个直观参照，
+          也方便用户自己比对模型认不认得出这是 Yuki。
+        -->
+        <div class="field span-2">
+          <label>角色设定图</label>
+          <div class="profile-shots">
+            <figure v-for="p in PROFILE_SHOTS" :key="p.src" class="profile-shot">
+              <img :src="p.src" :alt="p.title" loading="lazy" />
+              <figcaption>
+                <strong>{{ p.title }}</strong>
+                <span>{{ p.caption }}</span>
+              </figcaption>
+            </figure>
+          </div>
+          <span class="hint">
+            高中时期安静害羞，大学时期变得爱笑爱闹 —— 两段都写在人设里了
+          </span>
+        </div>
+
         <!-- 人设编辑器 -->
         <div v-if="editingPersona" class="field span-2 persona-editor">
           <div class="pe-head">
@@ -920,6 +960,45 @@ html.dark .tab.active {
 /* ---------- 人设编辑 ---------- */
 .field.span-2 {
   grid-column: 1 / -1;
+}
+
+/* 角色设定图：两张并排，窄屏自动换行 */
+.profile-shots {
+  display: flex;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+.profile-shot {
+  flex: 1 1 200px;
+  min-width: 0;
+  margin: 0;
+  border-radius: 11px;
+  overflow: hidden;
+  border: 1px solid var(--border);
+  background: var(--bg-subtle);
+}
+.profile-shot img {
+  display: block;
+  width: 100%;
+  aspect-ratio: 1;
+  /* 设定图是完整排版图（含服装展示、表情差集、三视图），
+     用 contain 保留全貌；用 cover 会把两侧内容裁掉 */
+  object-fit: contain;
+  background: #fff;
+}
+.profile-shot figcaption {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 8px 10px;
+  font-size: 12px;
+  line-height: 1.4;
+}
+.profile-shot figcaption strong {
+  font-size: 12.5px;
+}
+.profile-shot figcaption span {
+  color: var(--text-3);
 }
 .persona-row {
   display: flex;

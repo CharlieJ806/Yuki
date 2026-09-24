@@ -30,6 +30,15 @@ import {
   parseStoryJudge,
 } from './outfitStories.js'
 import {
+  PHOTO_STORIES,
+  PHOTO_JUDGE_SYSTEM,
+  PHOTO_CONDITION_LINES,
+  photoKeywordCandidates,
+  photoConditionUnlocks,
+  buildPhotoJudgePrompt,
+  parsePhotoJudge,
+} from './photoStories.js'
+import {
   VIDEO_STORIES,
   VIDEO_JUDGE_SYSTEM,
   VIDEO_CONDITION_LINES,
@@ -40,13 +49,35 @@ import {
 } from './videoStories.js'
 
 /** 图鉴类型 → 内容表与各自的判定函数 */
-export const GALLERY_KINDS = ['outfit', 'video']
+/*
+ * 类目顺序即 checkAny 的检查顺序，**一轮最多解锁一个** ——
+ * 先命中的赢。生活照放最后：它是「日常随手拍」，
+ * 而服饰照片每人只有 1~2 张，错过一次要等很久，优先给它。
+ */
+export const GALLERY_KINDS = ['outfit', 'video', 'photo']
+
+/**
+ * 图鉴类型 → 存储键名。
+ *
+ * 两端（Electron 主进程 / 手机端 IndexedDB）**必须用同一套键名** ——
+ * 将来做备份同步时，键名不同会平白多一层映射，还容易出现
+ * 「备份里有但当端读不到」这类难查的问题。
+ *
+ * 放这里（shared）而不是各端各写一份：之前就是手机端和主进程
+ * 各维护一张表，加「背景图」类目时只改了一处，另一端直接抛
+ * 「未知的图鉴类型」。单一真相源能从结构上杜绝这种情况。
+ */
+export const GALLERY_KEYS = {
+  outfit: { list: 'unlockedOutfits', mem: 'outfitMemories' },
+  video: { list: 'unlockedVideos', mem: 'videoMemories' },
+  photo: { list: 'triggeredPhotos', mem: 'photoMemories' },
+}
 
 /**
  * 条件类的固定台词。不经过模型，写死更省。
  */
 export const STORY_CONDITION_LINES = {
-  casual: '这是我平时最常穿的一套，先给你看看～',
+  jk: '这是我平时最常穿的一套，先给你看看～',
   pajamas: '都快睡了还跟你聊，喏，睡衣都换好了',
 }
 
@@ -70,6 +101,20 @@ const GALLERY_SPECS = {
     parseJudge: parseVideoJudge,
     conditionLines: VIDEO_CONDITION_LINES,
     defaultLine: '给你看个东西',
+  },
+  /*
+   * 生活照：她随手拍的日常（不绑装扮，横构图）。
+   * 管线与装扮/视频完全一致，只是判断条件不含「穿着吻合」。
+   */
+  photo: {
+    table: PHOTO_STORIES,
+    conditionUnlocks: photoConditionUnlocks,
+    keywordCandidates: photoKeywordCandidates,
+    judgeSystem: PHOTO_JUDGE_SYSTEM,
+    buildJudgePrompt: buildPhotoJudgePrompt,
+    parseJudge: parsePhotoJudge,
+    conditionLines: PHOTO_CONDITION_LINES,
+    defaultLine: '随手拍了一张',
   },
 }
 
@@ -180,19 +225,26 @@ export function createGalleryRunner(opts) {
  * 关键词预筛的调试视图：给定一段文本，看会命中哪些候选。
  * 用来排查「为什么聊了某个话题却没解锁」。
  */
-export function explainCandidates(text, unlockedByKind = {}) {
+export function explainCandidates(text, unlockedByKind = {}, points = 0) {
   const out = {}
   for (const kind of GALLERY_KINDS) {
     const spec = GALLERY_SPECS[kind]
     const unlocked = unlockedByKind[kind] ?? []
-    const all = spec.keywordCandidates(text, [])
-    const live = spec.keywordCandidates(text, unlocked)
+    /*
+     * `all` 用**无限亲密度**跑一遍，得到「文本本来能命中什么」；
+     * `live` 用真实亲密度，得到「现在实际会进模型判断的」。
+     * 两者一减，就是「被亲密度门槛卡住的」——
+     * 排查「为什么聊到了却没解锁」时，这一步能直接区分
+     * 「关键词没命中」和「关系还不够」。
+     */
+    const all = spec.keywordCandidates(text, [], Number.POSITIVE_INFINITY)
+    const live = spec.keywordCandidates(text, unlocked, points)
     out[kind] = {
-      /** 文本本来能命中的 */
+      /** 文本本来能命中的（不看亲密度） */
       matched: all,
-      /** 其中还没解锁的（= 真正会进模型判断的） */
+      /** 其中还没解锁、且亲密度够的（= 真正会进模型判断的） */
       candidates: live,
-      /** 已解锁所以被跳过的 */
+      /** 被跳过的（已解锁，或亲密度不够） */
       skipped: all.filter((s) => !live.includes(s)),
     }
   }

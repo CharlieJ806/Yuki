@@ -8,6 +8,7 @@
  * 表结构刻意和桌面端保持一致（sessions / messages / settings / personas / meta），
  * 这样两端共用同一套上层逻辑，将来想同步也只需序列化这几张表。
  */
+import { GALLERY_KEYS as KIND_KEYS } from '../src/shared/gallery.js'
 
 const DB_NAME = 'desk-pet-mobile'
 const DB_VERSION = 1
@@ -162,9 +163,17 @@ export async function listMessages(sessionId) {
   return rows.filter((m) => !m.deletedAt).sort((a, b) => a.createdAt - b.createdAt)
 }
 
-export async function addMessage(sessionId, role, content, { model = null, error = false } = {}) {
+export async function addMessage(sessionId, role, content, { model = null, error = false, createdAt: at = null } = {}) {
   const id = uid()
-  const createdAt = Date.now()
+  /*
+   * 默认取当前时间；`createdAt` 允许调用方指定。
+   *
+   * 为什么需要：一次解锁要落**多条**消息（配文一条、每张照片一条），
+   * 而 `Date.now()` 是毫秒级 —— 连续调用很可能拿到同一个值。
+   * 列表按 `createdAt` 排序，并列时顺序就不可靠了。
+   * 调用方按序传入递增的时间戳即可定死顺序。
+   */
+  const createdAt = at ?? Date.now()
   const msg = { id, sessionId, role, content, model, error: Boolean(error), createdAt }
 
   /*
@@ -267,14 +276,13 @@ export async function deletePersona(id) {
 /* ---------- 图鉴解锁（= 她的长期记忆） ---------- */
 
 /*
- * 装扮与视频共用同一套解锁机制，只是键名不同。
- * 参数化而不是复制两份：解锁/记忆/清理的逻辑完全一样，
+ * 装扮 / 视频 / 背景图共用同一套解锁机制，只是键名不同。
+ * 参数化而不是复制三份：解锁/记忆/清理的逻辑完全一样，
  * 复制出去改一处忘一处，就会出现「装扮清了但视频还在」这类问题。
+ *
+ * 键名表来自 shared/gallery.js —— 主进程用的是同一份，
+ * 两端键名必须一致（备份同步要用），不能各写一张。
  */
-const KIND_KEYS = {
-  outfit: { list: 'unlockedOutfits', mem: 'outfitMemories' },
-  video: { list: 'unlockedVideos', mem: 'videoMemories' },
-}
 
 function keysOf(kind) {
   const k = KIND_KEYS[kind]

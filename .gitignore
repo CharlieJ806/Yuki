@@ -10,9 +10,18 @@ release/
 
 # 临时/缓存
 .tmp-yuki/
+.tmp-install/
+.tmp-s/
+.tmp-split/
+.tmp-refs/
+.tmp-photos/
+.tmp-photo-refs/
 *.tmp
 # 无头浏览器验证时用的临时 profile
 .tmp-chrome-profile/
+
+# 素材换代时的备份目录（历史遗留的防呆规则，实际已清理干净）
+.backup-*/
 
 # 本地环境
 .env
@@ -25,3 +34,6 @@ src-tauri/gen/
 
 # Mimosa 安全扫描的本地工作目录
 .mimosa/
+
+# 预览脚本的临时启动器（被杀进程时会残留）
+.tmp-open-mobile.cjs

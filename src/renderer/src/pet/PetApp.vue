@@ -523,12 +523,22 @@ function rotateIdlePose() {
   const next = pickLine(usable, lastPose, Math.random)
   lastPose = next
   idlePose.value = next
-  /* 维持 20-50 秒再换，太频繁会显得躁动 */
-  const hold = 20_000 + Math.random() * 30_000
+  /*
+   * 展示 20-40 秒，然后**空一到两轮**再换下一张。
+   *
+   * 节奏：一轮 = 展示 + 间隔，约 60-100 秒换一次。
+   * 之前是「展示 20-50 秒 + 间隔 30-90 秒」，平均 45 秒就变一次，
+   * 用户反馈「切换太快、来不及看清」。
+   *
+   * 空档期间回落到「当前穿着」立绘（idlePose 置空），
+   * 这样她不是一直在换姿势，而是「做事 → 站好 → 再做下一件事」，
+   * 比连续切图更像真人。
+   */
+  const hold = 20_000 + Math.random() * 20_000
   if (idlePoseTimer) window.clearTimeout(idlePoseTimer)
   idlePoseTimer = window.setTimeout(() => {
     idlePose.value = ''
-    idlePoseTimer = window.setTimeout(rotateIdlePose, 30_000 + Math.random() * 60_000)
+    idlePoseTimer = window.setTimeout(rotateIdlePose, 40_000 + Math.random() * 60_000)
   }, hold)
 }
 
@@ -901,7 +911,14 @@ onBeforeUnmount(() => {
 .pet {
   position: relative;
   flex: 0 0 auto;
-  /* 立绘是竖向的（约 0.87 宽高比），容器跟着调整免得留大片空白 */
+  /*
+   * 立绘是竖向的（约 0.87 宽高比），容器跟着调整免得留大片空白。
+   *
+   * 118px 高 × petScale（上限 2.0）= 最大 236 CSS px —— 这是
+   * `install-pet-assets.js` 的 SPRITE_HEIGHT 所选的基准（300 CSS px
+   * 已覆盖它，手机上她页的 50vh 才是真正的上限，见该常量注释）。
+   * 素材实高 600，所以这里**从不放大**：2 倍缩放下正好 1:1。
+   */
   width: calc(118px * var(--pet-scale, 1));
   height: calc(136px * var(--pet-scale, 1));
   cursor: pointer;

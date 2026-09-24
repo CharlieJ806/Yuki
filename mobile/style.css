@@ -110,6 +110,76 @@ body {
   flex-direction: column;
   gap: 10px;
 }
+/*
+ * 聊天背景（用户在已解锁的背景图里选的那张）。
+ *
+ * 两层结构：
+ *   1. `.msgs` 自身铺 `--bg-image`，用 ::before 那层压透明度
+ *   2. 滚动时背景跟着内容走（`local`），不做出「背景定死、字在飘」的割裂感
+ *
+ * 为什么用遮罩而不是直接给图片加 opacity：
+ * 照片有的地方亮、有的地方暗，气泡文字压在亮处会糊。
+ * 遮罩层用**页面底色**半透明覆盖，等于把整张照片朝底色方向压，
+ * 文字对比度就有保证了 —— 这是聊天类 App 的通行做法。
+ */
+.msgs.has-bg {
+  position: relative;
+  background-image: var(--bg-image, none);
+  background-size: cover;
+  background-position: center;
+  background-attachment: local;
+}
+.msgs.has-bg::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  /* 覆盖整块可滚动区域，否则滚动时下半段没有遮罩 */
+  min-height: 100%;
+  background: var(--bg);
+  opacity: calc(1 - var(--bg-opacity, 0.25));
+  pointer-events: none;
+  z-index: 0;
+}
+/* 消息本身要在遮罩之上 */
+.msgs.has-bg > * { position: relative; z-index: 1; }
+
+/* 轻提示：一闪而过，不打断操作 */
+.toast {
+  position: fixed;
+  left: 50%;
+  bottom: calc(84px + var(--safe-b));
+  transform: translate(-50%, 8px);
+  max-width: 78vw;
+  padding: 9px 15px;
+  border-radius: 999px;
+  background: rgba(22, 24, 29, 0.9);
+  color: #fff;
+  font-size: 13px;
+  line-height: 1.35;
+  text-align: center;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.22s ease, transform 0.22s ease;
+  z-index: 60;
+}
+.toast.on { opacity: 1; transform: translate(-50%, 0); }
+
+/* 可作为聊天背景的图鉴项：可点 + 当前生效的加边框 */
+.g-item.g-pickable { cursor: pointer; }
+.g-item.g-on { box-shadow: 0 0 0 2px var(--accent); }
+.g-item.g-on::after {
+  content: '背景中';
+  position: absolute;
+  left: 6px;
+  top: 6px;
+  padding: 2px 7px;
+  border-radius: 999px;
+  background: var(--accent);
+  color: #fff;
+  font-size: 10px;
+  line-height: 1.5;
+}
+
 .empty { margin: auto; color: var(--text-3); font-size: 13.5px; }
 
 .msg { display: flex; flex-direction: column; align-items: flex-start; max-width: 86%; }
@@ -132,12 +202,38 @@ body {
 .msg.error .bubble { background: #fef2f2; border-color: #fecaca; color: #b91c1c; }
 .msg .time { margin-top: 3px; font-size: 10.5px; color: var(--text-3); }
 
+/*
+ * 气泡里的图片（用户发的图 / 她发来的照片）。
+ *
+ * 同时给 max-width 与 max-height、**不设 aspect-ratio**：
+ * 竖图受高度限制、横图受宽度限制，比例自动保持。
+ * 照片有 3:4 和 4:3 两种，写死比例会把其中一种压变形。
+ *
+ * 上限 210px（原来是 150）：解锁照片是那条消息的主角，
+ * 太小看不清表情；210 在 400dp 宽的手机上约占一半屏宽，
+ * 既不撑爆气泡、又能看清脸。
+ */
 .bubble-images { display: flex; flex-wrap: wrap; gap: 5px; margin-bottom: 5px; }
 .bubble-images img {
-  max-width: 150px;
-  max-height: 150px;
+  max-width: 210px;
+  max-height: 210px;
   border-radius: 10px;
   border: 1px solid var(--border);
+}
+/*
+ * 一条消息里多张照片（解锁时「连拍」发过来的那种）。
+ *
+ * 单张时用 210px 大图看着舒服，但两张叠起来 420px+ 就把一屏占满了。
+ * 所以两张及以上缩到 130px 并排一行 —— 一眼能看全，也不至于小到看不清。
+ * 用 `.bubble-images:has()` 判断张数，比给每个 img 加 class 干净。
+ */
+.bubble-images:has(> img:nth-child(2)) {
+  flex-wrap: nowrap;
+}
+.bubble-images:has(> img:nth-child(2)) img {
+  max-width: 130px;
+  max-height: 174px;
+  min-width: 0;
 }
 
 /* 打字指示 */
@@ -236,6 +332,36 @@ body {
   border-bottom: 1px solid var(--border);
   font-weight: 700;
 }
+/*
+ * 抽屉顶部的入口区（「她」/ 换装）。
+ * 不是会话，所以视觉上要和下面的会话列表区分开：
+ * 加一条分隔线，且不用会话项那种紧凑的行高。
+ */
+.drawer-entries {
+  flex: 0 0 auto;
+  display: flex;
+  gap: 8px;
+  padding: 8px 10px 10px;
+  border-bottom: 1px solid var(--border);
+}
+.drawer-entry {
+  flex: 1;
+  min-height: 44px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  border: 1px solid var(--border);
+  border-radius: 11px;
+  background: var(--bg);
+  font-size: 13.5px;
+  font-weight: 600;
+  color: inherit;
+  cursor: pointer;
+}
+.drawer-entry:active { background: rgba(0, 0, 0, 0.05); }
+.de-icon { font-size: 16px; line-height: 1; }
+
 .session-list { flex: 1; overflow-y: auto; list-style: none; margin: 0; padding: 6px; }
 .session-item {
   display: flex; align-items: center; justify-content: space-between;
@@ -309,6 +435,58 @@ body {
   font-size: 16px;
 }
 .field .row { display: flex; align-items: center; gap: 8px; }
+
+/* 范围滑杆（透明度）：默认样式在移动端太细，手指不好抓 */
+.field input[type='range'] {
+  width: 100%;
+  height: 28px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  -webkit-appearance: none;
+  appearance: none;
+}
+.field input[type='range']::-webkit-slider-runnable-track {
+  height: 5px;
+  border-radius: 999px;
+  background: var(--border);
+}
+.field input[type='range']::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 20px;
+  height: 20px;
+  margin-top: -7.5px;
+  border-radius: 50%;
+  background: var(--accent);
+  border: 2px solid #fff;
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.2);
+}
+.field input[type='range']:focus { outline: none; }
+/* 数值实时显示在标题里，强调一下 */
+.field > span b { color: var(--accent); font-weight: 600; }
+
+/* 角色设定图（高中 / 大学）：两张并排，窄屏各占一半 */
+.profile-shots { display: flex; gap: 8px; }
+.profile-shots figure {
+  flex: 1 1 0;
+  min-width: 0;
+  margin: 0;
+  border-radius: 11px;
+  overflow: hidden;
+  border: 1px solid var(--border);
+  background: var(--bg);
+}
+.profile-shots img {
+  display: block;
+  width: 100%;
+  aspect-ratio: 1;
+  /* 设定图是完整排版图（含服装展示、表情差集、三视图），
+     用 contain 保留全貌；用 cover 会把两侧内容裁掉 */
+  object-fit: contain;
+  background: #fff;
+}
+.profile-shots figcaption { padding: 6px 8px; font-size: 11px; color: var(--text-3); line-height: 1.35; }
 .field .row input { flex: 1; }
 
 .sheet-actions { display: flex; gap: 9px; margin-top: 4px; }
@@ -335,6 +513,79 @@ body {
 .danger-zone small { display: block; margin-top: 8px; font-size: 11px; color: var(--text-3); }
 
 /* 大图预览 */
+/*
+ * 详情弹层（看图鉴里某一项的大图 / 视频）。
+ *
+ * 与 .lightbox 的区别：lightbox 只是「把一张图放大」，
+ * 这里是完整的查看器 —— 标题栏、翻页、底部工具条。
+ * lightbox 保留给聊天里的照片（点开就该只是放大，不要一堆按钮）。
+ */
+.viewer {
+  position: fixed; inset: 0; z-index: 70;
+  display: flex; flex-direction: column;
+  background: rgba(0, 0, 0, 0.94);
+  color: #fff;
+  /* 顶部/底部留安全区，避免刘海和手势条压住内容 */
+  padding: max(10px, env(safe-area-inset-top)) 10px max(10px, env(safe-area-inset-bottom));
+}
+
+.viewer-head {
+  display: flex; align-items: center; justify-content: space-between;
+  gap: 8px; flex: none;
+}
+.viewer-title { font-size: 15px; font-weight: 600; }
+.viewer-head .icon-btn { color: #fff; }
+
+.viewer-stage {
+  position: relative;
+  flex: 1; min-height: 0;
+  display: flex; align-items: center; justify-content: center;
+  gap: 4px;
+}
+.viewer-img, .viewer-video {
+  max-width: 100%; max-height: 100%;
+  object-fit: contain;
+  border-radius: 8px;
+}
+
+/*
+ * 翻页按钮压在图片两侧。
+ * 用半透明底而不是纯箭头 —— 浅色照片上白箭头会看不见。
+ */
+.viewer-nav {
+  position: absolute; top: 50%; transform: translateY(-50%);
+  width: 40px; height: 40px; border: 0; border-radius: 50%;
+  background: rgba(0, 0, 0, 0.45); color: #fff;
+  font-size: 24px; line-height: 1; cursor: pointer;
+  display: grid; place-items: center;
+}
+.viewer-nav.prev { left: 2px; }
+.viewer-nav.next { right: 2px; }
+.viewer-nav:active { background: rgba(0, 0, 0, 0.7); }
+/* 只有一张时藏掉 —— 能看见箭头却翻不动会让人以为图没加载出来 */
+.viewer-nav[hidden] { display: none; }
+
+.viewer-count, .viewer-line {
+  flex: none; text-align: center; font-size: 12px; opacity: 0.75;
+  margin: 2px 0;
+}
+.viewer-line { opacity: 0.9; font-size: 13px; }
+
+.viewer-tools {
+  flex: none; display: flex; gap: 8px; justify-content: center;
+  padding-top: 6px;
+}
+.viewer-tools .btn {
+  background: rgba(255, 255, 255, 0.14); color: #fff;
+  border-color: rgba(255, 255, 255, 0.2);
+}
+/* 已经在用的那张/已入池的，给个「已选中」的视觉 */
+.viewer-tools .btn.on {
+  background: rgb(var(--theme-accent));
+  border-color: rgb(var(--theme-accent));
+}
+.viewer-tools .btn[hidden] { display: none; }
+
 .lightbox {
   position: fixed; inset: 0; z-index: 60;
   display: grid; place-items: center;
@@ -577,6 +828,621 @@ body {
 }
 
 /* ---------- 亲密度 ---------- */
+/* ---------- 「她」的全屏页 ---------- */
+
+/*
+ * z-index 取 35：**低于 sheet(40)**。
+ *
+ * 一开始写的 45（想着「要比 sheet 高」），但那正好是反的 ——
+ * 这页只是聊天页的替代品，不是「覆盖在上面」的浮层；
+ * 从它打开的换装/图鉴是 sheet，必须能盖住它。
+ *
+ * 现在高于 drawer(30)，低于 sheet(40)，语义就对了：
+ *   抽屉 < 立绘页 < 各种面板 < 提示/弹窗
+ *
+ * 注：`openWardrobe` 里仍然会显式把这一页藏起来（双保险）——
+ * 面板打开时底下露出半个立绘页也怪。
+ */
+/*
+ * 背景层：铺满整页的场景照（模糊）。
+ *
+ * ## 为什么模糊
+ *
+ * 源图是 384×512 的竖幅，屏幕约 430×900 —— 比例差得远。
+ * 直接 `cover` 会把左右裁掉大半（实测只剩一双鞋）；
+ * `contain` 又会上下留黑边。
+ *
+ * 模糊既解决了比例问题（看不清就不在意被裁），又符合「背景」的定位：
+ * 它是氛围，不是内容。想看清场景应该去图鉴看原图。
+ *
+ * ## 为什么用 ::before 放大一圈
+ *
+ * `filter: blur()` 会把**边缘**也模糊掉，导致四周出现一圈透明晕
+ * （模糊采样到了图片外面的空白）。放大 110% 让溢出部分盖住那圈晕，
+ * 是处理这个问题的标准手法。
+ *
+ * 放大后仍不够时靠负 inset 兜底 —— 用 `inset: -6%` 而不是
+ * `transform: scale()`：scale 会连带影响 background 的定位计算，
+ * 而 inset 只是把盒子撑大，`cover` 的语义不变。
+ */
+.petpage-bg {
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+  overflow: hidden;
+  opacity: 0;
+  transition: opacity 0.35s ease;
+}
+.petpage-bg.on { opacity: 1; }
+
+.petpage-bg::before {
+  content: '';
+  position: absolute;
+  /* 往外撑一圈，盖住模糊产生的透明边缘 */
+  inset: -8%;
+  /* URL 由 JS 通过 CSS 变量塞进来（伪元素拿不到元素引用） */
+  background-image: var(--pet-bg);
+  background-position: center;
+  background-size: cover;
+  background-repeat: no-repeat;
+  /* 6px 足够把「看得出内容」变成「只有色块和光影」 */
+  filter: blur(6px);
+}
+
+/*
+ * 压暗层。
+ *
+ * 用一层半透明黑而不是给图片加 `filter: brightness()`：
+ *   - 遮罩只影响视觉，不动图片资源（同一张图以后换用法不受影响）
+ *   - brightness 会把图整体压灰；黑色遮罩是「加暗」，
+ *     在深色区域更自然（书桌那张本来就有大片暗部）
+ *
+ * 45%：30% 实测压不住 —— 顶部信息栏和亲密度卡的半透明白底
+ * 脱不开背景，文字被抢。
+ */
+.petpage-bg-dim {
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  background: rgba(0, 0, 0, 0.45);
+  pointer-events: none;
+  /* 没背景时不压暗，否则整页会莫名变灰 */
+  opacity: 0;
+  transition: opacity 0.35s ease;
+}
+.petpage-bg-dim.on { opacity: 1; }
+
+/*
+ * 所有内容层要盖在背景之上。
+ *
+ * **必须排除菜单**（`.petpage-menu`）—— 它自己是 `position: absolute` 的浮层，
+ * 被这条规则改成 `relative` 后会掉进 flex 流，
+ * 于是「绝对定位到信息栏下方」失效，整个菜单跑到屏幕最底部、
+ * 还被 flex 拉成整行宽（实测 382px）。
+ *
+ * 这类「通配选择器撞上特例」的坑很难从代码看出来 ——
+ * 两个规则各自都对，合起来才出错。所以用 `:not()` 显式列出例外，
+ * 而不是靠 `position: absolute` 的优先级去压（规则顺序一变就翻车）。
+ */
+.petpage > *:not(.petpage-bg):not(.petpage-bg-dim):not(.petpage-menu) {
+  position: relative;
+  z-index: 2;
+}
+
+.petpage {
+  position: fixed;
+  inset: 0;
+  z-index: 35;
+  display: flex;
+  flex-direction: column;
+  /* 与 #app 同样的 dvh 语义处理：移动端地址栏会吃掉 100vh */
+  height: 100dvh;
+  /*
+   * 柔和的双色渐变背景。
+   *
+   * 原来用纯 `var(--bg)`（接近纯白），配深色文字很素；
+   * 立绘是暖色调，背景带一点主色晕染能把它托起来。
+   * 不用图片背景 —— 那要额外资源，而且渐变在深色模式下也能自动适配。
+   */
+  background:
+    radial-gradient(120% 60% at 50% 0%, rgb(var(--theme-accent, 20 184 166) / 0.13), transparent 70%),
+    var(--bg);
+  padding: max(10px, env(safe-area-inset-top)) 16px max(10px, env(safe-area-inset-bottom));
+}
+
+/* ---------- 顶部信息栏（日期 / 时间 / 周末 / 打卡） ---------- */
+
+/*
+ * 一条横向卡片，内容按「左 / 中 / 右」三段排：
+ *   左：日期 + 周末倒计时        中：大号时间        右：打卡按钮 + 天数
+ * 三段而不是两段 —— 时间放中间才像「状态栏」，两边各挂一组信息也不会头重脚轻。
+ */
+.petpage-info {
+  flex: 0 0 auto;
+  display: grid;
+  /* 四列：左（日期）/ 中（时间）/ 右（打卡）/ ⋯ 菜单 */
+  grid-template-columns: 1fr auto 1fr auto;
+  align-items: center;
+  gap: 10px;
+  /* 内部留白给足，三组信息才不显得挤在一起 */
+  padding: 15px 17px;
+  /* 18px 与底部工具条一致 —— 圆角是这一页最重要的统一语言 */
+  border-radius: 18px;
+  background: rgb(var(--surface-rgb, 255 255 255) / 0.8);
+  border: 1px solid rgb(var(--theme-accent, 20 184 166) / 0.16);
+  backdrop-filter: blur(12px);
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.06);
+}
+
+/*
+ * 右上角的「⋯」—— 次要操作的入口。
+ *
+ * 做成无边框的纯文字按钮：它是个「入口」而不是「操作」，
+ * 加边框会和旁边的打卡按钮抢注意力。
+ */
+.pinfo-more {
+  width: 32px;
+  height: 32px;
+  display: grid;
+  place-items: center;
+  border: 0;
+  border-radius: 10px;
+  background: transparent;
+  color: var(--text-3);
+  font-size: 18px;
+  line-height: 1;
+  cursor: pointer;
+  align-self: start;
+}
+.pinfo-more:active { background: rgb(0 0 0 / 0.06); }
+
+/*
+ * 次要操作菜单。
+ *
+ * 绝对定位到信息栏下方、右对齐 —— 从 ⋯ 展开的直觉位置。
+ * `z-index` 高于内容层（内容层是 2），否则会被立绘盖住。
+ */
+/*
+ * 菜单紧跟在「⋯」按钮下方、与它右对齐。
+ *
+ * ## 定位怎么算
+ *
+ *   顶部内边距（safe-area 或 10px）
+ *   + 信息栏自身 padding-top（15px）
+ *   + 按钮高（32px）
+ *   + 间隙（6px）
+ *   = 菜单顶边
+ *
+ * 逐步算而不是写死像素：之前 `top: 78px` 是魔法数字，
+ * 信息栏一改内边距就错位（实测菜单直接盖住按钮 6px）。
+ *
+ * ## 右对齐
+ *
+ * 按钮在信息栏内、距右边 `padding-right(17px) - 自身右边距`，
+ * 这里用同样的 17px 让菜单右边缘和按钮右边缘对齐。
+ */
+.petpage-menu {
+  position: absolute;
+  top: calc(max(10px, env(safe-area-inset-top)) + 15px + 32px + 6px);
+  right: 17px;
+  z-index: 30;
+  min-width: 148px;
+  padding: 6px;
+  border-radius: 14px;
+  background: rgb(var(--surface-rgb, 255 255 255) / 0.95);
+  border: 1px solid rgb(0 0 0 / 0.07);
+  backdrop-filter: blur(12px);
+  box-shadow: 0 10px 28px rgba(0, 0, 0, 0.14);
+  /* 出现时轻微缩放，比硬切换自然 */
+  animation: menu-in 0.14s ease-out;
+  transform-origin: top right;
+}
+@keyframes menu-in {
+  from { opacity: 0; transform: scale(0.94); }
+  to   { opacity: 1; transform: scale(1); }
+}
+
+.pmenu-item {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  width: 100%;
+  padding: 11px 12px;
+  border: 0;
+  border-radius: 10px;
+  background: transparent;
+  color: var(--text);
+  font-size: 13.5px;
+  font-weight: 500;
+  text-align: left;
+  cursor: pointer;
+}
+.pmenu-item:active { background: rgb(var(--theme-accent, 20 184 166) / 0.1); }
+.pmi-icon { font-size: 15px; line-height: 1; }
+
+.pinfo-left { min-width: 0; }
+.pinfo-date {
+  margin: 0;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text);
+  white-space: nowrap;
+}
+.pinfo-sub {
+  margin: 2px 0 0;
+  font-size: 10.5px;
+  color: var(--text-3);
+  white-space: nowrap;
+}
+
+.pinfo-mid { text-align: center; }
+/*
+ * 时间用等宽数字 —— 不等宽的话「11:11」和「10:00」宽度不同，
+ * 每分钟跳一次整行会左右抖。
+ */
+.pinfo-clock {
+  margin: 0;
+  font-size: 26px;
+  font-weight: 800;
+  letter-spacing: -0.03em;
+  font-variant-numeric: tabular-nums;
+  color: var(--text);
+  line-height: 1.1;
+}
+
+.pinfo-right {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 3px;
+  min-width: 0;
+}
+
+/*
+ * 打卡按钮。
+ * 未打卡：主色实心（明确的行动召唤）
+ * 已打卡：变淡、去掉阴影，视觉上「没事可做了」，但仍可点（不报错）
+ */
+.checkin-btn {
+  min-height: 32px;
+  padding: 0 14px;
+  border-radius: 10px;
+  border: 1px solid rgb(var(--theme-accent, 20 184 166));
+  background: rgb(var(--theme-accent, 20 184 166));
+  color: #fff;
+  font-size: 13px;
+  font-weight: 700;
+  cursor: pointer;
+  white-space: nowrap;
+  box-shadow: 0 3px 10px rgb(var(--theme-accent, 20 184 166) / 0.3);
+  transition: transform 0.12s ease-out, box-shadow 0.2s;
+}
+.checkin-btn:active { transform: scale(0.95); }
+.checkin-btn.done {
+  background: rgb(var(--theme-accent, 20 184 166) / 0.12);
+  border-color: rgb(var(--theme-accent, 20 184 166) / 0.25);
+  color: rgb(var(--theme-accent, 20 184 166));
+  box-shadow: none;
+  cursor: default;
+}
+
+.pinfo-days {
+  margin: 0;
+  font-size: 10.5px;
+  color: var(--text-3);
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+
+/*
+ * 舞台：立绘居中，气泡绝对定位浮在上方。
+ * 用 flex:1 吃掉剩余高度，让立绘尽可能大 —— 这是这一页存在的意义。
+ */
+/*
+ * 立绘舞台。
+ *
+ * ## 位置的两次返工
+ *
+ *   ① 一开始 `align-items: center` —— 立绘居中，用户说「往下一点」
+ *   ② 改成 `flex-end` 贴底 —— 又太靠下了，脚跟几乎压着亲密度条
+ *   ③ 现在：`flex-end` + 底部留一段 padding
+ *
+ * ## 为什么用「百分比 padding」而不是固定 px
+ *
+ * 底部留白取**舞台高度的百分比**：不同屏高下这个间距会等比缩放，
+ * 视觉重量始终一致。写死 `padding-bottom: 40px` 在小屏上会显得很空、
+ * 大屏上又几乎看不出留了空。
+ *
+ * 用 `padding-bottom` 而不是 `margin-bottom`：padding 算在舞台内部，
+ * 不会改变舞台自身的尺寸（flex:1 已经把它定死了），
+ * 立绘的可用高度自适应收缩，不会把下面的亲密度条顶下去。
+ */
+.petpage-stage {
+  position: relative;
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  align-items: flex-end;
+  justify-content: center;
+  padding-top: 8px;
+  /* 往上抬：原来是 2px（几乎贴死），现在留舞台高度的 8% */
+  padding-bottom: 8%;
+}
+
+.petpage-pet {
+  max-width: 100%;
+  /*
+   * 高度取**屏幕的一半**。
+   *
+   * ## 这一页是全项目最糊的一处，根因是素材分辨率不够
+   *
+   * 实测（Electron + iPhone 14 视口 390×844 @DPR3，打开她页）：
+   *
+   *   立绘显示      199 × 422 CSS px      ← 422 = 844 × 50%，50vh 确实生效
+   *   DPR           3
+   *   需物理像素    597 × 1266
+   *   素材（600）   283 × 600  → 放大 2.11x
+   *   真母版        241 × 511  → 源头就这么多
+   *
+   * 也就是说：**需求 1266px，素材上限 511px，缺口 2.4 倍**。
+   * 这不是 CSS 能修的 —— 放大只是把同样少的信息摊到更多像素上。
+   *
+   * ## 不要改这里的 50vh
+   *
+   * 它由版面反推（上方状态区 + 下方亲密度与按钮，见
+   * `.petpage-stage` 的 padding-bottom 注释）。改小是拿版面换清晰度，
+   * 而换来的清晰度是假的（数据不够）；改大则更糊。
+   *
+   * ## 真正的解法
+   *
+   * 用 `scripts/gen-sheet.js --size 2048x3072` 重出图
+   * （每格 683×768，约 2.7 倍），母版涨到 ~1400px 后
+   * 再把 `install-pet-assets.js` 的 SPRITE_HEIGHT 提到 1266。
+   *
+   * ## 两条被推翻的旧注释（留作记录，别再写回去）
+   *
+   *   1. 「源图只有 211×449~256×512，拉到 656px 时约 2.6 倍放大」
+   *      —— 尺寸数字是素材只有 300 高时的，已过期。
+   *   2. 「1080 高屏的 50vh = 540 CSS px，需 1080 物理像素，约 1.8 倍」
+   *      —— 把**物理**屏高当成了 CSS px，又按 DPR 2 算；
+   *      实测需求是 1266（DPR 3），不是 1080。
+   */
+  height: 50vh;
+  width: auto;
+  max-width: 100%;
+  max-height: 50vh;
+  /* 点击时要缩放，加个过渡才不生硬 */
+  transition: transform 0.16s ease-out;
+  object-fit: contain;
+  /* 点她不该选中/拖拽图片 —— 手机上会弹出「存储图片」菜单 */
+  user-select: none;
+  -webkit-user-select: none;
+  -webkit-user-drag: none;
+  cursor: pointer;
+  /* 阻止长按选择与双击缩放，交互才跟手 */
+  touch-action: manipulation;
+  /* 轻微呼吸感，让静止的立绘不那么死 */
+  animation: pet-breathe 3.6s ease-in-out infinite;
+}
+
+/*
+ * 她说的话浮在立绘上方。
+ * 用绝对定位而不是插进文档流 —— 插进去会把立绘往下挤，
+ * 每说一句整页就跳一下。
+ */
+.petpage-bubble {
+  position: absolute;
+  top: 8px;
+  left: 50%;
+  transform: translateX(-50%);
+  max-width: 84%;
+  padding: 11px 15px;
+  /* 与信息栏 / 亲密度卡同一套圆角语言 */
+  border-radius: 16px;
+  background: rgb(var(--surface-rgb, 255 255 255) / 0.94);
+  border: 1px solid rgb(var(--theme-accent, 20 184 166) / 0.16);
+  backdrop-filter: blur(10px);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.12);
+  font-size: 13.5px;
+  line-height: 1.5;
+  text-align: center;
+  /* 出现时轻微弹一下，比硬切换自然 */
+  animation: bubble-in 0.22s ease-out;
+}
+
+@keyframes bubble-in {
+  from { opacity: 0; transform: translateX(-50%) translateY(6px); }
+  to   { opacity: 1; transform: translateX(-50%) translateY(0); }
+}
+
+/*
+ * 状态胶囊：她此刻在做什么 / 穿的哪套 / 收集进度。
+ *
+ * ## 为什么给它底色
+ *
+ * 之前是两行**裸文字**直接压在模糊背景上 —— 背景明暗不均时
+ * 文字一会儿清楚一会儿糊，而且视觉上很零散（像标签忘在页面上）。
+ * 做成胶囊之后：有明确的边界、和背景隔开、也和其它卡片呼应。
+ *
+ * 外形用 `fit-content` + 居中：胶囊宽度跟着文字走，
+ * 而不是拉满整行 —— 后者的边框会显得空荡。
+ */
+.petpage-status {
+  flex: 0 0 auto;
+  align-self: center;
+  max-width: 88%;
+  text-align: center;
+  padding: 9px 16px;
+  margin: 12px 0 4px;
+  border-radius: 14px;
+  background: rgb(var(--surface-rgb, 255 255 255) / 0.72);
+  border: 1px solid rgb(var(--theme-accent, 20 184 166) / 0.14);
+  backdrop-filter: blur(10px);
+}
+.pstat-line {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 700;
+  color: rgb(var(--theme-accent, 20 184 166));
+  letter-spacing: 0.01em;
+}
+.pstat-sub {
+  margin: 3px 0 0;
+  font-size: 11px;
+  color: var(--text-3);
+}
+
+/*
+ * 点击反馈：缩放抖动。
+ *
+ * 用 CSS 动画而不是改 img.src —— 换图会把「她穿的那套」也换掉，
+ * 那样换装就没意义了。这里只动 transform，底图不变。
+ * 两段式（先缩再回弹）比单纯放大更有「被戳到」的手感。
+ */
+/*
+ * 注意：这个规则与 `.petpage-pet` 上的 `pet-breathe` **互斥** ——
+ * 同一个元素被两条 animation 规则命中时，后者整条覆盖前者
+ * （animation 是简写属性，不是叠加）。这里 `tapped` 靠选择器
+ * 权重更高来接管，点击结束节点移除后呼吸动画自动恢复。
+ */
+.petpage-pet.tapped { animation: pet-tap 0.34s ease-out; }
+@keyframes pet-tap {
+  0%   { transform: scale(1); }
+  35%  { transform: scale(0.94); }
+  70%  { transform: scale(1.03); }
+  100% { transform: scale(1); }
+}
+
+/* 飘心/星光层：铺满舞台、不吃点击、内容绝对定位 */
+.petpage-fx {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  overflow: hidden;
+}
+.petpage-fx > span {
+  position: absolute;
+  font-size: 20px;
+  /* 从点击处往上飘并淡出 */
+  animation: fx-float 1.1s ease-out forwards;
+}
+@keyframes fx-float {
+  0%   { opacity: 0; transform: translate(-50%, 0) scale(0.6); }
+  20%  { opacity: 1; transform: translate(-50%, -10px) scale(1.1); }
+  100% { opacity: 0; transform: translate(-50%, -70px) scale(1); }
+}
+
+.petpage-affinity {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  padding: 13px 16px;
+  margin: 0;
+  border-radius: 18px;
+  /* 与信息栏 / 底部工具条同一套卡片语言 */
+  background: rgb(var(--surface-rgb, 255 255 255) / 0.8);
+  border: 1px solid rgb(var(--theme-accent, 20 184 166) / 0.16);
+  backdrop-filter: blur(12px);
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.06);
+}
+/* 这一页空间宽裕，进度条比聊天页那条宽一些 */
+.petpage-affinity .affinity-bar { flex: 1; max-width: 190px; height: 6px; }
+.petpage-affinity .affinity-text { font-size: 12px; white-space: nowrap; }
+
+
+
+.petpage-actions {
+  flex: 0 0 auto;
+  display: flex;
+  gap: 8px;
+  align-items: stretch;
+  /*
+   * 底部做成**浮动工具条**而不是一排平铺按钮：
+   * 四周留边 + 圆角 + 半透明底，让它浮在背景之上，
+   * 和上面的信息栏/亲密度卡形成同一套「卡片」语言。
+   *
+   * 原来的做法是四个按钮直接贴边铺满，看着像系统的原生控件，
+   * 和这一页其它圆角卡片完全不在一个体系里。
+   */
+  padding: 8px;
+  margin-top: 10px;
+  border-radius: 18px;
+  background: rgb(var(--surface-rgb, 255 255 255) / 0.72);
+  border: 1px solid rgb(var(--theme-accent, 20 184 166) / 0.14);
+  backdrop-filter: blur(12px);
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.07);
+}
+
+/*
+ * 三个按钮的基础形态。
+ *
+ * 高度 50：比通用的 `.btn`（padding 11px ≈ 40 高）高一些 ——
+ * 这一页的按钮是主要交互入口，手指落点更从容。
+ * 高度 ≥44 是触摸目标下限（顶栏那几个按钮当初就因为 38 点不中改过）。
+ */
+.petpage-actions .btn {
+  flex: 1 1 0;
+  min-width: 0;
+  min-height: 50px;
+  padding: 0 6px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  border-radius: 13px;
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--text);
+  font-size: 13.5px;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+  white-space: nowrap;
+  cursor: pointer;
+  transition: transform 0.12s ease-out, background 0.18s, box-shadow 0.18s;
+  /* 按下时轻微回弹，比无反馈的点击手感好 */
+}
+.petpage-actions .btn:active { transform: scale(0.96); }
+
+/*
+ * 次按钮：半透明玻璃感。
+ * 用「淡淡的底 + 细边」而不是纯白 + 灰边 —— 后者在模糊背景上
+ * 会显得很突兀（白块像贴上去的）。
+ */
+.petpage-actions .btn:not(#btn-petpage-chat) {
+  background: rgb(var(--surface-rgb, 255 255 255) / 0.55);
+  border-color: rgb(0 0 0 / 0.06);
+}
+.petpage-actions .btn:not(#btn-petpage-chat):active {
+  background: rgb(var(--surface-rgb, 255 255 255) / 0.85);
+}
+
+/*
+ * 主按钮「聊天」。
+ * 之前设过 `flex: 1.35`（想让它比「让她说句话」宽）——
+ * 现在只剩两个按钮，等宽更整齐，用**实心底色**区分主次就够了。
+ */
+.petpage-actions #btn-petpage-chat {
+  background: rgb(var(--theme-accent, 20 184 166));
+  border-color: rgb(var(--theme-accent, 20 184 166));
+  color: #fff;
+  box-shadow: 0 4px 14px rgb(var(--theme-accent, 20 184 166) / 0.32);
+}
+.petpage-actions #btn-petpage-chat:active {
+  box-shadow: 0 2px 8px rgb(var(--theme-accent, 20 184 166) / 0.4);
+}
+
+
+
+/* 主按钮：聊天（用户来这一页多半是想回去说话） */
+.petpage-actions #btn-petpage-chat {
+  background: rgb(var(--theme-accent, 20 184 166));
+  border-color: rgb(var(--theme-accent, 20 184 166));
+  color: #fff;
+  box-shadow: 0 4px 14px rgb(var(--theme-accent, 20 184 166) / 0.3);
+}
+
 .affinity {
   display: flex;
   align-items: center;
@@ -703,6 +1569,22 @@ body {
   background: rgba(20, 184, 166, 0.07);
 }
 .w-item img { width: 100%; height: 96px; object-fit: contain; }
+/*
+ * 查看详情的小按钮（右上角）。
+ *
+ * 用「⤢」而不是文字：格子本来就窄，写「详情」会把标签挤掉。
+ * 位置压在角上是为了和「点整格 = 穿上」区分开 ——
+ * 用户点中间是想穿、点角上才是想看，两者的意图很自然就分开了。
+ */
+.w-view {
+  position: absolute; top: 4px; right: 4px;
+  width: 22px; height: 22px; border-radius: 50%;
+  display: grid; place-items: center;
+  font-size: 12px; line-height: 1;
+  color: var(--muted, #888);
+  background: rgba(0, 0, 0, 0.06);
+}
+.w-view:active { background: rgba(0, 0, 0, 0.14); }
 .w-emoji { font-size: 30px; line-height: 96px; }
 .w-label {
   font-size: 11px;
@@ -736,3 +1618,75 @@ body {
 .setup-icon { flex: 0 0 auto; font-size: 14px; }
 .setup-text { flex: 1; }
 .setup-arrow { flex: 0 0 auto; color: #b45309; font-size: 15px; }
+
+/*
+ * 首次打开的「资源下载」界面。
+ *
+ * z-index 70：比弹层(60)还高 —— 它是**首次运行的引导**，
+ * 这时用户还没做任何事，被别的浮层压住反而奇怪。
+ * 但注意它**不阻塞使用**（可以「先用着」），所以不是模态拦截。
+ */
+.dl {
+  position: fixed;
+  inset: 0;
+  z-index: 70;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  padding-bottom: calc(24px + var(--safe-b));
+  background: rgba(22, 24, 29, 0.72);
+  backdrop-filter: blur(6px);
+  -webkit-backdrop-filter: blur(6px);
+}
+
+.dl-card {
+  width: 100%;
+  max-width: 340px;
+  padding: 26px 22px 20px;
+  border-radius: 20px;
+  background: var(--surface);
+  box-shadow: 0 18px 48px rgba(0, 0, 0, 0.28);
+  text-align: center;
+}
+
+.dl-art { font-size: 40px; line-height: 1; }
+.dl-title { margin: 12px 0 8px; font-size: 18px; font-weight: 700; color: var(--text); }
+.dl-desc { margin: 0; font-size: 13px; line-height: 1.6; color: var(--text-2); }
+
+/*
+ * 进度条用 transform: scaleX 而不是 width。
+ * width 会触发布局（每张图完成都重排整页），scaleX 只走合成层 ——
+ * 190 张图连着更新时差别很明显。
+ */
+.dl-bar {
+  margin: 18px 0 8px;
+  height: 6px;
+  border-radius: 99px;
+  background: rgba(0, 0, 0, 0.08);
+  overflow: hidden;
+}
+.dl-fill {
+  display: block;
+  height: 100%;
+  border-radius: 99px;
+  background: var(--accent);
+  transform-origin: left center;
+  transform: scaleX(0);
+  transition: transform 0.18s linear;
+}
+
+.dl-stat {
+  margin: 0;
+  min-height: 17px;
+  font-size: 12px;
+  color: var(--text-3);
+  font-variant-numeric: tabular-nums;
+}
+
+.dl-actions { margin-top: 18px; display: flex; flex-direction: column; gap: 9px; }
+.dl-go { background: var(--accent); border-color: var(--accent); color: #fff; }
+.dl-skip { color: var(--text-2); }
+
+/* 下载中隐藏「全部下载」，避免重复触发 */
+.dl.busy .dl-go { display: none; }

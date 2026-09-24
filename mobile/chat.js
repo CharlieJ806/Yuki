@@ -27,7 +27,7 @@ import {
   buildRouteOptions,
 } from '../src/shared/content.js'
 import { createGalleryRunner } from '../src/shared/gallery.js'
-import { AFFINITY_GAIN, affinityGain, affinityLevel, outfitForTime } from '../src/shared/interactions.js'
+import { AFFINITY_GAIN, affinityLevel, settleAffinity, isUpsetting, outfitForTime } from '../src/shared/interactions.js'
 import * as db from './storage.js'
 
 /* ---------- 配置 ---------- */
@@ -153,7 +153,17 @@ async function* parseSSE(stream) {
  * @param {Date}   [opts.now]
  * @returns {Promise<{ok:boolean, message?:object, reason?:string, aborted?:boolean}>}
  */
-export async function sendMessage({ settings, sessionId, text, images = [], onDelta, signal, selfPortrait = '', now = new Date() }) {
+export async function sendMessage({
+  settings,
+  sessionId,
+  text,
+  images = [],
+  onDelta,
+  onUserMessage,
+  signal,
+  selfPortrait = '',
+  now = new Date(),
+}) {
   const clean = String(text ?? '').trim()
   const pics = (Array.isArray(images) ? images : []).filter(Boolean)
   if (!clean && !pics.length) return { ok: false, reason: '消息不能为空' }
@@ -175,6 +185,21 @@ export async function sendMessage({ settings, sessionId, text, images = [], onDe
   if (!sid || !(await db.getSession(sid))) sid = (await db.createSession()).id
 
   const userMsg = await db.addMessage(sid, 'user', stored)
+  /*
+   * 立刻把它交给调用方渲染。
+   *
+   * 不回调的话，用户要等**整个流式回复走完**才看到自己发的话
+   * （早先的 `onSend` 是等 `sendMessage` 返回后才 `openSession` 重渲染）——
+   * 表现是「发了消息没反应，过几秒两条一起冒出来」，
+   * 用户会怀疑是不是没发出去。
+   *
+   * 放在落库**之后**：这样界面上画的这条一定已经在库里，
+   * 后面 `openSession` 重读时不会出现「刚显示又消失」。
+   *
+   * 调用方要做成幂等的（按 id 去重）—— 因为结束时还会整体重读一次。
+   */
+  onUserMessage?.(userMsg, sid)
+
   const n = await db.countMessages(sid)
   if (n === 1) await db.renameSession(sid, (clean || '图片').slice(0, 24))
 
@@ -244,10 +269,17 @@ export async function sendMessage({ settings, sessionId, text, images = [], onDe
 
   const assistantMsg = await db.addMessage(sid, 'assistant', full, { model })
 
-  /* 一轮问答完成：记亲密度（用户消息 + 一轮结束，和桌面端口径一致） */
+  /*
+   * 一轮问答完成：记亲密度（用户消息 + 一轮结束，和桌面端口径一致）。
+   *
+   * 同时判断这轮用户**是否惹她生气了** —— 说重话要扣分，
+   * 否则「说错话」除了这一轮的回复语气之外没有任何代价，
+   * 关系好坏的差别就没了。
+   */
   try {
-    await bumpAffinity('chatMessage')
-    await bumpAffinity('chatRound')
+    const upsetting = isUpsetting(text)
+    await bumpAffinity('chatMessage', undefined, { upsetting })
+    await bumpAffinity('chatRound', undefined, { upsetting: false })
   } catch {
     /* 亲密度记不上不该影响对话 */
   }
@@ -260,7 +292,7 @@ export async function sendMessage({ settings, sessionId, text, images = [], onDe
   try {
     /*
      * 手机端没有桌面端那套亲密度，用「已聊条数」当进度代理：
-     * 聊得越多，条件类故事越容易解锁（casual 是初始装扮，立即给）。
+     * 聊得越多，条件类故事越容易解锁（jk 是初始装扮，立即给）。
      */
     const msgCount = await db.countMessages(sid)
     unlocked = await checkAnyUnlock({
@@ -278,29 +310,40 @@ export async function sendMessage({ settings, sessionId, text, images = [], onDe
 /**
  * 记一笔亲密度。
  *
- * 直接用 shared 的 affinityGain —— 它带「上限 + 聊天日上限」双重约束，
+ * 直接用 shared 的 settleAffinity —— 它带「上限 + 每日总额度 + 衰减」三重约束，
  * 防止一口气刷满。手机端自己实现一套的话，两端等级进度会对不上。
  *
  * @param {'chatMessage'|'chatRound'|'daily'} kind
  * @returns {Promise<object|null>} 更新后的亲密度（用于即时刷新 UI）
  */
-export async function bumpAffinity(kind = 'chatMessage', now = new Date()) {
+/**
+ * 结算一次亲密度变化。
+ *
+ * 加、扣、每日额度、久未互动衰减**全部走 shared 的 `settleAffinity`** ——
+ * 两端各写一遍的话，改规则时漏一处就会出现
+ * 「手机上掉了 3 点、电脑上只掉 1 点」，用户没法理解。
+ *
+ * @param {string} kind AFFINITY_GAIN 的键（chatMessage / chatRound / click / …）
+ * @param {Date}   now
+ * @param {object} [opts]
+ * @param {boolean} [opts.upsetting] 这轮用户是否惹她生气了
+ */
+export async function bumpAffinity(kind = 'chatMessage', now = new Date(), { upsetting = false } = {}) {
   const today = toDateKey(now)
   const cur = await db.getAffinity()
-  const isChat = kind !== 'daily'
-  const gain = affinityGain(cur, AFFINITY_GAIN[kind] ?? 0, today, { chat: isChat })
-  if (!gain) {
-    /* 到顶或当日聊天已封顶：仍要把日期推进，否则明天算不出新的一天 */
-    return { ...cur, lastDay: today }
-  }
-  const next = {
+
+  const next = settleAffinity(cur, {
+    today,
+    delta: AFFINITY_GAIN[kind] ?? 0,
+    upsetting,
+  })
+
+  return db.setAffinity({
     ...cur,
-    points: (cur.points ?? 0) + gain,
+    ...next,
+    /* `lastDay` 是旧字段（摸鱼统计在用），保留推进 */
     lastDay: today,
-    chatDay: isChat ? today : cur.chatDay,
-    chatToday: isChat ? (cur.chatDay === today ? (cur.chatToday ?? 0) + gain : gain) : cur.chatToday,
-  }
-  return db.setAffinity(next)
+  })
 }
 
 /** 读当前亲密度（含等级、下一级还差多少） */
@@ -359,7 +402,7 @@ const galleryRunner = createGalleryRunner({
   isReady: async () => (await configStatus(currentSettings)).ready,
   /*
    * 手机端没有桌面端那套亲密度历史，用「已聊条数」当进度代理。
-   * 条件类故事（如 casual 初始就有）靠它判定。
+   * 条件类故事（如 jk 初始就有）靠它判定。
    */
   points: () => affinityPoints,
   /*
@@ -398,10 +441,6 @@ export async function checkAnyUnlock({ settings, recentText, points = 0, now = n
   currentUnlockedOutfits = await db.listUnlockedOutfits()
   return galleryRunner.checkAny({ recentText, now })
 }
-
-/** 兼容旧调用点：只要装扮 */
-export const checkStoryUnlock = (args) =>
-  checkAnyUnlock(args).then((hit) => (hit?.kind === 'outfit' ? hit : null))
 
 
 /** 取当前会话 id（判断故事时用最近对话） */
