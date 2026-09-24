@@ -17,3 +17,11 @@ release/
 # 本地环境
 .env
 .env.*
+
+# Tauri / Rust 本地产物（src-tauri/target 为 Rust 构建产物，数百 MB；
+# gen/schemas 为 tauri-build 生成物，随构建再生）
+src-tauri/target/
+src-tauri/gen/
+
+# Mimosa 安全扫描的本地工作目录
+.mimosa/
