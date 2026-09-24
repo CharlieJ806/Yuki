@@ -326,9 +326,13 @@ export function openStoreBridge() {
     return rows.reverse().map(mapMessage)
   }
 
-  async function addMessage(sessionId, role, content, { model = null, error = false } = {}) {
+  async function addMessage(sessionId, role, content, { model = null, error = false, createdAt = null } = {}) {
     const id = uuid()
-    const ts = now()
+    /*
+     * 默认取当前时间；`createdAt` 允许调用方指定（与 node:sqlite 版同语义）：
+     * 一次解锁落多条消息时按序传递增时间戳，定死列表顺序。
+     */
+    const ts = createdAt ?? now()
     /*
      * content 落库形态与 node:sqlite 版一致：纯文本原样存，
      * 含图消息存 `{"blocks":[...]}`（见 serializeContent 的注释）。
