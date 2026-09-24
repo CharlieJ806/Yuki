@@ -46,11 +46,9 @@ export async function bootServiceHost() {
   await store.ready
   const service = createService(store, { loadSelfPortrait })
 
-  /* createIpcHandlers 直接返回通道表（Electron 侧 Object.entries 同一形态） */
-  const handlers = createIpcHandlers(service, {
-    /* 重置会把 petScale 恢复成 1，窗口尺寸必须跟着回去（热区对齐） */
-    onAfterReset: (next) => invoke('pet_set_scale', { scale: next.settings.petScale }),
-  })
+  /* createIpcHandlers 直接返回通道表（Electron 侧 Object.entries 同一形态）。
+     petScale 归位后的窗口贴合由渲染层 ResizeObserver 自动完成，壳层无需接手 */
+  const handlers = createIpcHandlers(service)
 
   /* 总线宿主 + pet 窗内直调入口（desk-shim 优先走它，不经事件绕行） */
   installServiceBusHost(handlers)
@@ -83,8 +81,18 @@ export async function bootServiceHost() {
   }
 
   /* 启动补齐：节假日表（失败退回周末规则，不阻塞）；置顶设置回放；
-     首帧 state 推一次（窗口就绪的渲染端立即可见） */
-  await service.ensureHolidays().catch(() => {})
+  /* 启动补齐：节假日表走网络——不能 await（无网/慢网时拉取长时间 pending，
+     会把 bus:ready 与渲染层首帧 state 一起拖住 15s+，桌宠窗无法贴合、
+     面板拿不到数据）；失败退回周末规则。完成后补广播一次 state，
+     节假日语义（状态文案/补卡日历）自动更新。 */
+  service
+    .ensureHolidays()
+    .then((r) => {
+      if (r?.ok) console.log(`[desk-pet] 节假日表就绪（${r.count} 天${r.cached ? '，来自缓存' : ''}）`)
+      return service.getState()
+    })
+    .then((state) => emit('desk:event', { event: 'state', payload: state }).catch(() => {}))
+    .catch(() => {})
   emit('desk:event', { event: 'state', payload: await service.getState() }).catch(() => {})
   await pushTraySnapshot(await service.getState()).catch(() => {})
   const settings = await service.getSettings()

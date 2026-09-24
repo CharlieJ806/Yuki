@@ -6,9 +6,11 @@
  * 流式对话不走总线应答 —— chunk 一直走 `desk:event` 广播，`chat:send`
  * 的最终结果以 `chat-done` 事件为准，所以这类通道**不设调用超时**。
  *
- * 就绪门控：panel / chat 由 Rust 按需创建，大概率晚于宿主启动，一次性
- * 广播收不到。客户端就绪状态未知时先发 `bus:ping`，宿主立即应答；
- * ping 超时也放行（宿主真不在时，正式调用自身会以更明确的错误超时）。
+ * 就绪门控：客户端就绪状态未知时先发 `bus:ping`，宿主立即应答；在途探测
+ * 同时挂 `bus:ready` 广播——启动期的首 ping 会落在宿主监听器安装之前而
+ * 丢失（pet 窗挂载先于宿主 boot，petmenu 隐藏窗启动即挂载；事件不排队，
+ * 发空即失），广播是唯一可靠的补救。ping 20s 超时兜底放行（宿主真不在
+ * 时，正式调用自身会以更明确的错误超时）。
  *
  * 短操作经宿主端**串行队列**执行：service 的读-改-写序列（如图鉴解锁、
  * 亲密度）依赖 Electron 时代同步 IPC 的原子性，串行化保持同一语义；
@@ -105,7 +107,10 @@ export function createBusClient(selfLabel) {
     else p.reject(new Error(error || '总线调用失败'))
   }).catch(() => {})
 
-  /* 就绪探测：发 ping 等应答。多个调用共享一次探测。 */
+  /* 就绪探测：发 ping 等应答。多个调用共享一次探测。
+     放行两条路：pong 应答，或 `bus:ready` 广播——首 ping 常发射于宿主
+     监听器安装之前（事件不排队，发空即失），finish 挂进 readyWaiters，
+     广播一到即放行。20s 超时兜底：宿主真不在时照样放行正式调用。 */
   function ensureHost() {
     if (readySeen) return Promise.resolve()
     if (readyProbe) return readyProbe
@@ -114,12 +119,17 @@ export function createBusClient(selfLabel) {
         await new Promise((resolve) => {
           const id = globalThis.crypto.randomUUID()
           let done = false
+          let timer = null
           const finish = () => {
             if (done) return
             done = true
+            if (timer) clearTimeout(timer)
+            const i = readyWaiters.indexOf(finish)
+            if (i !== -1) readyWaiters.splice(i, 1)
             pending.delete(id)
             resolve()
           }
+          readyWaiters.push(finish)
           pending.set(id, {
             resolve: () => {
               setReady()
@@ -127,7 +137,7 @@ export function createBusClient(selfLabel) {
             },
             reject: finish,
           })
-          setTimeout(finish, READY_PROBE_TIMEOUT_MS)
+          timer = setTimeout(finish, READY_PROBE_TIMEOUT_MS)
           emitTo(BUS_HOST_LABEL, PING, { id, from: selfLabel }).catch(finish)
         })
       } finally {
