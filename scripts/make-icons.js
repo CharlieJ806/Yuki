@@ -72,7 +72,12 @@ for (const t of TARGETS) {
    *
    * `-resize ${inner}x${inner}^` 的 `^` 是「填满且保持比例」
    * （较短的边也撑满），再用 `-extent` 从**北（上）对齐**裁出正方形。
-   * 立绘是 132x300 的竖长条，这样裁正好落在头和肩，正是 favicon 要的。
+   * 立绘是竖长条（如 yuki-heart 为 279x600），这样裁正好落在头和肩，
+   * 正是 favicon 要的。
+   *
+   * 注意这里**不写死源图尺寸** —— 素材高度由 install-pet-assets.js
+   * 的 SPRITE_HEIGHT 决定，改过之后图标必须重跑（mobile/build.js
+   * 有时间戳检查会提醒）。裁法本身是分辨率无关的。
    *
    * 原来用 `-gravity south` + 缩小整张：那适合「完整站着」的构图，
    * 但用在这类头部素材上会把脸挤到中间一条缝里。

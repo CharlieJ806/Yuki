@@ -1023,7 +1023,14 @@ onBeforeUnmount(() => {
 .pet {
   position: relative;
   flex: 0 0 auto;
-  /* 立绘是竖向的（约 0.87 宽高比），容器跟着调整免得留大片空白 */
+  /*
+   * 立绘是竖向的（约 0.87 宽高比），容器跟着调整免得留大片空白。
+   *
+   * 118px 高 × petScale（上限 2.0）= 最大 236 CSS px —— 这是
+   * `install-pet-assets.js` 的 SPRITE_HEIGHT 所选的基准（300 CSS px
+   * 已覆盖它，手机上她页的 50vh 才是真正的上限，见该常量注释）。
+   * 素材实高 600，所以这里**从不放大**：2 倍缩放下正好 1:1。
+   */
   width: calc(118px * var(--pet-scale, 1));
   height: calc(136px * var(--pet-scale, 1));
   cursor: pointer;

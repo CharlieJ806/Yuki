@@ -699,18 +699,53 @@ try {
        * 所以对账三方：**manifest 条目 = 实际图片文件 = 代码里的 slug 表**。
        */
       /*
-       * manifest 仍在 `resources/pet/` —— 它是**素材清单**（slug/kind/尺寸），
-       * 体积才 5.7KB，而且是「代码里的 slug 表」与「实际文件」之间的
-       * 对账依据（下面几条断言靠它）。与它同目录的那 48 张重复 PNG
-       * 才是冗余（运行期读的是 public 那份）。
+       * manifest 仍在 `resources/pet/` —— 它是**素材清单**
+       * （`{ spriteHeight, items: { slug: {kind, size} } }`），
+       * 而且是「代码里的 slug 表」与「实际文件」之间的对账依据
+       * （下面几条断言靠它）。与它同目录的重复 PNG 才是冗余。
        */
       const manifestPath = join(ROOT, 'resources', 'pet', 'manifest.json')
 
       if (!existsSync(manifestPath)) {
         check('manifest 已生成', false, true)
       } else {
-        const manifest = JSON.parse(readFileSync(manifestPath, 'utf8'))
+        const raw = JSON.parse(readFileSync(manifestPath, 'utf8'))
+        const manifest = raw.items ?? {}
         const slugs = Object.keys(manifest)
+
+        /*
+         * ⓪ 立绘必须是**真彩无损**，且高度与清单声明一致。
+         *
+         * 这条守的是一个出过的真实事故：`install-pet-assets.js` 里
+         * `-colors 220` 把真彩 RGBA（colortype 6）量化成了 204 色调色板
+         * （colortype 3），像素级损失 —— 6.1 万色 → 204 色、
+         * 255 级 alpha → 56 级。裁切脚本是无损的，损耗全在这一步，
+         * 而且**没有任何断言拦得住**，只能靠肉眼发现。
+         *
+         * 判据用「颜色类型」而不是「颜色数量」：
+         *   colortype 3 = 调色板索引 —— 只要量化就一定变成它，
+         *   而正常降采样不会改变颜色类型。极稳，不会误报。
+         */
+        const IHDR_COLOR_TYPE_OFFSET = 25
+        const sampled = slugs.filter((s) => existsSync(join(ROOT_PUBLIC, `yuki-${s}.png`)))
+        const paletteQuantized = sampled.filter((s) => {
+          const b = readFileSync(join(ROOT_PUBLIC, `yuki-${s}.png`))
+          return b[IHDR_COLOR_TYPE_OFFSET] === 3 || b.includes(Buffer.from('PLTE'))
+        })
+        check('立绘未被量化成调色板（应为真彩无损）', paletteQuantized, [])
+
+        /*
+         * 高度对账：素材实高必须 ≥ 清单声明的 spriteHeight。
+         *
+         * 声明值 = 渲染端最大 CSS 高度 × 2（见 install-pet-assets.js 的
+         * SPRITE_HEIGHT）。素材比它小就意味着浏览器要**放大** ——
+         * 那正是这次糊掉的直接原因，所以单独守一条。
+         */
+        const tooShort = sampled.filter((s) => {
+          const b = readFileSync(join(ROOT_PUBLIC, `yuki-${s}.png`))
+          return b.readUInt32BE(20) !== raw.spriteHeight
+        })
+        check(`立绘实高 = manifest.spriteHeight(${raw.spriteHeight})`, tooShort, [])
 
         /*
          * ① manifest 里的每个 slug 都必须有**运行期用的那份图**。
@@ -848,6 +883,57 @@ try {
         const lifeCount = PHOTO_SLUGS.filter((slug) => existsSync(join(ROOT_PUBLIC, photoFiles(slug)[0]))).length
         if (lifeCount) console.log(`  · 生活照 ${lifeCount}/${PHOTO_SLUGS.length} 组已就位`)
       }
+    }
+
+    /* ---------- 全局扫描：运行期所有 PNG 都不得被调色板量化 ---------- */
+    {
+      /*
+       * 上面那条只盯立绘，但「量化」是**一类**风险，不是立绘独有的。
+       * 实测已经出现过四批：立绘（`-colors 220`）、照片（220）、
+       * 设定图（200）—— 每次都是同一个模式：导出时为了省体积加
+       * `-colors`，代价是几万色塌成两百色，且没有任何断言拦得住。
+       *
+       * 所以这里做成**递归全扫**：`src/renderer/public/` 下运行期
+       * 真正会被加载的每张 PNG 都检查。colortype 3（调色板索引）
+       * 或存在 PLTE 块 = 量化，报出来。
+       *
+       * 为什么判颜色类型而不是颜色数量：
+       *   - 降采样/缩放**不会**改变颜色类型，所以不会误报
+       *   - 量化**必然**产生 PLTE + colortype 3，所以不会漏报
+       * 唯一合法例外是调色板本身就是资产形态的图标类（本项目没有）。
+       */
+      const walkPng = (dir, out = []) => {
+        let entries
+        try {
+          entries = readdirSync(dir, { withFileTypes: true })
+        } catch {
+          return out
+        }
+        for (const e of entries) {
+          const p = join(dir, e.name)
+          if (e.isDirectory()) walkPng(p, out)
+          else if (e.name.toLowerCase().endsWith('.png')) out.push(p)
+        }
+        return out
+      }
+
+      const allPng = walkPng(ROOT_PUBLIC)
+      const quantized = []
+      for (const p of allPng) {
+        let b
+        try {
+          b = readFileSync(p)
+        } catch {
+          continue
+        }
+        if (b.length < 26 || b.readUInt32BE(0) !== 0x89504e47) continue
+        const colorType = b[25]
+        const hasPalette = b.includes(Buffer.from('PLTE'))
+        if (colorType === 3 || hasPalette) {
+          quantized.push(`${p.slice(ROOT_PUBLIC.length + 1)} (ct${colorType}${hasPalette ? '+PLTE' : ''})`)
+        }
+      }
+      check(`运行期 PNG 全部真彩（共 ${allPng.length} 张，无调色板量化）`, quantized, [])
     }
 
     /* ---------- 桌宠立绘解析：换装必须真的改变显示 ---------- */

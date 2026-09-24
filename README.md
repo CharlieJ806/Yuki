@@ -83,7 +83,7 @@ DESK_DEBUG_PORT=9222 npm run dev      # 然后 curl 127.0.0.1:9222/json/list
 ### 现状：动作与服饰是两个正交维度
 
 素材只有**整张立绘**（`resources/yuki-new/*.png` → `split-sheet.js` 切格
-→ `install-pet-assets.js` 缩放分发 → `resources/pet/yuki-<slug>.png`）。
+→ `install-pet-assets.js` 缩放分发 → `src/renderer/public/yuki-<slug>.png`）。
 当前靠**换图**表达姿势：
 
 - **动作** 24 张（挥手 / 打哈欠 / 睡觉 / 看书 / 抱膝哭…）→ `PET_EXPRESSIONS`
@@ -347,9 +347,32 @@ Yuki 的人设要点：把她当**朋友**而不是恋人。刻意写了「不�
      再清掉贴边且远小于主体的块（邻格侵入的肢体）。
      实测 `pajamas-shorts` 左边缘混进过邻格 745px 的膝盖。
 2. **装进项目** —— `scripts/install-pet-assets.js`：
-   统一缩到高 300、PNG 压到 220 色，复制到 `resources/pet/`（母版）
-   与 `src/renderer/public/`（UI 用），并写出 `manifest.json`。
-   头像从 `heart` 那张裁 128 方形。
+   统一缩到**高 600**（= 300 CSS px × DPR 2，覆盖桌宠窗口与手机端她页），
+   **无损 PNG、不做调色板量化**，写出 `src/renderer/public/yuki-<slug>.png`
+   与 `resources/pet/manifest.json`（含 `spriteHeight`）。
+   头像从 `pose2` 那张裁 128 方形。
+
+   > 这里曾经是「高 300 + `-colors 220`」。后果实测：真彩 RGBA 被压成
+   > 204 色调色板、255 级 alpha 掉到 56 级、面积只剩 34%，
+   > 头发丝糊成色块、肤色渐变断裂 —— 裁切脚本是无损的，
+   > 损耗全在这一步。冒烟脚本现在会断言立绘颜色类型不是调色板（colortype 3）。
+
+   同一批修掉的还有三处同类量化（都是同一个模式：导出为省体积加 `-colors`）：
+
+   | 类别 | 原参数 | 实测代价 | 现在 |
+   |---|---|---|---|
+   | 立绘 | `-colors 220` | 61,055 → 204 色，alpha 255 → 56 级 | 无损 600 高 |
+   | 照片 | `-colors 220` | 88,738 → 220 色，平均误差 2.97/255 | 无损 |
+   | 角色设定图 | `-colors 200` | 174,600 → 199 色（小字糊、色卡失真） | 无损 700px |
+   | 生活照 `g17~g23` | 早先一轮的遗留产物 | 117,606 → 220 色 | 无损 |
+
+   生活照那条尤其隐蔽：`public/photos/life/` 原先**没有任何脚本负责写入**，
+   g17~g23 是很早一轮的量化产物、一直没被重做过。现已补成
+   `install-pet-assets.js` 的正式一步（从 `raw-cut/yuki-photo-free-*.png` 取源）。
+
+   冒烟脚本有一条**递归全扫**断言兜底：`src/renderer/public/` 下每张运行期
+   PNG 的颜色类型都不得是 3（或含 PLTE）。判颜色类型而非颜色数量 ——
+   缩放不会改变颜色类型（不误报），量化必然产生 PLTE（不漏报）。
 
 完整流程：
 
@@ -359,7 +382,8 @@ node scripts/split-sheet.js "resources/yuki-new/G1-状态与情绪.png" \
 node scripts/install-pet-assets.js
 ```
 
-产物在 `resources/pet/`，UI 副本在 `src/renderer/public/`（调色板压缩到 14-22KB）。
+产物直接落在 `src/renderer/public/`（渲染层真正读的那份，无损、约 130-400KB/张），
+素材清单在 `resources/pet/manifest.json`。
 历史素材源图见 `resources/yuki-new/`（4 张多格图 + 2 张设定图）。
 
 **角色设定图**（`设定图1/2.png`）不参与动作/服饰轮换，是**给人看的人设资料**：

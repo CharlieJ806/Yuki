@@ -1,290 +1,293 @@
 {
-  "angry": {
-    "source": "yuki-angry.png",
-    "size": "133x300",
-    "bg": "none",
-    "kind": "action"
-  },
-  "clap": {
-    "source": "yuki-clap.png",
-    "size": "127x300",
-    "bg": "none",
-    "kind": "action"
-  },
-  "coffee": {
-    "source": "yuki-coffee.png",
-    "size": "138x300",
-    "bg": "none",
-    "kind": "action"
-  },
-  "cry": {
-    "source": "yuki-cry.png",
-    "size": "145x300",
-    "bg": "none",
-    "kind": "action"
-  },
-  "heart": {
-    "source": "yuki-heart.png",
-    "size": "139x300",
-    "bg": "none",
-    "kind": "action"
-  },
-  "jump": {
-    "source": "yuki-jump.png",
-    "size": "192x300",
-    "bg": "none",
-    "kind": "action"
-  },
-  "laugh": {
-    "source": "yuki-laugh.png",
-    "size": "139x300",
-    "bg": "none",
-    "kind": "action"
-  },
-  "music": {
-    "source": "yuki-music.png",
-    "size": "146x300",
-    "bg": "none",
-    "kind": "action"
-  },
-  "nod": {
-    "source": "yuki-nod.png",
-    "size": "130x300",
-    "bg": "none",
-    "kind": "action"
-  },
-  "outfit-camisole": {
-    "source": "yuki-outfit-camisole.png",
-    "size": "138x300",
-    "bg": "none",
-    "kind": "outfit"
-  },
-  "outfit-campus-idol": {
-    "source": "yuki-outfit-campus-idol.png",
-    "size": "148x300",
-    "bg": "none",
-    "kind": "outfit"
-  },
-  "outfit-campus": {
-    "source": "yuki-outfit-campus.png",
-    "size": "144x300",
-    "bg": "none",
-    "kind": "outfit"
-  },
-  "outfit-casual-dark": {
-    "source": "yuki-outfit-casual-dark.png",
-    "size": "125x300",
-    "bg": "none",
-    "kind": "outfit"
-  },
-  "outfit-casual-lace": {
-    "source": "yuki-outfit-casual-lace.png",
-    "size": "146x300",
-    "bg": "none",
-    "kind": "outfit"
-  },
-  "outfit-casual-mono": {
-    "source": "yuki-outfit-casual-mono.png",
-    "size": "136x300",
-    "bg": "none",
-    "kind": "outfit"
-  },
-  "outfit-casual-red": {
-    "source": "yuki-outfit-casual-red.png",
-    "size": "145x300",
-    "bg": "none",
-    "kind": "outfit"
-  },
-  "outfit-formal": {
-    "source": "yuki-outfit-formal.png",
-    "size": "148x300",
-    "bg": "none",
-    "kind": "outfit"
-  },
-  "outfit-gown": {
-    "source": "yuki-outfit-gown.png",
-    "size": "137x300",
-    "bg": "none",
-    "kind": "outfit"
-  },
-  "outfit-idol": {
-    "source": "yuki-outfit-idol.png",
-    "size": "150x300",
-    "bg": "none",
-    "kind": "outfit"
-  },
-  "outfit-jk": {
-    "source": "yuki-outfit-jk.png",
-    "size": "141x300",
-    "bg": "none",
-    "kind": "outfit"
-  },
-  "outfit-longskirt": {
-    "source": "yuki-outfit-longskirt.png",
-    "size": "155x300",
-    "bg": "none",
-    "kind": "outfit"
-  },
-  "outfit-maid": {
-    "source": "yuki-outfit-maid.png",
-    "size": "142x300",
-    "bg": "none",
-    "kind": "outfit"
-  },
-  "outfit-newyear": {
-    "source": "yuki-outfit-newyear.png",
-    "size": "140x300",
-    "bg": "none",
-    "kind": "outfit"
-  },
-  "outfit-nun": {
-    "source": "yuki-outfit-nun.png",
-    "size": "136x300",
-    "bg": "none",
-    "kind": "outfit"
-  },
-  "outfit-pajamas-black": {
-    "source": "yuki-outfit-pajamas-black.png",
-    "size": "169x300",
-    "bg": "none",
-    "kind": "outfit"
-  },
-  "outfit-pajamas-bodysuit": {
-    "source": "yuki-outfit-pajamas-bodysuit.png",
-    "size": "209x300",
-    "bg": "none",
-    "kind": "outfit"
-  },
-  "outfit-pajamas-pink": {
-    "source": "yuki-outfit-pajamas-pink.png",
-    "size": "141x300",
-    "bg": "none",
-    "kind": "outfit"
-  },
-  "outfit-pajamas-shorts": {
-    "source": "yuki-outfit-pajamas-shorts.png",
-    "size": "189x300",
-    "bg": "none",
-    "kind": "outfit"
-  },
-  "outfit-pajamas": {
-    "source": "yuki-outfit-pajamas.png",
-    "size": "153x300",
-    "bg": "none",
-    "kind": "outfit"
-  },
-  "outfit-qipao": {
-    "source": "yuki-outfit-qipao.png",
-    "size": "136x300",
-    "bg": "none",
-    "kind": "outfit"
-  },
-  "outfit-raincoat": {
-    "source": "yuki-outfit-raincoat.png",
-    "size": "147x300",
-    "bg": "none",
-    "kind": "outfit"
-  },
-  "outfit-swimsuit": {
-    "source": "yuki-outfit-swimsuit.png",
-    "size": "148x300",
-    "bg": "none",
-    "kind": "outfit"
-  },
-  "outfit-xmas": {
-    "source": "yuki-outfit-xmas.png",
-    "size": "133x300",
-    "bg": "none",
-    "kind": "outfit"
-  },
-  "pose1": {
-    "source": "yuki-pose1.png",
-    "size": "162x300",
-    "bg": "none",
-    "kind": "action"
-  },
-  "pose2": {
-    "source": "yuki-pose2.png",
-    "size": "132x300",
-    "bg": "none",
-    "kind": "action"
-  },
-  "pose3": {
-    "source": "yuki-pose3.png",
-    "size": "164x300",
-    "bg": "none",
-    "kind": "action"
-  },
-  "pose4": {
-    "source": "yuki-pose4.png",
-    "size": "134x300",
-    "bg": "none",
-    "kind": "action"
-  },
-  "read": {
-    "source": "yuki-read.png",
-    "size": "149x300",
-    "bg": "none",
-    "kind": "action"
-  },
-  "shrug": {
-    "source": "yuki-shrug.png",
-    "size": "149x300",
-    "bg": "none",
-    "kind": "action"
-  },
-  "shy": {
-    "source": "yuki-shy.png",
-    "size": "135x300",
-    "bg": "none",
-    "kind": "action"
-  },
-  "sleep": {
-    "source": "yuki-sleep.png",
-    "size": "254x300",
-    "bg": "none",
-    "kind": "action"
-  },
-  "snack": {
-    "source": "yuki-snack.png",
-    "size": "134x300",
-    "bg": "none",
-    "kind": "action"
-  },
-  "stretch": {
-    "source": "yuki-stretch.png",
-    "size": "135x300",
-    "bg": "none",
-    "kind": "action"
-  },
-  "surprise": {
-    "source": "yuki-surprise.png",
-    "size": "153x300",
-    "bg": "none",
-    "kind": "action"
-  },
-  "think": {
-    "source": "yuki-think.png",
-    "size": "141x300",
-    "bg": "none",
-    "kind": "action"
-  },
-  "thumbsup": {
-    "source": "yuki-thumbsup.png",
-    "size": "139x300",
-    "bg": "none",
-    "kind": "action"
-  },
-  "wave": {
-    "source": "yuki-wave.png",
-    "size": "149x300",
-    "bg": "none",
-    "kind": "action"
-  },
-  "yawn": {
-    "source": "yuki-yawn.png",
-    "size": "144x300",
-    "bg": "none",
-    "kind": "action"
+  "spriteHeight": 600,
+  "items": {
+    "angry": {
+      "source": "yuki-angry.png",
+      "size": "266x600",
+      "bg": "none",
+      "kind": "action"
+    },
+    "clap": {
+      "source": "yuki-clap.png",
+      "size": "255x600",
+      "bg": "none",
+      "kind": "action"
+    },
+    "coffee": {
+      "source": "yuki-coffee.png",
+      "size": "276x600",
+      "bg": "none",
+      "kind": "action"
+    },
+    "cry": {
+      "source": "yuki-cry.png",
+      "size": "290x600",
+      "bg": "none",
+      "kind": "action"
+    },
+    "heart": {
+      "source": "yuki-heart.png",
+      "size": "279x600",
+      "bg": "none",
+      "kind": "action"
+    },
+    "jump": {
+      "source": "yuki-jump.png",
+      "size": "384x600",
+      "bg": "none",
+      "kind": "action"
+    },
+    "laugh": {
+      "source": "yuki-laugh.png",
+      "size": "278x600",
+      "bg": "none",
+      "kind": "action"
+    },
+    "music": {
+      "source": "yuki-music.png",
+      "size": "291x600",
+      "bg": "none",
+      "kind": "action"
+    },
+    "nod": {
+      "source": "yuki-nod.png",
+      "size": "260x600",
+      "bg": "none",
+      "kind": "action"
+    },
+    "outfit-camisole": {
+      "source": "yuki-outfit-camisole.png",
+      "size": "276x600",
+      "bg": "none",
+      "kind": "outfit"
+    },
+    "outfit-campus-idol": {
+      "source": "yuki-outfit-campus-idol.png",
+      "size": "296x600",
+      "bg": "none",
+      "kind": "outfit"
+    },
+    "outfit-campus": {
+      "source": "yuki-outfit-campus.png",
+      "size": "288x600",
+      "bg": "none",
+      "kind": "outfit"
+    },
+    "outfit-casual-dark": {
+      "source": "yuki-outfit-casual-dark.png",
+      "size": "250x600",
+      "bg": "none",
+      "kind": "outfit"
+    },
+    "outfit-casual-lace": {
+      "source": "yuki-outfit-casual-lace.png",
+      "size": "292x600",
+      "bg": "none",
+      "kind": "outfit"
+    },
+    "outfit-casual-mono": {
+      "source": "yuki-outfit-casual-mono.png",
+      "size": "271x600",
+      "bg": "none",
+      "kind": "outfit"
+    },
+    "outfit-casual-red": {
+      "source": "yuki-outfit-casual-red.png",
+      "size": "290x600",
+      "bg": "none",
+      "kind": "outfit"
+    },
+    "outfit-formal": {
+      "source": "yuki-outfit-formal.png",
+      "size": "296x600",
+      "bg": "none",
+      "kind": "outfit"
+    },
+    "outfit-gown": {
+      "source": "yuki-outfit-gown.png",
+      "size": "274x600",
+      "bg": "none",
+      "kind": "outfit"
+    },
+    "outfit-idol": {
+      "source": "yuki-outfit-idol.png",
+      "size": "301x600",
+      "bg": "none",
+      "kind": "outfit"
+    },
+    "outfit-jk": {
+      "source": "yuki-outfit-jk.png",
+      "size": "283x600",
+      "bg": "none",
+      "kind": "outfit"
+    },
+    "outfit-longskirt": {
+      "source": "yuki-outfit-longskirt.png",
+      "size": "310x600",
+      "bg": "none",
+      "kind": "outfit"
+    },
+    "outfit-maid": {
+      "source": "yuki-outfit-maid.png",
+      "size": "285x600",
+      "bg": "none",
+      "kind": "outfit"
+    },
+    "outfit-newyear": {
+      "source": "yuki-outfit-newyear.png",
+      "size": "280x600",
+      "bg": "none",
+      "kind": "outfit"
+    },
+    "outfit-nun": {
+      "source": "yuki-outfit-nun.png",
+      "size": "271x600",
+      "bg": "none",
+      "kind": "outfit"
+    },
+    "outfit-pajamas-black": {
+      "source": "yuki-outfit-pajamas-black.png",
+      "size": "337x600",
+      "bg": "none",
+      "kind": "outfit"
+    },
+    "outfit-pajamas-bodysuit": {
+      "source": "yuki-outfit-pajamas-bodysuit.png",
+      "size": "419x600",
+      "bg": "none",
+      "kind": "outfit"
+    },
+    "outfit-pajamas-pink": {
+      "source": "yuki-outfit-pajamas-pink.png",
+      "size": "282x600",
+      "bg": "none",
+      "kind": "outfit"
+    },
+    "outfit-pajamas-shorts": {
+      "source": "yuki-outfit-pajamas-shorts.png",
+      "size": "378x600",
+      "bg": "none",
+      "kind": "outfit"
+    },
+    "outfit-pajamas": {
+      "source": "yuki-outfit-pajamas.png",
+      "size": "305x600",
+      "bg": "none",
+      "kind": "outfit"
+    },
+    "outfit-qipao": {
+      "source": "yuki-outfit-qipao.png",
+      "size": "273x600",
+      "bg": "none",
+      "kind": "outfit"
+    },
+    "outfit-raincoat": {
+      "source": "yuki-outfit-raincoat.png",
+      "size": "294x600",
+      "bg": "none",
+      "kind": "outfit"
+    },
+    "outfit-swimsuit": {
+      "source": "yuki-outfit-swimsuit.png",
+      "size": "295x600",
+      "bg": "none",
+      "kind": "outfit"
+    },
+    "outfit-xmas": {
+      "source": "yuki-outfit-xmas.png",
+      "size": "266x600",
+      "bg": "none",
+      "kind": "outfit"
+    },
+    "pose1": {
+      "source": "yuki-pose1.png",
+      "size": "324x600",
+      "bg": "none",
+      "kind": "action"
+    },
+    "pose2": {
+      "source": "yuki-pose2.png",
+      "size": "263x600",
+      "bg": "none",
+      "kind": "action"
+    },
+    "pose3": {
+      "source": "yuki-pose3.png",
+      "size": "328x600",
+      "bg": "none",
+      "kind": "action"
+    },
+    "pose4": {
+      "source": "yuki-pose4.png",
+      "size": "267x600",
+      "bg": "none",
+      "kind": "action"
+    },
+    "read": {
+      "source": "yuki-read.png",
+      "size": "297x600",
+      "bg": "none",
+      "kind": "action"
+    },
+    "shrug": {
+      "source": "yuki-shrug.png",
+      "size": "298x600",
+      "bg": "none",
+      "kind": "action"
+    },
+    "shy": {
+      "source": "yuki-shy.png",
+      "size": "270x600",
+      "bg": "none",
+      "kind": "action"
+    },
+    "sleep": {
+      "source": "yuki-sleep.png",
+      "size": "507x600",
+      "bg": "none",
+      "kind": "action"
+    },
+    "snack": {
+      "source": "yuki-snack.png",
+      "size": "268x600",
+      "bg": "none",
+      "kind": "action"
+    },
+    "stretch": {
+      "source": "yuki-stretch.png",
+      "size": "270x600",
+      "bg": "none",
+      "kind": "action"
+    },
+    "surprise": {
+      "source": "yuki-surprise.png",
+      "size": "306x600",
+      "bg": "none",
+      "kind": "action"
+    },
+    "think": {
+      "source": "yuki-think.png",
+      "size": "282x600",
+      "bg": "none",
+      "kind": "action"
+    },
+    "thumbsup": {
+      "source": "yuki-thumbsup.png",
+      "size": "278x600",
+      "bg": "none",
+      "kind": "action"
+    },
+    "wave": {
+      "source": "yuki-wave.png",
+      "size": "298x600",
+      "bg": "none",
+      "kind": "action"
+    },
+    "yawn": {
+      "source": "yuki-yawn.png",
+      "size": "289x600",
+      "bg": "none",
+      "kind": "action"
+    }
   }
 }

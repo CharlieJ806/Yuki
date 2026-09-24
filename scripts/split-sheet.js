@@ -2,7 +2,8 @@
  * 把一张「多格拼图」切成独立 PNG。
  *
  * 用途：AI 出图按 3x4 方格一次给 12 个姿态，用这个脚本切成
- * resources/pet/yuki-<slug>.png，直接喂给现有渲染层。
+ * resources/raw-cut/yuki-<slug>.png，再由 install-pet-assets.js
+ * 缩放分发到 src/renderer/public/ 喂给渲染层。
  *
  * 用法：
  *   node scripts/split-sheet.js <图片> --grid 3x4 --out .tmp-split [--trim] [--names a,b,c]
