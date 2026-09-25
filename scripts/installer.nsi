@@ -18,7 +18,7 @@ Unicode true
 ${UnStrStr}
 
 !define PRODUCT_NAME "摸鱼桌宠"
-!define VERSION "0.1.0"
+!define VERSION "0.2.0"
 !define UNINST_KEY "Software\Microsoft\Windows\CurrentVersion\Uninstall\${PRODUCT_NAME}"
 !define RUN_KEY "Software\Microsoft\Windows\CurrentVersion\Run"
 
