@@ -125,9 +125,11 @@ const personaName = computed(() => {
  */
 const affinity = computed(() => affinityLevel(state.affinity?.points ?? 0))
 const affinityPoints = computed(() => state.affinity?.points ?? 0)
-const chatToday = computed(() => state.affinity?.chatToday ?? 0)
-const chatCap = computed(() => state.meta.affinity?.chatDailyCap ?? 60)
-/** 今日聊天得分是否已到顶：到顶后还能聊，只是不再涨点 */
+/* 后端快照的字段是 gainToday/dailyCap（每日额度对所有来源合计封顶）；
+   旧名 chatToday/chatDailyCap 是「只封聊天」时代的遗产，快照里已不再带 */
+const chatToday = computed(() => state.affinity?.gainToday ?? 0)
+const chatCap = computed(() => state.meta.affinity?.dailyCap ?? 60)
+/** 今日得分是否已到顶：到顶后还能聊，只是不再涨点 */
 const chatCapped = computed(() => chatToday.value >= chatCap.value && !affinity.value.isMax)
 
 /** 升级时在标题栏闪一下，让「聊得多了」这件事有个明确反馈 */
@@ -513,7 +515,7 @@ watch(messages, scrollToBottom, { deep: true })
             {{ status.ready ? status.model : '未配置对话接口' }}
           </p>
           <!-- 亲密度：聊天是最主要的加分途径，进度就放在标题下面 -->
-          <div class="affinity" :title="`今日聊天得分 ${chatToday}/${chatCap}`">
+          <div class="affinity" :title="`今日得分 ${chatToday}/${chatCap}`">
             <span class="affinity-name">{{ affinity.level.name }}</span>
             <span class="affinity-bar">
               <span class="affinity-fill" :style="{ width: affinity.progress + '%' }" />

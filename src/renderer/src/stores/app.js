@@ -38,8 +38,8 @@ const store = reactive({
   backend: 'mock',
   lastError: null,
   personas: [],
-  /* 亲密度：{ points, lastDay, streakDays, chatToday, max, isMax, sessionId } */
-  affinity: { points: 0, lastDay: null, streakDays: 0, chatToday: 0, max: 0, isMax: false },
+  /* 亲密度：{ points, lastDay, streakDays, gainToday, max, isMax, sessionId } */
+  affinity: { points: 0, lastDay: null, streakDays: 0, gainToday: 0, max: 0, isMax: false },
   /*
    * 图鉴：{ sessionId, outfit: {..}, video: {..} }
    * 每个会话一份（独立角色），所以拉取时必须带 sessionId。
@@ -176,9 +176,9 @@ function createMockBackend() {
     personaDuplicate: async () => ({ id: 'mock-p2', label: '副本', prompt: '', custom: true }),
     personaUpdate: async (id, patch) => ({ id, ...patch, custom: true }),
     personaDelete: async () => ({ ok: true }),
-    affinityGet: async () => ({ points: 0, lastDay: null, streakDays: 0, chatToday: 0, max: 300, isMax: false }),
-    affinityAdd: async (d) => ({ points: d ?? 0, lastDay: null, streakDays: 0, chatToday: 0, max: 300, isMax: false }),
-    affinityReset: async () => ({ points: 0, lastDay: null, streakDays: 0, chatToday: 0, max: 300, isMax: false }),
+    affinityGet: async () => ({ points: 0, lastDay: null, streakDays: 0, gainToday: 0, max: 300, isMax: false }),
+    affinityAdd: async (d) => ({ points: d ?? 0, lastDay: null, streakDays: 0, gainToday: 0, max: 300, isMax: false }),
+    affinityReset: async () => ({ points: 0, lastDay: null, streakDays: 0, gainToday: 0, max: 300, isMax: false }),
     galleryGet: async () => null,
     sessionAffinity: async () => null,
     sessionGallery: async () => null,

@@ -136,8 +136,8 @@ const outfitLabel = computed(() => {
         <template v-if="state.affinity?.streakDays > 1"> · 连续 {{ state.affinity.streakDays }} 天</template>
       </p>
       <p class="ma-note">
-        今日聊天得分 {{ state.affinity?.chatToday ?? 0 }}/{{ state.meta.affinity?.chatDailyCap ?? 60 }}
-        <template v-if="state.affinity?.chatToday >= (state.meta.affinity?.chatDailyCap ?? 60) && !affinity.isMax">
+        今日得分 {{ state.affinity?.gainToday ?? 0 }}/{{ state.meta.affinity?.dailyCap ?? 60 }}
+        <template v-if="state.affinity?.gainToday >= (state.meta.affinity?.dailyCap ?? 60) && !affinity.isMax">
           · 明天继续
         </template>
       </p>
