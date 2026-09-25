@@ -48,7 +48,7 @@
 - [ ] 备选方案 B（未做）：不 hide，改「透明+鼠标穿透」——关：`setOpacity(0)` + `setIgnoreMouseEvents(true, { forward: true })` + `blur()`；开：`setPosition` → `setIgnoreMouseEvents(false)` → `setOpacity(1)` → `focus()`。表面零回收，但失焦关闭语义要跟着改。
 
 ### 验证
-rAF 探针（`.tmp-yuki/probe7/8.mjs`）测得 show→首帧 0-3ms，但与用户感知不符——**该指标不是闪烁的度量**，后续排查勿再以它为准。闪烁本身挂起。
+rAF 探针（CDP 驱动的逐帧计数）测得 show→首帧 0-3ms，但与用户感知不符——**该指标不是闪烁的度量**，后续排查勿再以它为准。闪烁本身挂起。
 
 ---
 
