@@ -15,6 +15,19 @@ const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..', '..')
 const DEV_URL = process.env.DESK_DEV_URL || null
 const IS_DEV = Boolean(DEV_URL)
 
+/* 开机自启的登录项条目名：必须显式钉死——set 不传 name 时 Electron 用
+   AppUserModelID（electron.app.<exe ProductName>），随 exe 元数据漂移，
+   卸载器就删不到这个条目了（与 PACKAGING_PLAN 卸载钩子约定同名）。 */
+const LOGIN_ITEM_NAME = '摸鱼桌宠'
+
+/* 自启状态按「条目名是否存在」判定：getLoginItemSettings 的 openAtLogin 走
+   path+args 比对，对本条目不可靠（实测恒 false）；launchItems[].name 才是
+   稳定的名字匹配。 */
+function autostartEnabled() {
+  const items = app.getLoginItemSettings().launchItems ?? []
+  return items.some((it) => it.name === LOGIN_ITEM_NAME)
+}
+
 /*
  * 允许通过环境变量开远程调试端口。
  * 用途：无头验证真实 Electron 窗（量取景、查渲染状态）。
@@ -809,6 +822,13 @@ function registerIpc() {
       refitPetWindow(size)
       return true
     },
+    /* 开机自启：Windows 登录项。get 按条目名判定——便携目录挪动后条目仍存在
+       但指向旧路径，正好由启动对账重注册（Tauri 侧 service-host 同式） */
+    'autostart:get': () => autostartEnabled(),
+    'autostart:set': (_e, on) => {
+      app.setLoginItemSettings({ openAtLogin: Boolean(on), name: LOGIN_ITEM_NAME })
+      return true
+    },
   }
 
   for (const [channel, fn] of Object.entries(windowHandlers)) {
@@ -891,6 +911,18 @@ if (!gotLock) {
     /* 菜单窗预建常驻隐藏（Tauri setup 同构）：右键即现，也免去懒创建时
        「加载完才显示」的首帧闪烁 */
     createPetMenuWindow()
+
+    /* 开机自启对账：与服务层设置对齐（挪目录后登录项路径失效，重设即自愈）。
+       意图关且系统本就关时不碰注册表。 */
+    service
+      .getSettings()
+      .then((s) => {
+        const wantAutoStart = Boolean(s.autoStart)
+        if (wantAutoStart || autostartEnabled()) {
+          app.setLoginItemSettings({ openAtLogin: wantAutoStart, name: LOGIN_ITEM_NAME })
+        }
+      })
+      .catch(() => {})
 
     app.on('activate', () => {
       if (BrowserWindow.getAllWindows().length === 0) createPetWindow()

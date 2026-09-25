@@ -51,6 +51,22 @@ const form = reactive({ ...DEFAULT_SETTINGS })
 const saving = ref(false)
 const savedAt = ref(null)
 
+const isDev = import.meta.env.DEV
+
+/* 开机自启：立即写系统 + 立即落库，不走「保存」——只改系统不落库的话，
+   下次启动对账会按旧意图把它关掉。成功反馈复用「设置已保存」闪现。 */
+async function onAutoStartChange(on) {
+  form.autoStart = on
+  try {
+    await win.autostartSet(on)
+    await saveSettings({ autoStart: on })
+    savedAt.value = new Date()
+    window.setTimeout(() => (savedAt.value = null), 2200)
+  } catch {
+    form.autoStart = await win.autostartGet().catch(() => false)
+  }
+}
+
 /* AI 对话设置 */
 const chatTesting = ref(false)
 const chatTestResult = ref(null)
@@ -402,6 +418,18 @@ const syncStatus = computed(() => ({
             />
             <span>始终显示在其他窗口之上</span>
           </label>
+        </div>
+        <div class="field">
+          <label>开机自启</label>
+          <label class="switch">
+            <input
+              :checked="form.autoStart"
+              type="checkbox"
+              @change="onAutoStartChange($event.target.checked)"
+            />
+            <span>登录 Windows 后自动运行；便携目录挪动后下次启动自动修正</span>
+          </label>
+          <p v-if="isDev" class="hint">开发模式下注册的是调试版 exe，正式使用请在打包版里开启</p>
         </div>
         <div class="field">
           <label>偷偷摸摸模式</label>

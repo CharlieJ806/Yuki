@@ -693,6 +693,8 @@ export const win = {
   minimize: () => call('窗口操作失败', () => backend.minimize?.(), null),
   setPetScale: (s) => call('设置失败', () => backend.setPetScale?.(s), null),
   setPetAlwaysOnTop: (f) => call('设置失败', () => backend.setPetAlwaysOnTop?.(f), null),
+  autostartGet: () => call('读取自启状态失败', () => backend.autostartGet?.(), false),
+  autostartSet: (on) => call('自启设置失败', () => backend.autostartSet?.(on), null),
   quit: () => call('退出失败', () => backend.quit?.(), null),
   hideChat: () => call('关闭失败', () => backend.hideChatWindow?.(), null),
   /* 对话窗旁的立绘小窗显隐；返回切换后的可见状态 */

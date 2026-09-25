@@ -45,6 +45,9 @@ export const DEFAULT_SETTINGS = {
   studyDisguise: false,
   petScale: 1,
   petAlwaysOnTop: true,
+  /* 开机自启：用户意图存这里；注册表/登录项是执行结果，启动时对账
+     （见 service-host.js 与 index.js 的对账逻辑） */
+  autoStart: false,
   /* 对话（AI）相关 */
   chatProvider: 'deepseek',
   /*

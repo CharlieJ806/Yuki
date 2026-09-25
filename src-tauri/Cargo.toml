@@ -1,8 +1,8 @@
 [package]
 name = "app"
 version = "0.1.0"
-description = "A Tauri App"
-authors = ["you"]
+description = "摸鱼桌宠 —— 桌面悬浮小挂件 + 打卡 + 摸鱼收入统计"
+authors = ["Yuki"]
 license = ""
 repository = ""
 edition = "2021"
@@ -29,6 +29,7 @@ log = "0.4"
 tauri = { version = "=2.11.6", features = ["tray-icon"] }
 tauri-plugin-single-instance = "2"
 tauri-plugin-notification = "2"
+tauri-plugin-autostart = "2"
 # pet_refit 单次 SetWindowPos 原子贴合（尺寸+位置一次到位），
 # 替代 set_size + set_position 两次提交的可见台阶
 windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging"] }

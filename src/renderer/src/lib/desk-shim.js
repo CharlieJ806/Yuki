@@ -113,6 +113,22 @@ function installDeskShim() {
     hidePanel: () => invoke('window_hide_panel'),
     minimize: () => invoke('window_minimize'),
 
+    /* 开机自启：系统边界，直接走插件通道。不引 @tauri-apps/plugin-autostart——
+       该包就是这三个 invoke 的薄封装，命令名是插件稳定 API。
+       auto-launch 0.5 两个非幂等坑（实测）：is_enabled 在条目不存在时抛
+       os error 2（语义=未开启）；disable 对已不存在的条目同样抛错（目标状态
+       已达成）。两个方向都归一化为正常返回，其他错误照常上抛。 */
+    autostartGet: () =>
+      invoke('plugin:autostart|is_enabled').catch((err) => {
+        if (/os error 2|not found/i.test(String(err))) return false
+        throw err
+      }),
+    autostartSet: (on) =>
+      invoke(on ? 'plugin:autostart|enable' : 'plugin:autostart|disable').catch((err) => {
+        if (!on && /os error 2|not found/i.test(String(err))) return null
+        throw err
+      }),
+
     /*
      * petScale 是「settings 单一真相 + 窗口尺寸」的组合操作：
      * 先夹取（基线同款算术，settings 里永远只存 0.6-2 的合法值），

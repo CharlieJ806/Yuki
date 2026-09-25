@@ -91,6 +91,9 @@ contextBridge.exposeInMainWorld('desk', {
   /* 桌宠右键菜单窗：独立小窗，主进程定位到光标并钳制防溢出 */
   showPetMenu: () => invoke('menu:show'),
   hidePetMenu: () => invoke('menu:hide'),
+  /* 开机自启 */
+  autostartGet: () => invoke('autostart:get'),
+  autostartSet: (on) => invoke('autostart:set', on),
   /* 桌宠窗本地行为指令（气泡开关/退出挥手）：经 service 广播回桌宠窗 */
   petUiCommand: (action) => invoke('ui:pet', action),
   /* 窗口贴合：渲染层量内容尺寸，主进程右下角锚定重设窗口 */

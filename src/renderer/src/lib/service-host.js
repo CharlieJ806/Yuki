@@ -106,6 +106,19 @@ export async function bootServiceHost() {
   const settings = await service.getSettings()
   await invoke('pet_set_always_on_top', { flag: Boolean(settings.petAlwaysOnTop) }).catch(() => {})
 
+  /* 开机自启对账：注册表记的是 exe 绝对路径，便携目录挪动后失效；
+     意图在 settings.autoStart，这里按意图重写一次（幂等，兼自愈）。
+     意图关且系统本就关时不碰注册表；系统调用失败不阻塞启动。
+     desk-shim 是 main.js 首位 import，window.desk 此处必然已就绪。 */
+  try {
+    const wantAutoStart = Boolean(settings.autoStart)
+    if (wantAutoStart || (await window.desk.autostartGet())) {
+      await window.desk.autostartSet(wantAutoStart)
+    }
+  } catch (err) {
+    console.warn('[service-host] 开机自启对账失败:', err)
+  }
+
   /* 门控放行：启动早于本宿主的窗口（少见）收到广播即知就绪；
      之后才创建的窗口靠客户端 bus:ping 探测（见 service-bus.js） */
   await emit('bus:ready').catch(() => {})

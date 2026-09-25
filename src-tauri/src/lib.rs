@@ -39,6 +39,12 @@ pub fn run() {
             });
         }))
         .plugin(tauri_plugin_notification::init())
+        /* 开机自启：Windows 写 HKCU Run 项（值 = 当前 exe 路径）。启动参数 None——
+           启动即按常规流程建 pet/托盘等全窗，无需隐藏类标记 */
+        .plugin(tauri_plugin_autostart::init(
+            tauri_plugin_autostart::MacosLauncher::LaunchAgent,
+            None,
+        ))
         .setup(|app| {
             app.manage(Mutex::new(tray::TraySnapshot::default()));
             /* DB 路径显式复用 %APPDATA%\desk-pet\，与 Electron 版共用同一文件（§6）；
