@@ -9,7 +9,7 @@
  */
 import { packager } from '@electron/packager'
 import { execFileSync } from 'node:child_process'
-import { copyFileSync, existsSync, mkdirSync, rmSync, writeFileSync, readdirSync, cpSync } from 'node:fs'
+import { copyFileSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync, readdirSync, cpSync } from 'node:fs'
 import { rename } from 'node:fs/promises'
 import { basename, dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -184,19 +184,43 @@ async function runPackager(attempt) {
      * 那一步在 Windows 上是 rename 到已存在目录，会稳定报 EPERM。
      */
     tmpdir: false,
+    /* exe 元数据齐全是杀软启发式的基本盘：无描述/无公司的 exe 是重点扫描对象 */
+    appVersion: JSON.parse(readFileSync(join(ROOT, 'package.json'), 'utf8')).version,
+    appCopyright: `Copyright © ${new Date().getFullYear()} Yuki`,
+    win32metadata: {
+      FileDescription: '摸鱼桌宠 —— 桌面悬浮小挂件 + 打卡 + 摸鱼收入统计',
+      CompanyName: 'Yuki',
+      ProductName: APP_NAME,
+    },
     afterExtract: [
       async ({ buildPath }) => {
         await waitForRenameReady(buildPath)
       },
     ],
-    /* 只带运行必需的产物 */
+    /*
+     * ignore 必须穷尽「仓库里一切非运行时内容」。曾经只排 5 条，
+     * src-tauri/（含 target/ 的 12GB Rust 构建产物）、node_modules、.tmp-yuki/
+     * 调试探针和 TAURI_MIGRATION.md 等内部文档全被打进 app.asar。
+     * 运行时只需要 src/ + dist/ + package.json：主进程零外部 npm 依赖
+     * （只有 electron 与 node: 内建），node_modules 可整体排除——
+     * 将来引入第一个生产依赖时，记得把 node_modules 那条收窄。
+     */
     ignore: [
       /^\/release($|\/)/,
+      /^\/\.git($|\/)/,
+      /^\/\.gitignore$/,
+      /^\/node_modules($|\/)/,
+      /^\/src-tauri($|\/)/,
+      /^\/\.tmp-yuki($|\/)/,
+      /^\/\.mimosa($|\/)/,
+      /^\/\.zcode($|\/)/,
+      /^\/mobile($|\/)/,
+      /^\/dist-mobile($|\/)/,
+      /^\/resources($|\/)/,
       /^\/scripts($|\/)/,
       /^\/dist\/assets\/.*\.map$/,
-      /^\/\.git($|\/)/,
-      /^\/README\.md$/,
-      /^\/\.gitignore$/,
+      /^\/(README|AGENTS|TAURI_MIGRATION|FIX_PLAN|README_AUDIT|REVIEW_FINDINGS|AUTOSTART_PLAN|PACKAGING_PLAN)\.md$/,
+      /^\/package-lock\.json$/,
     ],
     ...zipDirOpt,
   })
