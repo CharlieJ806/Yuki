@@ -1,6 +1,6 @@
 {
   "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
-  "productName": "yuki-desk-pet",
+  "productName": "摸鱼桌宠",
   "version": "0.1.0",
   "identifier": "com.yuki.deskpet",
   "build": {

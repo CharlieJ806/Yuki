@@ -72,13 +72,21 @@ pub(crate) fn window_logical_rect(win: &WebviewWindow) -> Option<FRect> {
 /// DESK_DEBUG_PORT：设了才给窗口挂 WebView2 远程调试端口（与基线同语义，
 /// 默认关闭——CDP 端口本地任意进程可连，不能随 release 发布）。
 ///
-/// **铁律**：WebView2 的浏览器进程参数由第一个窗口决定，所有窗口必须
+/// WebView2 用户数据目录（UDF）显式指向 identifier 数据目录：默认落在
+/// exe 旁（`<exe>.exe.WebView2`），安装版会落进 `$INSTDIR` 且普通卸载清不掉、
+/// 绿色 exe 放只读目录直接启动失败——显式 UDF 是微软推荐做法。
+///
+/// **铁律**：WebView2 的浏览器进程参数与 UDF 由第一个窗口决定，所有窗口必须
 /// 完全一致——不一致时后续窗口 build 返回 Ok 但 webview 静默不落地。
 /// 所以这里要么全窗都带（env 存在），要么全窗都不带（env 缺省），
 /// 不存在部分窗口带参的中间态。
-pub(crate) fn apply_debug_args<R: tauri::Runtime, M: tauri::Manager<R>>(
+pub(crate) fn apply_shared_webview_config<R: tauri::Runtime, M: tauri::Manager<R>>(
     builder: WebviewWindowBuilder<'_, R, M>,
 ) -> WebviewWindowBuilder<'_, R, M> {
+    let builder = match dirs::data_local_dir() {
+        Some(dir) => builder.data_directory(dir.join("com.yuki.deskpet").join("WebView2")),
+        None => builder,
+    };
     match std::env::var("DESK_DEBUG_PORT") {
         Ok(port) => builder.additional_browser_args(&format!("--remote-debugging-port={port}")),
         Err(_) => builder,
@@ -170,7 +178,7 @@ pub fn create_pet(app: &AppHandle) -> tauri::Result<WebviewWindow> {
     });
     let (x, y) = position::resolve_pet_position(saved, w, h, work);
 
-    let builder = apply_debug_args(
+    let builder = apply_shared_webview_config(
         WebviewWindowBuilder::new(app, PET, WebviewUrl::App("index.html?route=pet".into()))
             .title("desk-pet")
             .inner_size(w, h)
@@ -312,7 +320,7 @@ pub fn create_petmenu(app: &AppHandle) -> tauri::Result<()> {
     if get_window(app, PETMENU).is_some() {
         return Ok(());
     }
-    let builder = apply_debug_args(
+    let builder = apply_shared_webview_config(
         WebviewWindowBuilder::new(app, PETMENU, WebviewUrl::App("index.html?route=petmenu".into()))
             .title("pet-menu")
             .inner_size(PETMENU_SIZE.0, PETMENU_SIZE.1)
@@ -417,7 +425,7 @@ pub fn create_panel(app: &AppHandle) -> tauri::Result<WebviewWindow> {
     let x = (work.x + (work.w - w) / 2.0).round();
     let y = (work.y + (work.h - h) / 2.0).round();
 
-    let builder = apply_debug_args(
+    let builder = apply_shared_webview_config(
         WebviewWindowBuilder::new(app, PANEL, WebviewUrl::App("index.html?route=panel".into()))
             .title("摸鱼面板")
             .inner_size(w, h)
@@ -495,7 +503,7 @@ pub fn create_chat_pet(app: &AppHandle) -> tauri::Result<()> {
         position_chat_pet(app);
         return Ok(());
     }
-    let builder = apply_debug_args(
+    let builder = apply_shared_webview_config(
         WebviewWindowBuilder::new(app, CHATPET, WebviewUrl::App("index.html?route=chatpet".into()))
             .title("chat-pet")
             .inner_size(CHATPET_SIZE.0, CHATPET_SIZE.1)
@@ -541,7 +549,7 @@ pub fn create_chat(app: &AppHandle) -> tauri::Result<WebviewWindow> {
     let pet_anchor = get_window(app, PET).and_then(|w| window_logical_rect(&w));
     let (x, y) = position::chat_default_position(pet_anchor, w, h, work);
 
-    let builder = apply_debug_args(
+    let builder = apply_shared_webview_config(
         WebviewWindowBuilder::new(app, CHAT, WebviewUrl::App("index.html?route=chat".into()))
             .title("AI 对话")
             .inner_size(w, h)
