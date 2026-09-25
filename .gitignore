@@ -36,4 +36,6 @@ src-tauri/gen/
 .mimosa/
 
 # 预览脚本的临时启动器（被杀进程时会残留）
-.tmp-open-mobile.cjs
+.tmp-open-mobile.cjs/
+# Electron 打包暂存区（绿色版 zip 的压缩来源，交付物只有 zip）
+.tmp-release/

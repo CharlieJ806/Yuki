@@ -17,19 +17,30 @@ import { fileURLToPath } from 'node:url'
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..')
 const RELEASE = join(ROOT, 'release')
 const APP_NAME = '摸鱼桌宠'
-const OUT_DIR = join(RELEASE, `${APP_NAME}-win32-x64`)
+/* 分发层统一英文规范名（产品显示层保持中文）：{产品}-{形态}-{版本}-{架构} */
+const VERSION = JSON.parse(readFileSync(join(ROOT, 'package.json'), 'utf8')).version
+/*
+ * OUT_DIR 是暂存区（.tmp-release/，gitignored，在 release/ 之外）：绿色版交付物
+ * 只有 zip，散装目录绝不能出现在交付区。放 release 外面还有个顺序原因——
+ * pack:installer 链里 makensis 要从暂存区读文件，而 build.js 先跑且会压缩，
+ * 暂存区放 release/ 内会「边交付边消失」。产物每次全量覆盖，可随手删除。
+ */
+const WORK_DIR = join(ROOT, '.tmp-release')
+const OUT_DIR = join(WORK_DIR, 'desk-pet-win-x64')
+const DIST_DIR = join(RELEASE, 'electron')
+const PORTABLE_ZIP = join(DIST_DIR, `desk-pet-${VERSION}-win-x64-portable.zip`)
 
 function run(cmd, args, opts = {}) {
   return execFileSync(cmd, args, { stdio: 'inherit', cwd: ROOT, shell: process.platform === 'win32', ...opts })
 }
 
 /* ---------- 1. 构建渲染层 ---------- */
-console.log('\n[1/4] 构建渲染层 (vite build)...')
+console.log('\n[1/5] 构建渲染层 (vite build)...')
 run(process.execPath, [join('node_modules', 'vite', 'bin', 'vite.js'), 'build'])
 if (!existsSync(join(ROOT, 'dist', 'index.html'))) throw new Error('vite build 未产出 dist/index.html')
 
 /* ---------- 2. 清理旧产物 ---------- */
-console.log('\n[2/4] 清理旧产物...')
+console.log('\n[2/5] 清理旧产物...')
 
 /*
  * 删除旧产物时最常遇到的失败不是权限问题，而是「旧版程序还在运行」——
@@ -98,7 +109,7 @@ function listAppProcesses() {
 }
 
 removeOutDir(OUT_DIR)
-mkdirSync(RELEASE, { recursive: true })
+for (const dir of [RELEASE, WORK_DIR, DIST_DIR]) mkdirSync(dir, { recursive: true })
 
 /*
  * 清掉历史遗留的启动器和杂物。
@@ -119,7 +130,7 @@ process.env.TEMP = LOCAL_TEMP
 process.env.TMP = LOCAL_TEMP
 
 /* ---------- 3. 打包 ---------- */
-console.log('\n[3/4] 打包 Electron 应用...')
+console.log('\n[3/5] 打包 Electron 应用...')
 
 /*
  * 复用已下载的 Electron 运行时 zip，绕开局域网不稳导致的重新下载。
@@ -185,7 +196,7 @@ async function runPackager(attempt) {
      */
     tmpdir: false,
     /* exe 元数据齐全是杀软启发式的基本盘：无描述/无公司的 exe 是重点扫描对象 */
-    appVersion: JSON.parse(readFileSync(join(ROOT, 'package.json'), 'utf8')).version,
+    appVersion: VERSION,
     appCopyright: `Copyright © ${new Date().getFullYear()} Yuki`,
     win32metadata: {
       FileDescription: '摸鱼桌宠 —— 桌面悬浮小挂件 + 打卡 + 摸鱼收入统计',
@@ -291,20 +302,30 @@ rmSync(dirname(stagedAppDir), { recursive: true, force: true })
 const appDir = OUT_DIR
 
 /* ---------- 4. 精简产物 ---------- */
-console.log('\n[4/4] 整理产物...')
+console.log('\n[4/5] 整理产物...')
 
 /* 找到可执行文件实际名字（packager 会按 name 重命名 exe） */
 const exeCandidates = [join(appDir, `${APP_NAME}.exe`), join(appDir, 'electron.exe')]
 const exePath = exeCandidates.find(existsSync)
 if (!exePath) throw new Error(`未找到可执行文件，已查找: ${exeCandidates.join(', ')}`)
 
-/* 使用说明放到 release 里（copyFileSync 覆盖旧版；cpSync 在本机会被实时
+/* 使用说明放到 release 根（copyFileSync 覆盖旧版；cpSync 在本机会被实时
    防护干扰出假错误，见上方 copyTree 注释） */
-copyFileSync(join(ROOT, 'scripts', 'release-readme.txt'), join(RELEASE, '使用说明.txt'))
+copyFileSync(join(ROOT, 'scripts', 'release-readme.txt'), join(RELEASE, 'README.txt'))
+
+/* ---------- 5. 压缩绿色版 ---------- */
+console.log('\n[5/5] 压缩绿色版 zip...')
+/* Compress-Archive 带 -Path <目录>（不带 \*），zip 内含 desk-pet-win-x64/
+   单层文件夹，解压不散一地。暂存区保留在 .tmp-release/（installer.nsi 要从
+   这里取文件），不进 release/ 交付区。 */
+run('powershell', [
+  '-NoProfile', '-Command',
+  `Compress-Archive -Path '${OUT_DIR}' -DestinationPath '${PORTABLE_ZIP}' -Force`,
+])
 
 console.log(`
 ========================================
  打包完成
 ========================================
- 双击运行:  ${join(APP_NAME + '-win32-x64', APP_NAME + '.exe')}
+ 绿色版 zip:  ${join('electron', `desk-pet-${VERSION}-win-x64-portable.zip`)}
 `)
