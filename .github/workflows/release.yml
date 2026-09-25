@@ -1,0 +1,113 @@
+name: release
+
+# 手动触发：打包双壳四形态并发布 GitHub Release（无自动触发器）
+on:
+  workflow_dispatch:
+    inputs:
+      draft:
+        description: 发布为草稿（勾选后需到 Releases 手动 Publish）
+        type: boolean
+        default: true
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: windows-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      # Rust 首次全量编译慢，rust-cache 之后增量
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - name: Install NSIS
+        run: choco install nsis -y
+
+      # CI 不需要 electron 二进制本体（packager 用自己的 zip 下载），
+      # 跳过可省 ~250MB 下载；版本号解析只读 package.json，不受影响
+      - name: Install dependencies
+        run: npm ci
+        env:
+          ELECTRON_SKIP_BINARY_DOWNLOAD: 1
+
+      - name: Resolve Electron cache key
+        id: electron
+        shell: bash
+        run: echo "ver=$(node -p "require('./node_modules/electron/package.json').version")" >> "$GITHUB_OUTPUT"
+
+      # build.js 按 LOCALAPPDATA\electron\Cache 找离线运行时（build.js 注释）
+      - name: Cache Electron runtime zip
+        uses: actions/cache@v4
+        with:
+          path: ~/AppData/Local/electron/Cache
+          key: electron-${{ steps.electron.outputs.ver }}-win32-x64
+
+      - name: JS tests (release gate)
+        run: npm test
+
+      - name: Rust tests (release gate)
+        run: cargo test
+        working-directory: src-tauri
+
+      - name: Pack all (Electron + Tauri)
+        run: npm run pack:all
+
+      # 产物存在性与体积断言：打包失败在发布前暴露
+      - name: Assert artifacts
+        shell: pwsh
+        run: |
+          $patterns = @(
+            'release\electron\desk-pet-setup-*.exe',
+            'release\electron\desk-pet-*-win-x64-portable.zip',
+            'release\tauri\desk-pet-*-x64-portable.exe',
+            'release\tauri\desk-pet-setup-*.exe'
+          )
+          foreach ($pattern in $patterns) {
+            $found = Get-ChildItem $pattern -ErrorAction SilentlyContinue |
+              Where-Object { $_.Length -gt 1MB }
+            if (-not $found) { throw "产物缺失或异常：$pattern" }
+          }
+
+      - name: Read version
+        id: ver
+        shell: bash
+        run: echo "version=$(node -p "require('./package.json').version")" >> "$GITHUB_OUTPUT"
+
+      # 校验和随发：未签名前提下的完整性保障（借自 WrtCtrl）
+      - name: Checksums
+        shell: pwsh
+        run: |
+          Get-ChildItem release\electron, release\tauri -File |
+            Where-Object { $_.Extension -ne '.sha256' } |
+            ForEach-Object {
+              $hash = (Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLower()
+              "$hash  $($_.Name)" | Out-File "$($_.FullName).sha256" -Encoding ascii
+            }
+
+      - name: Create GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ steps.ver.outputs.version }}
+          name: v${{ steps.ver.outputs.version }}
+          target_commitish: ${{ github.sha }}
+          draft: ${{ inputs.draft }}
+          generate_release_notes: true
+          fail_on_unmatched_files: true
+          files: |
+            release/electron/*
+            release/tauri/*
+            release/README.txt
