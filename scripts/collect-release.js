@@ -31,8 +31,8 @@ mustExist(join(TAURI_TARGET, 'app.exe'), '先跑 npx tauri build')
 
 const DIST = join(RELEASE, 'tauri')
 mkdirSync(DIST, { recursive: true })
-const portable = join(DIST, `desk-pet-${VERSION}-x64-portable.exe`)
-const setup = join(DIST, `desk-pet-setup-${VERSION}.exe`)
+const portable = join(DIST, `desk-pet-tauri-${VERSION}-x64-portable.exe`)
+const setup = join(DIST, `desk-pet-tauri-setup-${VERSION}.exe`)
 
 /* 绿色单 exe：改名不影响运行（资产按自身路径解析） */
 copyFileSync(join(TAURI_TARGET, 'app.exe'), portable)

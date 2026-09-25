@@ -71,10 +71,10 @@ jobs:
         shell: pwsh
         run: |
           $patterns = @(
-            'release\electron\desk-pet-setup-*.exe',
-            'release\electron\desk-pet-*-win-x64-portable.zip',
-            'release\tauri\desk-pet-*-x64-portable.exe',
-            'release\tauri\desk-pet-setup-*.exe'
+            'release\electron\desk-pet-electron-setup-*.exe',
+            'release\electron\desk-pet-electron-*-win-x64-portable.zip',
+            'release\tauri\desk-pet-tauri-setup-*.exe',
+            'release\tauri\desk-pet-tauri-*-x64-portable.exe'
           )
           foreach ($pattern in $patterns) {
             $found = Get-ChildItem $pattern -ErrorAction SilentlyContinue |
@@ -107,6 +107,19 @@ jobs:
           draft: ${{ inputs.draft }}
           generate_release_notes: true
           fail_on_unmatched_files: true
+          body: |
+            ## 文件说明
+
+            | 文件 | 说明 |
+            |---|---|
+            | desk-pet-electron-setup-x.x.x.exe | Electron 版安装器（双击安装，免管理员权限） |
+            | desk-pet-electron-x.x.x-win-x64-portable.zip | Electron 绿色版：解压后运行文件夹内的「摸鱼桌宠.exe」 |
+            | desk-pet-tauri-setup-x.x.x.exe | Tauri 版安装器（体积更小、启动更快） |
+            | desk-pet-tauri-x.x.x-x64-portable.exe | Tauri 单文件版：放到可写目录双击即用 |
+            | *.sha256 | 对应文件的 SHA-256 校验值 |
+
+            两种外壳功能完全一致，任选其一。安装/解压路径建议不含空格；
+            卸载不会删除个人数据（%APPDATA%\desk-pet）。详细使用说明见 README.txt。
           files: |
             release/electron/*
             release/tauri/*

@@ -28,7 +28,7 @@ const VERSION = JSON.parse(readFileSync(join(ROOT, 'package.json'), 'utf8')).ver
 const WORK_DIR = join(ROOT, '.tmp-release')
 const OUT_DIR = join(WORK_DIR, 'desk-pet-win-x64')
 const DIST_DIR = join(RELEASE, 'electron')
-const PORTABLE_ZIP = join(DIST_DIR, `desk-pet-${VERSION}-win-x64-portable.zip`)
+const PORTABLE_ZIP = join(DIST_DIR, `desk-pet-electron-${VERSION}-win-x64-portable.zip`)
 
 function run(cmd, args, opts = {}) {
   return execFileSync(cmd, args, { stdio: 'inherit', cwd: ROOT, shell: process.platform === 'win32', ...opts })
@@ -327,5 +327,5 @@ console.log(`
 ========================================
  打包完成
 ========================================
- 绿色版 zip:  ${join('electron', `desk-pet-${VERSION}-win-x64-portable.zip`)}
+ 绿色版 zip:  ${join('electron', `desk-pet-electron-${VERSION}-win-x64-portable.zip`)}
 `)

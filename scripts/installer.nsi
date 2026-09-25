@@ -23,7 +23,7 @@ ${UnStrStr}
 !define RUN_KEY "Software\Microsoft\Windows\CurrentVersion\Run"
 
 Name "${PRODUCT_NAME}"
-OutFile "..\release\electron\desk-pet-setup-${VERSION}.exe"
+OutFile "..\release\electron\desk-pet-electron-setup-${VERSION}.exe"
 InstallDir "$LOCALAPPDATA\Programs\${PRODUCT_NAME}"
 InstallDirRegKey HKCU "${UNINST_KEY}" "InstallLocation"
 RequestExecutionLevel user
