@@ -27,7 +27,6 @@ import { formatDate, formatClock, weekendText, checkinStatus } from '../src/shar
 import { holidayOf, holidayCountdownText } from '../src/shared/holidays.js'
 import { buildChatterRequest, cleanChatter, nextChatterDelay, FALLBACK_CHATTER } from '../src/shared/chatter.js'
 import { OUTFIT_STORIES } from '../src/shared/outfitStories.js'
-import { VIDEO_STORIES, videoSrc, videoPoster } from '../src/shared/videoStories.js'
 import { PHOTO_STORIES, PHOTO_SLUGS } from '../src/shared/photoStories.js'
 import { DEFAULT_OUTFIT, OUTFITS, chatActionFor } from '../src/shared/interactions.js'
 import { buildPhotoMessages, photoPathsOf } from '../src/shared/photoMessage.js'
@@ -235,7 +234,7 @@ let viewing = {
  * 打开详情。
  *
  * @param {object} item
- * @param {string} item.kind  'outfit' | 'photo' | 'video'
+ * @param {string} item.kind  'outfit' | 'photo'
  * @param {string} item.slug
  * @param {string} [item.title]
  * @param {string} [item.line]  触发时她说的那句
@@ -247,7 +246,7 @@ function openViewer({ kind, slug, title = '', line = '' }) {
    * 而用户在换装面板点「详情」就是想看看这套长什么样。
    * 照片存在的话优先给照片（那是「她发来的」观感，信息量也更大）。
    */
-  const images = kind === 'video' ? [] : photosFor(kind, slug)
+  const images = photosFor(kind, slug)
   if (!images.length && kind === 'outfit') images.push(outfitImgRel(slug))
   viewing = {
     kind,
@@ -258,31 +257,14 @@ function openViewer({ kind, slug, title = '', line = '' }) {
     index: 0,
   }
 
-  const vid = $('viewer-video')
   const img = $('viewer-img')
-  const isVideo = kind === 'video'
 
   $('viewer-title').textContent = viewing.title
   $('viewer-line').textContent = line || ''
 
-  if (isVideo) {
-    pauseViewerVideo()
-    img.hidden = true
-    img.removeAttribute('src')
-    vid.hidden = false
-    vid.poster = videoPoster(slug, OUTFIT_VER)
-    vid.src = videoSrc(slug, OUTFIT_VER)
-    $('viewer-count').textContent = ''
-    $('viewer-tools').hidden = true
-    setNav(false, false)
-  } else {
-    pauseViewerVideo()
-    vid.hidden = true
-    vid.removeAttribute('src')
-    img.hidden = false
-    renderViewerImage()
-    $('viewer-tools').hidden = false
-  }
+  img.hidden = false
+  renderViewerImage()
+  $('viewer-tools').hidden = false
 
   el.viewer.hidden = false
 }
@@ -333,19 +315,7 @@ function setNav(showPrev, showNext) {
   $('viewer-next').hidden = !showNext
 }
 
-function pauseViewerVideo() {
-  const vid = $('viewer-video')
-  if (!vid) return
-  try {
-    vid.pause()
-    vid.currentTime = 0
-  } catch {
-    /* 元数据没加载好时设 currentTime 会抛，忽略 */
-  }
-}
-
 function closeViewer() {
-  pauseViewerVideo()
   el.viewer.hidden = true
   viewing = { kind: '', slug: '', title: '', line: '', images: [], index: 0 }
 }
@@ -603,8 +573,7 @@ async function onSend() {
 /**
  * 把解锁到的照片作为一条她的消息插入聊天记录。
  *
- * 只在**装扮**类且**照片确实存在**时插：
- *   - 视频有自己的播放器，不走这条
+ * 只在**装扮/生活照**类且**照片确实存在**时插：
  *   - 背景图是氛围设置，不是「她发来的东西」
  *   - 没有照片时不插 —— 只剩一句配文会像她突然说了句没头没尾的话
  *     （弹窗那边会自动退回立绘展示，聊天记录保持干净）
@@ -979,9 +948,7 @@ async function refreshPetStrip() {
   const unlocked = await db.listUnlockedOutfits()
   const hour = new Date().getHours()
   const total = Object.keys(OUTFIT_STORIES).length
-  const totalVideo = Object.keys(VIDEO_STORIES).length
-  const nVideo = (await db.listUnlocked('video')).length
-  const progress = `装扮 ${unlocked.length}/${total} · 视频 ${nVideo}/${totalVideo}`
+  const progress = `装扮 ${unlocked.length}/${total}`
 
   /* ③ 动作相 / 服饰相交替 —— 两个正交维度，一张图表达不了两件事 */
   const phase = Math.floor(Date.now() / 60_000) % 2 === 0
@@ -1618,19 +1585,17 @@ async function openGallery() {
   closeDrawer()
   el.settings.hidden = true
 
-  const [outfits, videos, photos] = await Promise.all([
+  const [outfits, photos] = await Promise.all([
     db.listUnlocked('outfit'),
-    db.listUnlocked('video'),
     db.listUnlocked('photo'),
   ])
   const totalOutfit = Object.keys(OUTFIT_STORIES).length
-  const totalVideo = Object.keys(VIDEO_STORIES).length
   const totalPhoto = Object.keys(PHOTO_STORIES).length
-  $('gallery-count').textContent = `${outfits.length + videos.length + photos.length}/${totalOutfit + totalVideo + totalPhoto}`
+  $('gallery-count').textContent = `${outfits.length + photos.length}/${totalOutfit + totalPhoto}`
   $('gallery-tip').textContent =
-    outfits.length >= totalOutfit && videos.length >= totalVideo && photos.length >= totalPhoto
+    outfits.length >= totalOutfit && photos.length >= totalPhoto
       ? '全部收集完成 —— 她愿意给你看的都在这了。'
-      : '和她聊天时会自然地解锁 —— 聊到相关话题，她会主动发照片或视频给你。'
+      : '和她聊天时会自然地解锁 —— 聊到相关话题，她会主动发照片给你。'
 
   const grid = $('gallery-grid')
   grid.innerHTML = ''
@@ -1645,19 +1610,9 @@ async function openGallery() {
       table: OUTFIT_STORIES,
       mem: await db.listMemories('outfit'),
       thumb: (slug) => outfitImg(slug),
-      /* 该组实际存在的照片路径 —— 背景选择要用（视频组没有） */
+      /* 该组实际存在的照片路径 —— 背景选择要用 */
       photos: (slug) => photosFor('outfit', slug),
       empty: '还没有解锁任何装扮',
-    },
-    {
-      kind: 'video',
-      label: '视频',
-      got: videos,
-      total: totalVideo,
-      table: VIDEO_STORIES,
-      mem: await db.listMemories('video'),
-      thumb: (slug) => videoPoster(slug, OUTFIT_VER),
-      empty: '还没有解锁任何视频',
     },
     {
       kind: 'photo',
@@ -1681,9 +1636,9 @@ async function openGallery() {
     for (const [slug, def] of Object.entries(g.table)) {
       const got = g.got.includes(slug)
       /* 正被用作背景的那张，角标提示要用到 —— 取这一格显示的具体路径 */
-      const shownPath = g.kind === 'video' ? '' : (g.photos ?? (() => []))(slug)[0] ?? ''
+      const shownPath = (g.photos ?? (() => []))(slug)[0] ?? ''
       const d = document.createElement('div')
-      d.className = 'g-item' + (got ? '' : ' locked') + (g.kind === 'video' ? ' g-video' : '')
+      d.className = 'g-item' + (got ? '' : ' locked')
       /*
        * 不用 loading="lazy"：图鉴在这个可滚动面板里，浏览器对
        * 「视口外但面板内」的懒加载判定不可靠 —— 实测滚到底仍有大量图不加载，
@@ -1693,7 +1648,6 @@ async function openGallery() {
       d.innerHTML = `
         <img src="${g.thumb(slug)}" alt="" decoding="async" />
         ${got ? '' : '<span class="g-lock">?</span>'}
-        ${got && g.kind === 'video' ? '<span class="g-play">▶</span>' : ''}
         <p class="g-title"></p>
         <p class="g-hint"></p>`
       /*
@@ -1716,7 +1670,7 @@ async function openGallery() {
         : def.hint
       if (got) {
         /*
-         * 点整格 = 打开详情（大图 / 视频）。
+         * 点整格 = 打开详情（大图）。
          *
          * 早先是「点缩略图设背景、点标题看大图」—— 按位置分两种动作，
          * 但用户根本不知道有这个区分（缩略图占了格子大部分面积，
@@ -1738,18 +1692,15 @@ async function openGallery() {
 /**
  * 渲染「触发规则一览」。
  *
- * 规则硬编码在 src/shared/outfitStories.js 与 videoStories.js 里，
+ * 规则硬编码在 src/shared/outfitStories.js 里，
  * 手机端没法在线改 —— 但**必须能看**，否则图鉴只给一句模糊线索，
  * 条件类的（如「23 点后」）用户根本猜不到。
- * 这里把两份表的实际内容摊开，所见即代码里的真实规则，不会不同步。
+ * 这里把表的实际内容摊开，所见即代码里的真实规则，不会不同步。
  */
 function renderRules() {
   const box = $('rules-body')
   if (!box) return
-  const groups = [
-    { label: '装扮', table: OUTFIT_STORIES },
-    { label: '视频', table: VIDEO_STORIES },
-  ]
+  const groups = [{ label: '装扮', table: OUTFIT_STORIES }]
   const html = groups
     .map((g) => {
       const rows = Object.entries(g.table)
@@ -1770,8 +1721,7 @@ function renderRules() {
   box.innerHTML =
     html +
     `<p class="rule-foot">
-      规则写在 <code>src/shared/outfitStories.js</code> 与
-      <code>videoStories.js</code>，改完重新构建即可生效。
+      规则写在 <code>src/shared/outfitStories.js</code>，改完重新构建即可生效。
     </p>`
 }
 
@@ -1920,10 +1870,9 @@ const closeWardrobe = () => {
 }
 
 /**
- * 解锁时的「她发来照片 / 视频」全屏展示。
+ * 解锁时的「她发来照片」全屏展示。
  *
- * 两者共用一张卡片，靠 `kind` 切换显示——做成两个弹窗会出现
- * 「两个都弹出来」的竞态，而且关闭逻辑要各写一遍。
+ * 装扮与生活照共用一张卡片，靠 `kind` 决定退回立绘还是直接显示照片。
  */
 function showReveal({ kind = 'outfit', slug, line, title }, badge) {
   /*
@@ -1934,51 +1883,23 @@ function showReveal({ kind = 'outfit', slug, line, title }, badge) {
     console.warn('[reveal] 缺少 slug，跳过展示')
     return
   }
-  const isVideo = kind === 'video'
   const img = $('reveal-img')
-  const vid = $('reveal-video')
 
-  const fallbackBadge = isVideo ? '🎬 解锁新视频' : kind === 'photo' ? '📷 收到新照片' : '✨ 解锁新装扮'
+  const fallbackBadge = kind === 'photo' ? '📷 收到新照片' : '✨ 解锁新装扮'
   $('reveal-badge').textContent = badge ?? fallbackBadge
 
-  if (isVideo) {
-    img.hidden = true
-    img.removeAttribute('src')
-    vid.hidden = false
-    vid.poster = videoPoster(slug, OUTFIT_VER)
-    vid.src = videoSrc(slug, OUTFIT_VER)
-  } else {
-    /* 先停掉可能还在播的视频，避免关掉弹窗后声音继续 */
-    pauseRevealVideo()
-    vid.hidden = true
-    vid.removeAttribute('src')
-    img.hidden = false
-    /*
-     * 服饰照片 → 优先显示**自拍照片**（「她发来的照片」的观感），
-     * 没生成过的退回立绘；生活照 → 显示那张（它本来就没有立绘可退）。
-     */
-    img.src = revealPhotoSrc(kind, slug)
-  }
+  /*
+   * 服饰照片 → 优先显示**自拍照片**（「她发来的照片」的观感），
+   * 没生成过的退回立绘；生活照 → 显示那张（它本来就没有立绘可退）。
+   */
+  img.src = revealPhotoSrc(kind, slug)
 
-  $('reveal-title').textContent = title || (isVideo ? slug : outfitName(slug))
+  $('reveal-title').textContent = title || outfitName(slug)
   $('reveal-line').textContent = line || ''
   el.reveal.hidden = false
 }
 
-/** 关掉视频播放（弹窗关闭 / 切到照片时都要调用，否则声音会继续） */
-function pauseRevealVideo() {
-  const vid = $('reveal-video')
-  if (!vid) return
-  try {
-    vid.pause()
-    vid.currentTime = 0
-  } catch {
-    /* 尚未加载出元数据时设置 currentTime 会抛，忽略即可 */
-  }
-}
-
 const closeReveal = () => {
-  pauseRevealVideo()
   el.reveal.hidden = true
 }
 
@@ -2695,8 +2616,8 @@ maybeOfferDownload()
  *
  * ## 为什么要有
  *
- * 全部资源 34MB，但首次安装只预缓存 2.6MB 的底子（界面 + 立绘），
- * 剩下 31MB（照片 / 视频 / 背景）是**用到才下**。于是第一次点开某组
+ * 全部资源约 45MB，但首次安装只预缓存 13MB 的底子（界面 + 立绘），
+ * 剩下约 32MB（照片 / 背景）是**用到才下**。于是第一次点开某组
  * 照片会明显卡一下 —— 用户不知道在下载，只觉得「怎么这么慢」。
  *
  * 这里把它变成可见可选的一步：告知体积、显示进度、可以跳过。
@@ -2790,7 +2711,7 @@ async function maybeOfferDownload() {
   $('dl-skip').addEventListener('click', () => finish('用户跳过资源下载'))
 
   /* 停留在这一页时也可以开始；不自动开始，让用户自己决定 */
-  stat.textContent = '约 34 MB'
+  stat.textContent = '约 32 MB'
 }
 
 /**

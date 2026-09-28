@@ -11,7 +11,6 @@ import { createService } from '../src/main/service.js'
 import { openStore } from '../src/main/store.js'
 import { toDateKey, isRestDay, levelOf, todaySnapshot, workDaysInMonth, timeContextFor, dayPartOf } from '../src/shared/moyu.js'
 import { isCacheFresh } from '../src/main/holiday.js'
-import { VIDEO_STORIES } from '../src/shared/videoStories.js'
 import { OUTFIT_STORIES } from '../src/shared/outfitStories.js'
 import { PHOTO_SLUGS, photoFiles } from '../src/shared/photoStories.js'
 import { GALLERY_KINDS, GALLERY_KEYS } from '../src/shared/gallery.js'
@@ -1885,55 +1884,73 @@ try {
   /* ---------- 20. 解锁条件不能被随口一句触发 ---------- */
   {
     /*
-     * 两条实测报过的问题：
-     *   ① 只叫了一下她的名字（如「yuki 好乖」）就解锁了视频 ——
-     *      根因是视频关键词里残留单字（"乖"）与泛词（"可爱"），
-     *      而发型那次只收紧了装扮、漏了视频。
+     * 这套断言原先针对的是**视频**图鉴。视频已整体移除，
+     * 但它守的两类真实故障与装扮同样成立 —— 所以移到这里继续守：
+     *
+     *   ① 只叫了一下她的名字（如「yuki 好乖」）就解锁了内容 ——
+     *      根因是关键词里残留单字（"乖"）与泛词（"可爱"）。
      *   ② 「清晨刚醒」那段 anytime 都解锁 —— 根因是数据里写了
      *      `hoursBefore`，判定里却没实现，条件形同虚设。
+     *      （装扮这份原本也只实现了 hoursAfter，已一并补上。）
      *
-     * 这里按「会被误触发」和「条件必须真的生效」两个角度守住。
+     * 按「会被误触发」和「条件必须真的生效」两个角度守住。
      */
-    const { videoKeywordCandidates, videoConditionUnlocks } = await import('../src/shared/videoStories.js')
+    const { keywordCandidates, conditionUnlocks } =
+      await import('../src/shared/outfitStories.js')
 
     /* ① 单字/泛词不能再当关键词 */
     const tooShort = []
-    for (const [slug, d] of Object.entries(VIDEO_STORIES)) {
+    for (const [slug, d] of Object.entries(OUTFIT_STORIES)) {
       for (const k of d.keywords ?? []) {
         if (k.length <= 1) tooShort.push(slug + ':' + k)
       }
     }
-    check('视频关键词无单字（易误命中）', tooShort, [])
+    check('装扮关键词无单字（易误命中）', tooShort, [])
 
     /* ② 叫名字 + 泛泛的情绪词不该命中 */
     for (const t of ['yuki', 'yuki 好乖', 'yuki 你好可爱', '在吗 yuki']) {
-      check(`「${t}」不该触发视频`, videoKeywordCandidates(t, []), [])
+      check(`「${t}」不该触发装扮`, keywordCandidates(t, []), [])
     }
 
     /* ③ 具体的请求必须能命中（别收得太死导致永不触发） */
-    check('「摸摸头」能命中', videoKeywordCandidates('摸摸头', []).length > 0, true)
-    check('「穿旗袍给我看」能命中', videoKeywordCandidates('穿旗袍给我看', []).length > 0, true)
+    check('「穿旗袍给我看」能命中装扮', keywordCandidates('穿旗袍给我看', [], 300).length > 0, true)
+    /* 亲密度不够时**不该**进候选 —— 挡在最省的地方，不白花一次模型调用 */
+    check('亲密度不够不进候选', keywordCandidates('穿旗袍给我看', [], 0), [])
 
     /* ④ 时段条件必须真的生效 —— hoursBefore 曾漏实现 */
-    check('凌晨 2 点不触发「睡裙晚安」(23点后)', videoConditionUnlocks({ hour: 2, points: 0 }, []).includes('pajamas-goodnight'), false)
-    check('中午 12 点不触发「清晨刚醒」(11点前)', videoConditionUnlocks({ hour: 12, points: 0 }, []).includes('morning-awake'), false)
-    check('早上 8 点触发「清晨刚醒」', videoConditionUnlocks({ hour: 8, points: 0 }, []).includes('morning-awake'), true)
-    check('晚上 23 点触发「睡裙晚安」', videoConditionUnlocks({ hour: 23, points: 0 }, []).includes('pajamas-goodnight'), true)
+    check(
+      '凌晨 2 点不触发「睡衣」(23点后)',
+      conditionUnlocks({ hour: 2, points: 0 }, []).includes('pajamas'),
+      false,
+    )
+    check(
+      '已解锁的不重复',
+      conditionUnlocks({ hour: 23, points: 0 }, ['pajamas']).includes('pajamas'),
+      false,
+    )
 
-    /* ⑤ 已解锁的不再重复给 */
-    check('已解锁的不重复', videoConditionUnlocks({ hour: 8, points: 0 }, ['morning-awake']).includes('morning-awake'), false)
+    /*
+     * ⑤ 每个 condition 字段都必须真的被判定读到。
+     *
+     * 这是 ④ 的推广：与其一个个字段手写断言，不如**扫描数据里用到的
+     * 字段**，与条件函数的实现比对 —— 新加字段忘了实现会立刻红。
+     */
+    const USED_CONDITION_FIELDS = new Set([
+      ...Object.values(OUTFIT_STORIES)
+        .filter((d) => d.unlock === 'condition')
+        .flatMap((d) => Object.keys(d.condition ?? {})),
+    ])
+    const HANDLED = new Set(['minPoints', 'hoursAfter', 'hoursBefore', 'restDayOnly'])
+    const unhandled = [...USED_CONDITION_FIELDS].filter((f) => !HANDLED.has(f))
+    check('装扮条件字段都已被 conditionUnlocks 实现', unhandled, [])
 
     /*
      * ⑥ story 必须进判断提示词。
      *
      * 它一度只用于图鉴展示，模型看不到 —— 于是「演到哪一幕」全靠 hint 猜，
-     * 用户精心写的剧情完全没起作用。装扮和视频两份提示词都曾漏掉。
+     * 用户精心写的剧情完全没起作用。
      */
-    const { buildVideoJudgePrompt } = await import('../src/shared/videoStories.js')
     const { buildStoryJudgePrompt } = await import('../src/shared/outfitStories.js')
-
-    const vp = buildVideoJudgePrompt([{ role: 'user', content: 'hi' }], ['headpat'], DEFAULT_OUTFIT)
-    check('视频提示词含剧情', vp.includes(VIDEO_STORIES.headpat.story), true)
 
     const op = buildStoryJudgePrompt([{ role: 'user', content: 'hi' }], ['jk'], 'jk')
     check('装扮提示词含剧情', op.includes(OUTFIT_STORIES.jk.story), true)

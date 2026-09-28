@@ -14,7 +14,6 @@ import { GALLERY_KEYS, createGalleryRunner, galleryTotal, explainCandidates } fr
 import { OUTFIT_STORIES } from '../shared/outfitStories.js'
 import { buildPhotoMessages, photoPathsOf } from '../shared/photoMessage.js'
 import { PHOTO_STORIES } from '../shared/photoStories.js'
-import { VIDEO_STORIES } from '../shared/videoStories.js'
 import { fetchHolidayYear, isCacheFresh, HOLIDAY_CACHE_TTL_MS } from './holiday.js'
 import {
   CHAT_PERSONAS,
@@ -370,7 +369,7 @@ export function createService(store, deps = {}) {
    * 每个键都会再按会话加前缀（见 scopedKey）：**每个会话是独立的她**，
    * 图鉴进度不跨会话共享。
    */
-  /* GALLERY_KEYS（outfit/video/photo）已上移到 shared/gallery.js，
+  /* GALLERY_KEYS（outfit/photo）已上移到 shared/gallery.js，
      与手机端/照片功能共用一份类目表，此处不再本地定义 */
 
   async function listUnlocked(kind, sessionId) {
@@ -414,10 +413,8 @@ export function createService(store, deps = {}) {
     /*
      * 该类目下该 slug 实际存在的照片路径。
      * 生活照与服饰照片的命名空间不同，交给 shared 的 photoPathsOf 分派。
-     * 视频没有照片（它是封面），返回空数组。
      */
     const existsFor = (kind, slug) => {
-      if (kind === 'video') return []
       const exists = deps.photoExists
       return photoPathsOf(kind, slug).filter((p) => (exists ? exists(kind, slug, p) : false))
     }
@@ -455,7 +452,6 @@ export function createService(store, deps = {}) {
     return {
       sessionId: sid,
       outfit: await build('outfit', OUTFIT_STORIES),
-      video: await build('video', VIDEO_STORIES),
       photo: await build('photo', PHOTO_STORIES),
     }
   }
@@ -612,8 +608,7 @@ export function createService(store, deps = {}) {
    *
    * ## 哪些类目进对话
    *
-   * 只有服饰照片（`outfit`）和生活照（`photo`）—— 视频有自己的播放器，
-   * 不进聊天记录。
+   * 只有服饰照片（`outfit`）和生活照（`photo`）。
    *
    * 为什么照片缺失时不插消息：没有图的话这条消息只剩一句配文，
    * 读起来像她突然说了句没头没尾的话，反而更奇怪。
@@ -1372,7 +1367,6 @@ export function createService(store, deps = {}) {
     explainTriggers: async (text, sessionId) =>
       explainCandidates(text, {
         outfit: await listUnlocked('outfit', sessionId),
-        video: await listUnlocked('video', sessionId),
       }),
 
     /** 手动清空图鉴进度（不传则清当前会话） */

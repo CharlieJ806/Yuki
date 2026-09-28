@@ -1,6 +1,6 @@
 <script setup>
 /**
- * 图鉴页 —— 装扮与视频的解锁进度。
+ * 图鉴页 —— 装扮与生活照的解锁进度。
  *
  * ## 每个会话一份
  *
@@ -25,11 +25,11 @@ const gallery = computed(() => state.gallery)
 const group = computed(() => gallery.value?.[tab.value] ?? null)
 const items = computed(() => group.value?.items ?? [])
 /*
- * 三个类目一起算总数。
+ * 两个类目一起算总数。
  * 用固定清单而不是 `Object.values(gallery)` ——
  * 后者会把 `sessionId` 这类非类目字段也算进去。
  */
-const KINDS = ['outfit', 'video', 'photo']
+const KINDS = ['outfit', 'photo']
 const totalAll = computed(() => {
   const g = gallery.value
   if (!g) return 0
@@ -46,12 +46,12 @@ const gotAll = computed(() => {
  *
  * 优先用**实际存在的照片**（由主进程探测后随快照下发）——
  * 那是「她发来的照片」，比立绘更能代表这一项。
- * 没有照片才退回立绘（服饰）/ 视频封面。
+ * 没有照片才退回立绘。
  */
 const thumbOf = (it) => {
   if (it?.photos?.length) return it.photos[0]
   if (it?.kind === 'photo') return ''
-  return it?.kind === 'outfit' ? `yuki-outfit-${it.slug}.png` : `videos/${it.slug}.jpg`
+  return `yuki-outfit-${it.slug}.png`
 }
 
 /** 条件类的中文描述（与手机端同一套说法） */
@@ -85,7 +85,7 @@ const detailImages = computed(() => {
   if (!d || !d.got) return []
   if (d.photos?.length) return d.photos
   if (d.kind === 'photo') return []
-  return [d.kind === 'outfit' ? `yuki-outfit-${d.slug}.png` : `videos/${d.slug}.jpg`]
+  return [`yuki-outfit-${d.slug}.png`]
 })
 
 const imageIndex = ref(0)
@@ -139,7 +139,6 @@ watch(() => state.chat.sessionId, load)
       <button
         v-for="t in [
           { k: 'outfit', n: '装扮' },
-          { k: 'video', n: '视频' },
           { k: 'photo', n: '生活照' },
         ]"
         :key="t.k"
@@ -159,7 +158,7 @@ watch(() => state.chat.sessionId, load)
         v-for="it in items"
         :key="it.slug"
         class="card"
-        :class="{ locked: !it.got, video: tab === 'video' }"
+        :class="{ locked: !it.got }"
         @click="detail = { ...it, kind: tab }"
       >
         <div class="thumb">
@@ -170,7 +169,6 @@ watch(() => state.chat.sessionId, load)
             loading="lazy"
           />
           <span v-if="!it.got" class="lock">?</span>
-          <span v-else-if="tab === 'video'" class="play">▶</span>
         </div>
         <p class="title">{{ it.got ? it.title : '？？？' }}</p>
         <p class="hint">{{ it.got ? (it.line || it.story) : it.hint }}</p>
@@ -258,20 +256,12 @@ watch(() => state.chat.sessionId, load)
 }
 .card:hover { transform: translateY(-2px); border-color: var(--text-3); }
 .thumb { position: relative; aspect-ratio: 3 / 4; display: grid; place-items: center; overflow: hidden; }
-.card.video .thumb { aspect-ratio: 4 / 3; }
 .thumb img { width: 100%; height: 100%; object-fit: contain; }
-.card.video .thumb img { object-fit: cover; }
 /* 未解锁：剪影 + 问号，比直接藏起来更有「可收集」的感觉 */
 .card.locked .thumb img { filter: brightness(0) opacity(.22); }
 .lock {
   position: absolute; inset: 0; display: grid; place-items: center;
   font-size: 22px; color: var(--text-3); font-weight: 700;
-}
-.play {
-  position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%);
-  width: 30px; height: 30px; border-radius: 50%;
-  background: rgba(0,0,0,.45); color: #fff;
-  display: grid; place-items: center; font-size: 12px; padding-left: 2px;
 }
 .title { margin: 7px 8px 2px; font-size: 12px; font-weight: 600; }
 .hint {

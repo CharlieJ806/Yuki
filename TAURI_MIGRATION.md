@@ -286,7 +286,7 @@ Phase 1 踩出的铁律已汇总至「当前进度」节的迁移铁律清单（
 每步独立可回滚，golden test 先行：
 
 1. **对账基建**（~1 天）：node 脚本对 shared 纯函数生成 fixtures JSON → cargo test 重放比对；进 CI，故意改行为时重生成 fixtures 两侧同改。
-2. **数据单源化**：personas / outfitStories / videoStories 的数据体抽 JSON，JS 与 Rust 共读——消灭最大的潜在重复面。
+2. **数据单源化**：personas / outfitStories / photoStories 的数据体抽 JSON，JS 与 Rust 共读——消灭最大的潜在重复面。
 3. **store 实体逻辑入 Rust**：SQL/迁移/实体映射并入 `db.rs`，`store-bridge.js` 退役（其 command surface 就是现成 API）。
 4. **chat 入 Rust**：SSE 解析/错误翻译/abort（`transport.js` 已是干净边界）；提示词组装若 mobile 仍需 JS 版，保留双份 + golden test，或随步骤 2 数据化为模板。
 5. **service 编排入 Rust**：收入/打卡/补卡/亲密度/图鉴推进；`ipc-handlers.js` 逐条变 `#[tauri::command]`；**最后**拆除 serviceBus 与 desk-shim 的总线分支。
@@ -356,7 +356,7 @@ Phase 1 踩出的铁律已汇总至「当前进度」节的迁移铁律清单（
 4. 对话：新/切/删会话、流式中断、错误提示翻译、多模态自画像、挂机冒泡、表情联动桌宠。
 5. 打卡：现场/补卡/工作日连击/节假日判断（含调休补班）。
 6. 收入：状态机三态、休息日为 0、月末工作日数按真实日历。
-7. 图鉴/服饰/视频触发三层逻辑与 Electron 版一致（同输入同输出抽 10 例对照）。
+7. 图鉴/服饰/生活照触发三层逻辑与 Electron 版一致（同输入同输出抽 10 例对照）。
 
 ## 8. 全维度性能与质量评估（迁移前 vs 迁移后）
 

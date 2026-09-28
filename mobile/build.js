@@ -29,7 +29,7 @@ const DIST = join(ROOT, 'dist-mobile')
  * 手机端没有桌宠，用不到。少一个文件就少一份首屏下载。
  * （将来手机端要加亲密度之类的功能，再把它加回来即可。）
  */
-const MODULES = ['content.js', 'moyu.js', 'interactions.js', 'outfitStories.js', 'videoStories.js', 'photoStories.js', 'photoMessage.js', 'chatBackground.js', 'tapLines.js', 'chatter.js', 'dayInfo.js', 'holidays.js', 'gallery.js']
+const MODULES = ['content.js', 'moyu.js', 'interactions.js', 'outfitStories.js', 'photoStories.js', 'photoMessage.js', 'chatBackground.js', 'tapLines.js', 'chatter.js', 'dayInfo.js', 'holidays.js', 'gallery.js']
 
 /* 需要一起打包进产物的手机端文件 */
 const APP_FILES = [
@@ -307,19 +307,6 @@ if (existsSync(BG_SRC)) {
 }
 
 /*
- * 视频资源：从渲染端 public/videos/ 复制到产物 videos/。
- * 含 .mp4 与抽好的首帧 .jpg（封面）。
- */
-const VIDEO_SRC = join(ROOT, 'src', 'renderer', 'public', 'videos')
-let videos = []
-if (existsSync(VIDEO_SRC)) {
-  videos = readdirSync(VIDEO_SRC).filter((f) => /^[a-z0-9-]+\.(mp4|jpg)$/.test(f)).sort()
-  mkdirSync(join(DIST, 'videos'), { recursive: true })
-  for (const f of videos) copyFileSync(join(VIDEO_SRC, f), join(DIST, 'videos', f))
-  console.log(`✓ 打包 ${videos.filter((f) => f.endsWith('.mp4')).length} 段视频 + ${videos.filter((f) => f.endsWith('.jpg')).length} 张封面`)
-}
-
-/*
  * Service Worker 注入版本号与立绘清单。
  *
  * sw.js 是**唯一会让其它所有改动失效的文件**：它是 cache-first，
@@ -330,29 +317,18 @@ const swSrc = readFileSync(join(HERE, 'sw.js'), 'utf8')
 const outfitEntries = outfits.map((f) => `  './outfits/${f}',`).join('\n')
 /* 动作立绘都很小（约 16KB/张），预缓存后离线也能正常显示她 */
 const poseEntries = actionFiles.map((f) => `  './poses/${f}',`).join('\n')
-/*
- * 视频**不进预缓存**：7 段合计约 5MB，全塞进 install 会让首次安装
- * 明显变慢。它们按需加载 —— 聊天里真解锁了才去下，之后自然进缓存。
- * 封面图很小（约 60KB/张），可以一起预缓存，让图鉴秒开。
- */
-const videoPosters = videos.filter((f) => f.endsWith('.jpg')).map((f) => `  './videos/${f}',`).join('\n')
 /* 设定图很小（两张共约 400KB），直接预缓存 —— 设置页离线也要能看 */
 const profileEntries = profiles.map((f) => `  './character/${f}',`).join('\n')
 /*
  * 全量下载清单（供首次打开的「资源下载」界面用）。
  *
- * 和 SHELL 的区别：SHELL 只放「不装就没法用」的底子（2.6MB），
- * 这里把所有资源都列上（34MB），让用户**一次性下完、之后完全离线**。
+ * 和 SHELL 的区别：SHELL 只放「不装就没法用」的底子，
+ * 这里把所有资源都列上，让用户**一次性下完、之后完全离线**。
  * 分母、进度、跳过都由前端控制，SW 只负责按清单拉。
  */
 const bgEntries = petBgs.map((f) => `  './bg/${f}',`).join('\n')
 const photoEntries = photos.map((f) => `  './photos/${f}',`).join('\n')
 const lifeEntries = lifePhotos.map((f) => `  './photos/life/${f}',`).join('\n')
-/*
- * 视频本体（约 10MB）—— 这里**列进全量清单**，但**不进 SHELL**。
- * 用户在首次下载界面点了「下载全部」才会拉；跳过的就按需加载。
- */
-const videoBodies = videos.filter((f) => f.endsWith('.mp4')).map((f) => `  './videos/${f}',`).join('\n')
 
 /*
  * 全部用 `replaceAll`：这些占位符在 SHELL 和 FULL_LIST 里**各出现一次**
@@ -364,11 +340,9 @@ let swDeploy = swSrc
   .replaceAll('  __OUTFIT_FILES__', outfitEntries)
   .replaceAll('  __POSE_FILES__', poseEntries)
   .replaceAll('  __PROFILE_FILES__', profileEntries)
-  .replaceAll('  __VIDEO_POSTERS__', videoPosters)
   .replaceAll('  __BG_FILES__', bgEntries)
   .replaceAll('  __PHOTO_FILES__', photoEntries)
   .replaceAll('  __LIFE_PHOTO_FILES__', lifeEntries)
-  .replaceAll('  __VIDEO_FILES__', videoBodies)
 if (swDeploy === swSrc) {
   console.warn('⚠ sw.js 里没有找到占位符，缓存版本不会更新')
 }
@@ -387,7 +361,7 @@ if (swDeploy === swSrc) {
 }
 writeFileSync(join(DIST, 'sw.js'), swDeploy, 'utf8')
 console.log(`✓ 注入 Service Worker 版本 ${OUTFIT_VER} + ${outfits.length} 张服饰 / ${actionFiles.length} 张动作 / ${profiles.length} 张设定图预缓存`)
-console.log(`✓ 全量下载清单：${petBgs.length} 背景 / ${photos.length + lifePhotos.length} 照片 / ${videos.filter((f) => f.endsWith('.mp4')).length} 视频`)
+console.log(`✓ 全量下载清单：${petBgs.length} 背景 / ${photos.length + lifePhotos.length} 照片`)
 
 console.log(`✓ 打包 ${MODULES.length} 个 shared 模块 → vendor/`)
 

@@ -696,21 +696,13 @@ watch(messages, scrollToBottom, { deep: true })
     </div>
 
     <!--
-      解锁弹窗：模拟「她发来照片 / 视频」。
+      解锁弹窗：模拟「她发来照片」。
       手机上也是这个交互，两边保持一致。
     -->
     <div v-if="unlock" class="unlock-mask" @click.self="closeUnlock">
       <div class="unlock-card">
-        <p class="unlock-badge">{{ unlock.kind === 'video' ? '🎬 解锁新视频' : '✨ 解锁新装扮' }}</p>
-        <img v-if="unlock.kind === 'outfit'" class="unlock-img" :src="unlockImgSrc" :alt="unlock.title" />
-        <video
-          v-else
-          class="unlock-video"
-          :src="`videos/${unlock.slug}.mp4`"
-          :poster="`videos/${unlock.slug}.jpg`"
-          controls
-          playsinline
-        />
+        <p class="unlock-badge">✨ 解锁新装扮</p>
+        <img class="unlock-img" :src="unlockImgSrc" :alt="unlock.title" />
         <p class="unlock-title">{{ unlock.title }}</p>
         <p class="unlock-line">{{ unlock.line }}</p>
         <button class="unlock-ok" @click="closeUnlock">收下</button>
@@ -738,7 +730,6 @@ watch(messages, scrollToBottom, { deep: true })
 }
 .unlock-badge { margin: 0 0 10px; font-size: 12px; font-weight: 700; color: rgb(var(--theme-accent)); }
 .unlock-img { max-width: 100%; max-height: 240px; object-fit: contain; background: rgb(var(--surface-rgb, 255 255 255)); }
-.unlock-video { width: 100%; max-height: 300px; border-radius: 10px; background: #000; }
 .unlock-title { margin: 11px 0 0; font-size: 15px; font-weight: 700; }
 .unlock-line { margin: 6px 0 15px; font-size: 13px; line-height: 1.65; color: var(--text-2); }
 .unlock-ok {

@@ -8,7 +8,7 @@
  *
  * ## 为什么不是把 dist-mobile 塞进 asar
  *
- * 手机端产物（35MB，含视频和照片）**必须留在磁盘上外置** ——
+ * 手机端产物（约 45MB，含立绘和照片）**必须留在磁盘上外置** ——
  * 打进 asar 后 `file://` 无法直接服务 PWA 的 ES module 与 Service Worker，
  * 所以启动器仍是「起 http 服务 + 开窗口」的模式，
  * 只是把这一步藏进 exe，用户不用碰命令行。
@@ -60,7 +60,7 @@ const MIME = {
   '.webmanifest': 'application/manifest+json; charset=utf-8',
   '.png': 'image/png', '.jpg': 'image/jpeg', '.webp': 'image/webp',
   '.svg': 'image/svg+xml', '.ico': 'image/x-icon',
-  '.mp4': 'video/mp4', '.webm': 'video/webm', '.woff2': 'font/woff2',
+  '.woff2': 'font/woff2',
   '.txt': 'text/plain; charset=utf-8',
 }
 

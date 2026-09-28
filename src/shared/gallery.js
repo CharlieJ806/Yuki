@@ -1,11 +1,11 @@
 /**
- * 图鉴解锁管线 —— 装扮与视频共用的一份实现，两端（PC / 手机）也共用。
+ * 图鉴解锁管线 —— 装扮与生活照共用的一份实现，两端（PC / 手机）也共用。
  *
  * ## 为什么放在 shared 而不是各端写一份
  *
- * 三层触发管线的逻辑（条件 → 关键词预筛 → 模型判断）与「产出物是照片
- * 还是视频」无关，也与跑在 Electron 主进程还是浏览器里无关。
- * 复制三份（手机装扮 / 手机视频 / PC）的话，改一处忘一处，
+ * 三层触发管线的逻辑（条件 → 关键词预筛 → 模型判断）与产出物无关，
+ * 也与跑在 Electron 主进程还是浏览器里无关。
+ * 复制多份（手机装扮 / 手机照片 / PC）的话，改一处忘一处，
  * 就会出现「一端省了 token 另一端没省」或「一端的日上限算错」。
  *
  * 各端只需提供三样东西（见 createGalleryRunner 的 opts）：
@@ -38,15 +38,6 @@ import {
   buildPhotoJudgePrompt,
   parsePhotoJudge,
 } from './photoStories.js'
-import {
-  VIDEO_STORIES,
-  VIDEO_JUDGE_SYSTEM,
-  VIDEO_CONDITION_LINES,
-  videoKeywordCandidates,
-  videoConditionUnlocks,
-  buildVideoJudgePrompt,
-  parseVideoJudge,
-} from './videoStories.js'
 
 /** 图鉴类型 → 内容表与各自的判定函数 */
 /*
@@ -54,7 +45,7 @@ import {
  * 先命中的赢。生活照放最后：它是「日常随手拍」，
  * 而服饰照片每人只有 1~2 张，错过一次要等很久，优先给它。
  */
-export const GALLERY_KINDS = ['outfit', 'video', 'photo']
+export const GALLERY_KINDS = ['outfit', 'photo']
 
 /**
  * 图鉴类型 → 存储键名。
@@ -69,7 +60,6 @@ export const GALLERY_KINDS = ['outfit', 'video', 'photo']
  */
 export const GALLERY_KEYS = {
   outfit: { list: 'unlockedOutfits', mem: 'outfitMemories' },
-  video: { list: 'unlockedVideos', mem: 'videoMemories' },
   photo: { list: 'triggeredPhotos', mem: 'photoMemories' },
 }
 
@@ -92,19 +82,9 @@ const GALLERY_SPECS = {
     conditionLines: STORY_CONDITION_LINES,
     defaultLine: '给你看看今天的我',
   },
-  video: {
-    table: VIDEO_STORIES,
-    conditionUnlocks: videoConditionUnlocks,
-    keywordCandidates: videoKeywordCandidates,
-    judgeSystem: VIDEO_JUDGE_SYSTEM,
-    buildJudgePrompt: buildVideoJudgePrompt,
-    parseJudge: parseVideoJudge,
-    conditionLines: VIDEO_CONDITION_LINES,
-    defaultLine: '给你看个东西',
-  },
   /*
    * 生活照：她随手拍的日常（不绑装扮，横构图）。
-   * 管线与装扮/视频完全一致，只是判断条件不含「穿着吻合」。
+   * 管线与装扮完全一致，只是判断条件不含「穿着吻合」。
    */
   photo: {
     table: PHOTO_STORIES,

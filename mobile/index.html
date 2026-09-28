@@ -253,9 +253,9 @@
       <input id="f-maxHistory" type="number" min="2" max="400" />
     </label>
     <label class="field switch-field">
-      <span>聊天解锁装扮/视频</span>
+      <span>聊天解锁装扮/照片</span>
       <input id="f-petStories" type="checkbox" />
-      <small>聊到相关话题时她会主动发照片、视频，解锁新内容。关掉可省去判断用的 token。</small>
+      <small>聊到相关话题时她会主动发照片，解锁新内容。关掉可省去判断用的 token。</small>
     </label>
     <label class="field switch-field">
       <span>发送后收起键盘</span>
@@ -303,7 +303,7 @@
       <p class="gallery-tip" id="gallery-tip"></p>
       <!--
         触发规则查看。
-        规则本身写在源码里（src/shared/outfitStories.js / videoStories.js），
+        规则本身写在源码里（src/shared/outfitStories.js），
         但这个入口让用户**不用翻代码**就知道「聊什么能解锁什么」——
         否则图鉴只能显示一句模糊的线索，条件类（如 23 点后）更是完全看不出。
       -->
@@ -334,18 +334,11 @@
   </div>
 </section>
 
-<!-- 解锁：模拟她发来照片 / 视频 -->
+<!-- 解锁：模拟她发来照片 -->
 <div class="reveal" id="reveal" hidden>
   <div class="reveal-card">
     <p class="reveal-badge" id="reveal-badge">✨ 解锁新装扮</p>
     <img class="reveal-img" id="reveal-img" alt="" />
-    <!--
-      视频独立于 img 存在：两者互斥显示（照片 / 视频），
-      共用一个卡片比做两个弹窗省事，也不会出现「两个都能弹」的竞态。
-      带 controls：用户明确要求保留声音，而 iOS 不允许带声自动播放，
-      所以必须给播放控件让他主动点。
-    -->
-    <video class="reveal-video" id="reveal-video" playsinline controls preload="metadata" hidden></video>
     <p class="reveal-title" id="reveal-title"></p>
     <p class="reveal-line" id="reveal-line"></p>
     <button class="btn primary" id="btn-reveal-ok">收下</button>
@@ -353,7 +346,7 @@
 </div>
 
 <!--
-  详情弹层：看图鉴里的某一项（大图 / 视频）。
+  详情弹层：看图鉴里的某一项（大图）。
 
   与上面的 `reveal` 分开：`reveal` 是「解锁瞬间」的一次性提示（带「收下」按钮），
   这里是**随时回看**的浏览器 —— 可以多张翻页、设为背景、勾选进轮换池。
@@ -372,7 +365,6 @@
     -->
     <button class="viewer-nav prev" id="viewer-prev" aria-label="上一张">‹</button>
     <img class="viewer-img" id="viewer-img" alt="" />
-    <video class="viewer-video" id="viewer-video" playsinline controls preload="metadata" hidden></video>
     <button class="viewer-nav next" id="viewer-next" aria-label="下一张">›</button>
   </div>
 
@@ -494,12 +486,12 @@
 <!--
   首次打开的「资源下载」界面。
 
-  为什么要它：全部资源 34MB，但首次安装只预缓存 2.6MB 的底子（界面 + 立绘），
-  剩下 31MB（照片 / 视频 / 背景）是**用到才下**。于是第一次点开某组照片，
+  为什么要它：全部资源约 45MB，但首次安装只预缓存 13MB 的底子（界面 + 立绘），
+  剩下约 32MB（照片 / 背景）是**用到才下**。于是第一次点开某组照片，
   会明显卡一下 —— 用户不知道是在下载，只觉得「怎么这么慢」。
 
   这里把「一次下完」变成可见、可选的一步：
-    · 告知要下多少（34MB）
+    · 告知要下多少（约 32MB）
     · 显示进度
     · 可以「先用着」跳过 —— 跳过不阻塞，之后再点「全部下载」也不会重下已缓存的
 
@@ -509,7 +501,7 @@
   <div class="dl-card">
     <div class="dl-art" aria-hidden="true">📦</div>
     <h2 class="dl-title">把资源一次下好</h2>
-    <p class="dl-desc" id="dl-desc">照片、视频和背景共约 34 MB。现在下完，之后打开就不用等。</p>
+    <p class="dl-desc" id="dl-desc">照片和背景共约 32 MB。现在下完，之后打开就不用等。</p>
 
     <div class="dl-bar"><i class="dl-fill" id="dl-fill"></i></div>
     <p class="dl-stat" id="dl-stat"></p>
