@@ -313,6 +313,13 @@ export function conditionUnlocks(ctx, unlocked = []) {
     const c = def.condition ?? {}
     if (c.minPoints != null && (ctx.points ?? 0) < c.minPoints) continue
     if (c.hoursAfter != null && (ctx.hour ?? 0) < c.hoursAfter) continue
+    /*
+     * `hoursBefore` 必须一起实现 —— 曾经踩过：数据里写了
+     * `hoursBefore`，判定里却只读 `hoursAfter`，于是「清晨刚醒」
+     * 这类条件形同虚设、任何时间都会解锁。
+     * 判定与数据必须成对出现，加字段时别忘了这里。
+     */
+    if (c.hoursBefore != null && (ctx.hour ?? 0) >= c.hoursBefore) continue
     if (c.restDayOnly && !ctx.isRestDay) continue
     out.push(slug)
   }
@@ -386,7 +393,7 @@ export function buildStoryJudgePrompt(recent, candidates, currentOutfit = '') {
     const match = currentOutfit && slug === currentOutfit
     const story = String(d.story || '').trim()
     /*
-     * story 一起给模型看 —— 与视频版同样的理由：
+     * story 一起给模型看 —— 理由：
      * 它原本只用于图鉴展示，模型看不到，导致「演到哪一幕」全靠 hint 猜。
      */
     return [

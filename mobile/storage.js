@@ -298,9 +298,9 @@ export async function deletePersona(id) {
 /* ---------- 图鉴解锁（= 她的长期记忆） ---------- */
 
 /*
- * 装扮 / 视频 / 背景图共用同一套解锁机制，只是键名不同。
+ * 装扮 / 生活照 / 背景图共用同一套解锁机制，只是键名不同。
  * 参数化而不是复制三份：解锁/记忆/清理的逻辑完全一样，
- * 复制出去改一处忘一处，就会出现「装扮清了但视频还在」这类问题。
+ * 复制出去改一处忘一处，就会出现「装扮清了但照片还在」这类问题。
  *
  * 键名表来自 shared/gallery.js —— 主进程用的是同一份，
  * 两端键名必须一致（备份同步要用），不能各写一张。
@@ -351,8 +351,8 @@ export async function listMemories(kind = 'outfit') {
 export async function clearUnlocks() {
   await setMeta('unlockedOutfits', [])
   await setMeta('outfitMemories', {})
-  await setMeta('unlockedVideos', [])
-  await setMeta('videoMemories', {})
+  await setMeta('triggeredPhotos', [])
+  await setMeta('photoMemories', {})
 }
 
 /* 装扮的便捷封装（调用点更短，语义更清楚） */

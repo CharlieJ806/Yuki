@@ -41,7 +41,7 @@ const store = reactive({
   /* 亲密度：{ points, lastDay, streakDays, gainToday, max, isMax, sessionId } */
   affinity: { points: 0, lastDay: null, streakDays: 0, gainToday: 0, max: 0, isMax: false },
   /*
-   * 图鉴：{ sessionId, outfit: {..}, video: {..} }
+   * 图鉴：{ sessionId, outfit: {..}, photo: {..} }
    * 每个会话一份（独立角色），所以拉取时必须带 sessionId。
    */
   gallery: null,

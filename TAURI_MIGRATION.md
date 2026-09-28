@@ -3,8 +3,8 @@
 > 状态：方案 v3（执行中止于 Phase 5，寄生式为终态）。基线数据为 2026-09-23 实测（Electron 38，方法见 §8）。
 > v3 修正：终态改回「寄生式永续」——Phase 7（业务层全量 Rust 化）执行至步骤 4 后整体退役，理由与备份分支见「当前进度」；v2 的「全量 Rust 终点」与 §0 决策闸门保留为历史记录，一切以「当前进度」节为准。
 > Phase 0 spike 已于 2026-09-23 完成：5/5 通过，结论 GO（实测记录见 §4 Phase 0）。
-> 上游同步：作者已在 a09a0e7 移除 3D 方案回到纯 2D（2D 可动关节调研见 README）——本方案的 3D 专项随之降级为平台能力验证记录，迁移结论不变；2D 可动关节仍是 webview 内渲染，不影响任何架构决策。
-> 本文是迁移期间的执行蓝图；完成后关键决策回写 README，本文归档。
+> 上游同步：作者已在 a09a0e7 移除 3D 方案回到纯 2D（2D 可动关节调研见 docs/DESIGN.md）——本方案的 3D 专项随之降级为平台能力验证记录，迁移结论不变；2D 可动关节仍是 webview 内渲染，不影响任何架构决策。
+> 本文是迁移期间的执行蓝图；完成后关键决策回写 docs/DESIGN.md，本文归档。
 
 ## 当前进度
 
@@ -47,7 +47,7 @@
   - desk 方法面：preload 56 方法在 shim 全部存在且通道一致（窗口类为 snake_case command）。
   - 审查发现并修复 1 个真实缺口：create_pet 未读持久化 petScale（Electron 会读），缩放后重启热区错位——已修并实测闭环（写 1.3 重启精确恢复 442×910 逻辑）。
 - **Phase 2 双视角逐行比对（2026-09-23）**：按业务数据层 / 外壳层+简化空间两个视角静态逐行比对，产出 `REVIEW_FINDINGS.md`：4 高 + 4 中 + 10 低 + 5 简化，已全部处置（20 修 / 2 记录为有意偏差 / 1 计划内）。要点：总线 15s 超时误伤流式对话、bus:ready 一次性广播导致后开窗口每次调用白等 20s（修后实测首调 35ms）、全窗销毁即整体退出击穿找回入口硬规则（改 RunEvent::ExitRequested 拦截，实测 Alt+F4 关桌宠应用存活、pet_quit 仍可退出）、WebView2 调试端口默认常开（收敛为 DESK_DEBUG_PORT env-only，spike 窗随之移入 Rust 创建）、Electron 壳补串行队列、补卡改单条多行 INSERT 消除事务卷入面、ShellState 冗余层删除等。Service.js 剥离 await/async 后词级 diff 共 166 片段全部为机械改造，无逻辑漂移。
-- **下一步**：双路线维护期——功能开发落在共享 JS 层，Tauri 壳层同步验证；可选收尾项：README/AGENTS 双路线章节改写、本文归档。spike 验证窗与无调用方的 db_txn 事务命令已清理。切换前最后一轮人工复验清单见上。
+- **下一步**：双路线维护期——功能开发落在共享 JS 层，Tauri 壳层同步验证；可选收尾项：docs/DESIGN.md/AGENTS 双路线章节改写、本文归档。spike 验证窗与无调用方的 db_txn 事务命令已清理。切换前最后一轮人工复验清单见上。
 - **右键菜单独立窗（2026-09-23，双壳同构）**：菜单从桌宠窗整体迁出到 `petmenu` 常驻隐藏小窗（Electron=主进程 BrowserWindow，Tauri=Rust 命令），右键时定位到光标并按所在显示器工作区钳制防溢出，失焦/Esc/点选动作后藏回不销毁。桌宠窗本地行为（气泡开关/退出挥手）经 `ui:pet` 通道 → service `pet-ui` 广播回桌宠窗（同 emote 的 seq 重放语义）。共享组件 `PetMenu.vue`（展示+动作上报）/`MenuApp.vue`（窗宿主）。
 - **桌宠窗包围盒收紧 + 内容驱动贴合（2026-09-23，双壳同步，所见即所得）**：右键菜单迁出后，桌宠窗尺寸改为**渲染层 ResizeObserver 量内容 → 壳层 `pet_refit` 右下角锚定贴合**（宽 160×s = 气泡 144+留白；高随内容，气泡开约 164+136×s）——壳层不再维护尺寸公式（`applyPetScale`/`pet_set_scale` 已删，缩放路径 = 持久化+广播+渲染层 RO 自动贴合）；气泡开关实时收放（实测 294↔165 @1x）。配套：气泡定宽 144 断开反馈回路、台词 line-clamp 3 行、`petPosition` 一次性迁移（v<3：x+=180×scale，v<2 另 y+=536×scale−164，标记存共享 meta）。菜单窗同机制（`pet_menu_resize`，实测 560→533 贴合面板）。Tauri 把手改 `startDragging`（CSS app-region 会吞右键导致原生菜单），Electron 把手仍走 CSS drag。
 - **已修复（2026-09-23）：总线就绪探测首 ping 丢失 + bus:ready 不释放在途探测 → 首帧 state 与窗口期总线操作挂满 20s**。症状：① 启动后桌宠窗不随气泡贴合，约 20s 后自愈；② 启动后 20s 内在右键菜单点「退出」（及其它总线操作）点击后无反应，约 20s 才生效；Electron 无此问题（preload 直连主进程 IPC，无就绪门控）。机制链：① main.js 里 Vue 挂载先于 bootServiceHost（动态 import 晚于同步 mount），pet 窗挂载期 refresh 的 `bus:ping` 必然发射于宿主 PING 监听器安装之前——Tauri 事件不排队，ping 永久丢失；petmenu 窗 setup 即隐藏创建、启动瞬间也发 ping，与宿主就绪构成竞态（竞态输 → 挂死）。② `service-bus.js` 的 `readyWaiters` 从未被 push（死代码）：`bus:ready` 到达只置 `readySeen`，不终结在途 `readyProbe`，只能等 `READY_PROBE_TIMEOUT_MS = 20_000` 超时放行。修复前实测（tauri dev + 双页 bus 事件 logger，本地 CDP 事件探针脚本）：pet 窗 ping@685ms（丢）→ bus:ready@958ms → 挂载期 state:get REQ@20653ms（= 685ms + 20.000s，分毫不差）。**修复（方案 A，最小 diff）**：`ensureHost` 把 finish 挂进 `readyWaiters`，`bus:ready` 一到即放行在途探测（pong 应答路径不变）；20s 超时兜底保留（宿主真不在时放行正式调用，让其以更明确错误超时）；finish 时清理 timer 与 waiter 防长会话累积。**修复后同工具复测**：pet 窗 ping@750ms 打空（宿主 ready@980ms）→ state:get REQ@982ms（修复前 20653ms）；petmenu 本轮恰好竞态输（ping@594ms 无应答，即用户机场景）→ bus:ready@736ms 一到，REQ@738ms 放行——正是修复要接住的那条路。附带去重 desk-shim.js 重复定义的 `setPetAlwaysOnTop`。调试基建：`DESK_DEBUG_PORT=9224` 启动 + CDP 连 9224 下发表达式（按 URL 过滤目标页）；注意按 url includes 过滤时 'route=pet' 会同时命中 petmenu（开关双执行抵消的假象），单窗操作用 'petmenu' 过滤。
@@ -58,7 +58,7 @@
 - **合并 origin/main（aa5930e，2026-09-24）**：上游 4 提交 371 文件（生活照/立绘页/亲密度机制、mobile 资源下载、资产去量化 + prepare-yuki.js）。冲突 4 文件：.gitignore 两段保留；index.js 取并集（openStore 注入 + photoExists）；smoke 取上游新额度/衰减语义适配异步；service.js 10 块同步逻辑翻译进异步架构（GALLERY_KEYS 上移 shared、gallerySnapshot 带 photo 类目、resetAffinity 全字段、appendUnlockPhoto 异步化）。合并前状态即 merge 第一父提交 4c62ff9。验证：smoke 448/448 / build / cargo 18/18，两壳运行冒烟通过。
 - **合并跟进（Tauri 缺口）**：①照片存在性检查**已补**（3980953）：新增 `photos::photo_list`——正式包走 AssetResolver 全表（dist 内嵌进 exe）、dev 回退递归读仓库 dist/photos；service-host 拉全表缓存成 Set，`deps.photoExists` 做同步 Set 查询（接口是同步的，不能逐张 invoke）。实测 photo 图鉴 23 条目全部填充照片路径、`photos/life/g01-1.png` 在 pet 窗 fetch 200。②照片访问路径已验证（资源协议覆盖，fetch 200）。**体积代价**：照片（31MB）内嵌后 exe 26MB→69MB，桌面端可接受；mobile 不受影响（本就走资源下载）。
 - **Electron 路径相对上游的修改评估（2026-09-24，客观账）**：相对分叉点 3346723，Electron 壳路径（src/main/preload/共享层/scripts）+6084/−1262 行。**净优化（UX 层）**：菜单独立窗（包围盒收紧+即点即现）、内容驱动贴合（根治三个历史 desync bug）、menu:resize setBounds、托盘去重与图标对色、keep-open/打卡蹦跳/立绘预热/气泡定高、位置 v4、build.js 加固、smoke 448 项。**净成本（工程层）**：①service 全异步化——Electron 单壳视角收益≈0，代价是复杂度+原子性需串行队列找回+**永久合并税**（上游每次更新都是同步风格，需逐块翻译，本轮 10 块）；②菜单双闪未闭环（已排除 4 类假设，见 FIX_PLAN §2）；③petmenu 常驻 webview 内存；④双壳维护面（desk 方法 preload/desk-shim 双份、每次改动回归两壳）。**总账**：UX 净优化、工程净成本——成本的正当性完全来自"保留 Tauri 选项"（否则异步化与独立窗是纯付）。
-- **当前挂起/待办（接续清单）**：①待复测合并后两壳新功能（生活照/照片进聊天记录/亲密度额度与衰减/菜单托盘回归；Electron 菜单双闪已知仍在）；②FIX_PLAN 批次二（3d 资产归一化实施前先重估：上游 6f0d06b 已做去量化、prepare-yuki.js 已入库，前提变了）；③Tauri 照片桥已闭环（3980953）；④README 双路线改写基本完成（README_AUDIT 修复已含两壳分述，仅剩架构章可选补充）。最新 commit：11967e0（README 校正），工作区清空。
+- **当前挂起/待办（接续清单）**：①待复测合并后两壳新功能（生活照/照片进聊天记录/亲密度额度与衰减/菜单托盘回归；Electron 菜单双闪已知仍在）；②FIX_PLAN 批次二（3d 资产归一化实施前先重估：上游 6f0d06b 已做去量化、prepare-yuki.js 已入库，前提变了）；③Tauri 照片桥已闭环（3980953）；④README 双路线改写基本完成（内容已并入 docs/DESIGN.md，README_AUDIT 修复含两壳分述，仅剩架构章可选补充），工作区清空。
 - **托盘 open-chat 修复 + 菜单消闪二段 + 状态切换防抖（2026-09-24，FIX_PLAN 批次一）**：①托盘重排时误删 dispatch 的 "open-chat" 分支（Rust 对重复 match 分支不告警，写重了 toggle-panel），已恢复并清掉重复的 pet_label 块；open_chat_window 的吞错改 log::warn。②菜单双闪**未解决**：`setBackgroundThrottling(false)` 实测 show→首帧 0-3ms 但用户感知的双闪不变（该指标不是闪烁的度量），且副作用是隐藏窗持续合成渲染——已回退；已排除懒创建加载闪、首帧门控、表面回收经节流可解、show/hide 竞态；保留预建常驻、ready-to-show 门控与 blur 走 hidePetMenuWindow 的卫生修。后续若续查，候选是 Plan B（透明+穿透替代 hide）或 focus() 的 DWM 激活动画假设（详见 FIX_PLAN.md §2）。③状态切换：气泡台词区定高 3 行（连续说话不再逐句改高）；立绘启动空闲预热（46 张 ~0.9MB）；**pet_refit 改单次 SetWindowPos**（windows-sys，run_on_main_thread 提交）——高频采样证实开合零中间态、右下锚点分毫不差，两段式台阶消除。详见 FIX_PLAN.md，批次二（资产归一化/交叉淡入/动画解耦）待安排。
 - **重启右漂 + 菜单缩高失效 + 托盘对色（2026-09-23）**：①Tauri 缩小缩放后每次重启右移 35 逻辑像素——高频采样实锤建窗请求 96×246 被 Windows 最小窗宽钳成 131×246（保左上角），右缘推出锚点 +35，随后的右下角锚定贴合与存档忠实保住污染值；放大（W0≥131）与 Electron（'moved' 仅用户拖拽存档，钳制进不了存档）均不触发。修复 = 建窗尺寸优先用 v4 存档尺寸（真实内容尺寸 ≥ 最小窗宽，且语义是「恢复上次的窗口」）+ 放置后读实际尺寸按锚点补偿一次（对任意平台最小值免疫），两壳同式。②Electron 菜单窗底部空白——实测 `menu:resize` 的 `setSize` 在 `resizable:false` 窗上无效果（传 533 后 innerHeight 仍 560），而桌宠窗贴合的 `setBounds` 一直有效；换 setBounds 修复。③托盘图标对色：Electron 侧 nativeImage 按 BGRA 解释，改写 B,G,R 使显示同为青色（蓝图旧注「两版不同色」作废）；菜单项/行为逐项比对本就 1:1，托盘数字的启动占位与打卡秒级窗口期保持已知限制记录。工具：本地 CDP/采样探针脚本（量菜单窗贴合、建窗/贴合右缘时间线）。
 - **环境教训（本轮实测）**：① WebView2 静态页面不出新帧时 ResizeObserver 首回调会饿死——observe 后必须同步量测上报一次（代码已内置）；② node fs 的 cpSync 整树复制（含 200MB 未签名 exe）会被实时防护整进程终止（exit 9 无堆栈）——build.js 已改逐文件 copyFileSync（使用说明.txt 同理换 copyFileSync）；③ Git Bash 下 taskkill 需双斜杠 `//PID //IM`；④ 强杀 app.exe 会遗留孤儿 WebView2 树（任务管理器呈无父级顶层进程），排查进程树问题先清孤儿再下结论；⑤ PowerShell 内联脚本经 Git Bash 转义易碎、ps1 含中文注释会被 GBK 误读——复杂查询写成独立 .ps1 脚本文件（纯 ASCII）；⑥ **「沙箱正常、用户机异常」优先怀疑跨进程异步时序**，别先按网络/环境归因——20s 总线门控曾三度误判为节假日网络问题，真实根因是首 ping 落在宿主监听器安装前丢失 + bus:ready 不释放在途探测；此类竞态（事件丢失/就绪门控/饿死）沙箱难复现，正确姿势是带调用栈的 CDP 事件探针直接测序列，而不是反复改可疑代码发版验证。
@@ -208,12 +208,12 @@ scripts/
 **spike 反发现（已纳入后续阶段设计）**：
 
 1. **`Channel<Vec<u8>>` 原始字节路径不送达**（JS 侧 onmessage 不触发）——传输层定型为：Rust `split_inclusive(b'\n')` 按行累加（字节安全，不切多字节字符）→ `Channel<String>` → JS `TextEncoder` 转回 Uint8Array → **现有 `parseSSE` 与 chat-test 全部零改动**（Phase 3 落地）。
-2. **release 构建时 exe 被旧进程占用 → cargo `os error 5`**——与 README 记录的 Electron 打包坑同款，Phase 5 构建脚本需先检测/杀旧进程。
+2. **release 构建时 exe 被旧进程占用 → cargo `os error 5`**——与 docs/DESIGN.md 记录的 Electron 打包坑同款，Phase 5 构建脚本需先检测/杀旧进程。
 3. **frontendDist 资产在构建期嵌入**；运行时动态产物（未来的用户导入模型）须走 resource 目录或 userData + asset protocol scope（Phase 5 演进项，已在 §5/Phase 5 记录）。
 4. 本机 dpr=200%：测试脚手架必须用 CDP 读物理坐标，PowerShell DPI 非感知进程的坐标被虚拟化（仅影响测试工具，不影响应用）。
 5. `withGlobalTauri` 下 Channel 位于 `__TAURI__.core`（非 `.ipc`）。
 6. 本机 vite dev server 绑定 IPv6-only localhost，探测地址用 `localhost` 不用 `127.0.0.1`。
-7. 机器间网络环境不同（README 中「必须走系统代理」只对部分机器成立）；需要代理的环境绑本机代理端口——Phase 3 的 `http_proxy.rs` 把代理做成可选显式配置（settings/env），不假设系统代理存在。
+7. 机器间网络环境不同（docs/DESIGN.md 中「必须走系统代理」只对部分机器成立）；需要代理的环境绑本机代理端口——Phase 3 的 `http_proxy.rs` 把代理做成可选显式配置（settings/env），不假设系统代理存在。
 
 ### Phase 1 — 外壳（3 天）
 
@@ -278,7 +278,7 @@ Phase 1 踩出的铁律已汇总至「当前进度」节的迁移铁律清单（
 ### Phase 6 — 切换与收尾（1 天）
 
 - 默认产物切 Tauri，观察一个版本后删 `src/main/index.js`（Electron 壳）、`electron`/`@electron/packager` 依赖、`scripts/{dev,build}.js`。
-- README「技术栈/命令/打包」章节改写 + 本次迁移决策回写；AGENTS.md 命令区更新（`npm run tauri dev` 等）；本文归档。
+- docs/DESIGN.md「技术栈/命令/打包」章节改写 + 本次迁移决策回写；AGENTS.md 命令区更新（`npm run tauri dev` 等）；本文归档。
 
 **总工期：15 个工作日 ±20% 缓冲**（单人）。
 
@@ -287,7 +287,7 @@ Phase 1 踩出的铁律已汇总至「当前进度」节的迁移铁律清单（
 每步独立可回滚，golden test 先行：
 
 1. **对账基建**（~1 天）：node 脚本对 shared 纯函数生成 fixtures JSON → cargo test 重放比对；进 CI，故意改行为时重生成 fixtures 两侧同改。
-2. **数据单源化**：personas / outfitStories / videoStories 的数据体抽 JSON，JS 与 Rust 共读——消灭最大的潜在重复面。
+2. **数据单源化**：personas / outfitStories / photoStories 的数据体抽 JSON，JS 与 Rust 共读——消灭最大的潜在重复面。
 3. **store 实体逻辑入 Rust**：SQL/迁移/实体映射并入 `db.rs`，`store-bridge.js` 退役（其 command surface 就是现成 API）。
 4. **chat 入 Rust**：SSE 解析/错误翻译/abort（`transport.js` 已是干净边界）；提示词组装若 mobile 仍需 JS 版，保留双份 + golden test，或随步骤 2 数据化为模板。
 5. **service 编排入 Rust**：收入/打卡/补卡/亲密度/图鉴推进；`ipc-handlers.js` 逐条变 `#[tauri::command]`；**最后**拆除 serviceBus 与 desk-shim 的总线分支。
@@ -357,7 +357,7 @@ Phase 1 踩出的铁律已汇总至「当前进度」节的迁移铁律清单（
 4. 对话：新/切/删会话、流式中断、错误提示翻译、多模态自画像、挂机冒泡、表情联动桌宠。
 5. 打卡：现场/补卡/工作日连击/节假日判断（含调休补班）。
 6. 收入：状态机三态、休息日为 0、月末工作日数按真实日历。
-7. 图鉴/服饰/视频触发三层逻辑与 Electron 版一致（同输入同输出抽 10 例对照）。
+7. 图鉴/服饰/生活照触发三层逻辑与 Electron 版一致（同输入同输出抽 10 例对照）。
 
 ## 8. 全维度性能与质量评估（迁移前 vs 迁移后）
 
@@ -402,4 +402,4 @@ Phase 1 踩出的铁律已汇总至「当前进度」节的迁移铁律清单（
 1. §1 指标表全部达标（实测数据贴回本节）。
 2. §7.3 parity 清单 100% 通过。
 3. `npm test` + `cargo test` + 双构建全绿；无头验证（CDP）脚本适配完成。
-4. README / AGENTS.md 完成改写，硬规则章节更新为 Tauri 语义；本文归档。
+4. docs/DESIGN.md / AGENTS.md 完成改写，硬规则章节更新为 Tauri 语义；本文归档。

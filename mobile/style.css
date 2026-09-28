@@ -514,7 +514,7 @@ body {
 
 /* 大图预览 */
 /*
- * 详情弹层（看图鉴里某一项的大图 / 视频）。
+ * 详情弹层（看图鉴里某一项的大图）。
  *
  * 与 .lightbox 的区别：lightbox 只是「把一张图放大」，
  * 这里是完整的查看器 —— 标题栏、翻页、底部工具条。
@@ -542,7 +542,7 @@ body {
   display: flex; align-items: center; justify-content: center;
   gap: 4px;
 }
-.viewer-img, .viewer-video {
+.viewer-img {
   max-width: 100%; max-height: 100%;
   object-fit: contain;
   border-radius: 8px;
@@ -745,7 +745,7 @@ body {
 }
 .switch-field > small { flex: 0 0 100%; margin-top: 0; }
 
-/* ---------- 视频（图鉴分组 / 解锁播放） ---------- */
+/* ---------- 图鉴分组 ---------- */
 
 /*
  * 分组标题占满一整行。
@@ -764,35 +764,6 @@ body {
   color: rgb(var(--theme-accent, 20 184 166));
   font-weight: 700;
 }
-
-/* 视频封面是 4:3 或 3:4 的实拍截帧，用 cover 填满卡片更整齐 */
-.g-item.g-video img { height: 120px; object-fit: cover; border-radius: 9px; }
-
-/* 播放角标：让「这是视频」一眼可辨，而不是静态封面 */
-.g-play {
-  position: absolute;
-  top: 50%; left: 50%;
-  transform: translate(-50%, -70%);
-  width: 34px; height: 34px;
-  display: flex; align-items: center; justify-content: center;
-  border-radius: 50%;
-  background: rgba(0, 0, 0, 0.45);
-  color: #fff;
-  font-size: 13px;
-  padding-left: 2px; /* ▶ 视觉重心偏左，右移一点才居中 */
-  pointer-events: none;
-}
-
-/* 解锁弹窗里的视频 */
-.reveal-video {
-  width: 100%;
-  max-height: 320px;
-  border-radius: 12px;
-  background: #000;
-  display: block;
-}
-/* 竖屏视频（720x960）用 contain 才不会把人截掉 */
-.reveal-video[data-portrait='1'] { max-height: 380px; object-fit: contain; }
 
 /* ---------- 备份区（设置面板） ---------- */
 .backup-zone {
