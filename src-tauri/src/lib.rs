@@ -114,6 +114,7 @@ pub fn run() {
             /* rusqlite 桥（仅业务总线宿主使用；收权到 pet 窗，见 ensure_pet_window） */
             db::db_exec,
             db::db_select,
+            db::db_batch,
             tray::tray_update_snapshot,
             /* 照片存在性全表（service 的 deps.photoExists 用） */
             photos::photo_list,

@@ -300,13 +300,21 @@ export function openStoreBridge() {
   }
 
   async function deleteSession(id) {
+    /* 会话与消息软删必须同生共死：db_batch 单事务执行（与 node 版
+       BEGIN/COMMIT 同语义），两条独立 invoke 之间可被并发写插队 */
     const ts = now()
-    await exec("UPDATE chat_sessions SET deletedAt = ?, updatedAt = ?, syncState = 'pending' WHERE id = ?", [ts, ts, id])
-    await exec("UPDATE chat_messages SET deletedAt = ?, updatedAt = ?, syncState = 'pending' WHERE sessionId = ?", [
-      ts,
-      ts,
-      id,
-    ])
+    await invoke('db_batch', {
+      statements: [
+        {
+          sql: "UPDATE chat_sessions SET deletedAt = ?, updatedAt = ?, syncState = 'pending' WHERE id = ?",
+          params: [ts, ts, id],
+        },
+        {
+          sql: "UPDATE chat_messages SET deletedAt = ?, updatedAt = ?, syncState = 'pending' WHERE sessionId = ?",
+          params: [ts, ts, id],
+        },
+      ],
+    })
     return true
   }
 

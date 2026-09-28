@@ -301,9 +301,17 @@ export function openStore(filePath) {
   }
 
   function deleteSession(id) {
+    /* 两条 UPDATE 必须同生共死：中间失败会留孤儿消息行（不可见也不可恢复） */
     const ts = now()
-    db.prepare("UPDATE chat_sessions SET deletedAt = ?, updatedAt = ?, syncState = 'pending' WHERE id = ?").run(ts, ts, id)
-    db.prepare("UPDATE chat_messages SET deletedAt = ?, updatedAt = ?, syncState = 'pending' WHERE sessionId = ?").run(ts, ts, id)
+    db.exec('BEGIN')
+    try {
+      db.prepare("UPDATE chat_sessions SET deletedAt = ?, updatedAt = ?, syncState = 'pending' WHERE id = ?").run(ts, ts, id)
+      db.prepare("UPDATE chat_messages SET deletedAt = ?, updatedAt = ?, syncState = 'pending' WHERE sessionId = ?").run(ts, ts, id)
+      db.exec('COMMIT')
+    } catch (err) {
+      db.exec('ROLLBACK')
+      throw err
+    }
     return true
   }
 
