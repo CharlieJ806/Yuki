@@ -11,7 +11,7 @@
  */
 import { DEFAULT_SETTINGS } from '../moyu.js'
 import { serializeContent } from '../content.js'
-import { SCHEMA } from '../db-schema.js'
+import { SCHEMA, SCHEMA_VERSION, MIGRATE_CHECKINS_V2, CHECKINS_DDL_DETECT } from '../db-schema.js'
 import {
   mapCheckin,
   mapMessage,
@@ -31,9 +31,23 @@ function invoke(cmd, args = {}) {
 export function openStoreBridge() {
   const now = () => Date.now()
 
-  /* select/exec 是全部数据访问的收口：先等建表完成，再进 IPC。
-     宿主（service-host）也会 await ready，这里是 store surface 自身的防线 */
-  const ready = invoke('db_exec', { sql: SCHEMA, params: null }).then(() => undefined)
+  /* select/exec 是全部数据访问的收口：先等建表+迁移完成，再进 IPC。
+     宿主（service-host）也会 await ready，这里是 store surface 自身的防线。
+     版本推进逻辑与 store.js 的 ensureSchema 同式（改动需两处同步）。 */
+  const ready = (async () => {
+    await invoke('db_exec', { sql: SCHEMA, params: null })
+    const versionRows = await invoke('db_select', { sql: 'PRAGMA user_version', params: null })
+    const version = Number(versionRows[0]?.user_version) || 0
+    if (version < SCHEMA_VERSION) {
+      if (version < 2) {
+        const checkins = await invoke('db_select', { sql: CHECKINS_DDL_DETECT, params: null })
+        if (checkins[0] && /dateKey[^,]*UNIQUE/i.test(checkins[0].sql)) {
+          await invoke('db_exec', { sql: MIGRATE_CHECKINS_V2, params: null })
+        }
+      }
+      await invoke('db_exec', { sql: `PRAGMA user_version = ${SCHEMA_VERSION}`, params: null })
+    }
+  })()
   const select = async (sql, params) => {
     await ready
     return invoke('db_select', { sql, params: params ?? null })

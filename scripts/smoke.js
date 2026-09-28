@@ -4,6 +4,7 @@
  * 用法: node scripts/smoke.js
  */
 import { existsSync, readFileSync, mkdtempSync, readdirSync, rmSync } from 'node:fs'
+import { DatabaseSync } from 'node:sqlite'
 import { tmpdir } from 'node:os'
 import { join, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -230,6 +231,48 @@ try {
     threwOnUnknownTable = true
   }
   check('markSynced 表名白名单', threwOnUnknownTable, true)
+
+  /* ---------- 9. schema 迁移（user_version / 软删唯一索引） ---------- */
+  const legacyPath = join(dir, 'legacy.db')
+  {
+    /* 手工造一个 v1 形态的旧库：列级 UNIQUE + 一条已软删的打卡 */
+    const legacy = new DatabaseSync(legacyPath)
+    legacy.exec(`CREATE TABLE checkins (
+      id        TEXT PRIMARY KEY,
+      dateKey   TEXT NOT NULL UNIQUE,
+      createdAt INTEGER NOT NULL,
+      note      TEXT,
+      updatedAt INTEGER NOT NULL,
+      deletedAt INTEGER,
+      syncState TEXT NOT NULL DEFAULT 'local'
+    );`)
+    const legacyTs = Date.parse('2025-06-03T10:00:00')
+    legacy
+      .prepare(
+        "INSERT INTO checkins (id, dateKey, createdAt, note, updatedAt, syncState) VALUES ('legacy-1', '2025-06-03', ?, NULL, ?, 'synced')",
+      )
+      .run(legacyTs, legacyTs)
+    legacy.prepare("UPDATE checkins SET deletedAt = ? WHERE id = 'legacy-1'").run(legacyTs)
+    legacy.close()
+  }
+  const legacyStore = openStore(legacyPath)
+  check('旧库迁移后 user_version=2', legacyStore.db.prepare('PRAGMA user_version').get().user_version, 2)
+  check('迁移保留旧数据行', legacyStore.db.prepare('SELECT COUNT(*) AS n FROM checkins').get().n, 1)
+  check('软删日期可重新打卡（partial unique）', legacyStore.addCheckin('2025-06-03').created, true)
+  let liveDateStillUnique = false
+  try {
+    legacyStore.db
+      .prepare("INSERT INTO checkins (id, dateKey, createdAt, updatedAt, syncState) VALUES ('dup', '2025-06-03', 0, 0, 'pending')")
+      .run()
+  } catch {
+    liveDateStillUnique = true
+  }
+  check('未删除日期仍唯一', liveDateStillUnique, true)
+  legacyStore.close()
+
+  const freshStore = openStore(join(dir, 'fresh.db'))
+  check('新库 user_version=2', freshStore.db.prepare('PRAGMA user_version').get().user_version, 2)
+  freshStore.close()
 
   /* ---------- 10. 未知设置键被忽略 ---------- */
   await service.updateSettings({ hackerKey: 'boom' })

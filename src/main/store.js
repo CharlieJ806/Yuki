@@ -13,7 +13,7 @@ import { mkdirSync } from 'node:fs'
 import { dirname } from 'node:path'
 import { DEFAULT_SETTINGS } from '../shared/moyu.js'
 import { serializeContent } from '../shared/content.js'
-import { SCHEMA } from '../shared/db-schema.js'
+import { SCHEMA, SCHEMA_VERSION, MIGRATE_CHECKINS_V2, CHECKINS_DDL_DETECT } from '../shared/db-schema.js'
 import {
   mapCheckin,
   mapMessage,
@@ -27,12 +27,28 @@ import {
 const require = createRequire(import.meta.url)
 const { DatabaseSync } = require('node:sqlite')
 
+/**
+ * schema 版本推进：SCHEMA 只保证「新建库」是最新形态，已存在的旧表要靠
+ * 迁移段追上。检测按 sqlite_master 的实际 DDL 判断，天然幂等；
+ * user_version 记在 PRAGMA 里（与 Tauri 桥版同一套逻辑，改版本时两处同步）。
+ */
+function ensureSchema(db) {
+  db.exec(SCHEMA)
+  const version = Number(db.prepare('PRAGMA user_version').get()?.user_version) || 0
+  if (version >= SCHEMA_VERSION) return
+  if (version < 2) {
+    const checkins = db.prepare(CHECKINS_DDL_DETECT).get()
+    if (checkins && /dateKey[^,]*UNIQUE/i.test(checkins.sql)) db.exec(MIGRATE_CHECKINS_V2)
+  }
+  db.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`)
+}
+
 export function openStore(filePath) {
   if (filePath !== ':memory:') mkdirSync(dirname(filePath), { recursive: true })
   const db = new DatabaseSync(filePath)
   db.exec('PRAGMA journal_mode = WAL;')
   db.exec('PRAGMA foreign_keys = ON;')
-  db.exec(SCHEMA)
+  ensureSchema(db)
 
   const now = () => Date.now()
 
