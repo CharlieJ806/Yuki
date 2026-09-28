@@ -214,7 +214,9 @@ export async function recentMessages(sessionId, limit = 100) {
 }
 
 export async function countMessages(sessionId) {
-  /* 优先读冗余计数；老数据没有这个字段，退回全量扫并回填一次 */
+  /* 优先读冗余计数；老数据没有这个字段，退回全量扫并回填一次。
+     已知边界：与 addMessage 的「读-改-写」并发交错可能少计一条且被缓存
+     粘住 —— 计数仅用于会话列表展示，单用户手机端并发极低，接受此误差。 */
   const s = await getSession(sessionId)
   if (typeof s?.messageCount === 'number') return s.messageCount
   const db = await openDb()

@@ -109,9 +109,17 @@ CREATE INDEX IF NOT EXISTS idx_chat_messages_session ON chat_messages(sessionId,
 /*
  * v1→v2：把老库 checkins 的列级 UNIQUE 重建为 partial unique index。
  * 执行前提：调用方已从 sqlite_master 检测到 checkins 的建表 DDL 仍含
- * 列级 UNIQUE（新库的 DDL 没有，天然跳过）。整段无参，走 execute_batch 原子执行。
+ * 列级 UNIQUE（新库的 DDL 没有，天然跳过）。
+ *
+ * 整段用 BEGIN IMMEDIATE/COMMIT 包住：execute_batch / db.exec 都是逐条
+ * autocommit、**不自带事务**，裸跑时中途失败会留下撕裂态——
+ * checkins_v2 残留（重试必炸）或 checkins 已被 DROP（SCHEMA 重建出空表，
+ * 老数据永久滞留副本里）。包事务后任一步失败整体回滚；
+ * 开头的 DROP IF EXISTS 兜住历史撕裂残留（v2 是纯迁移暂存表，可安全重建）。
  */
 export const MIGRATE_CHECKINS_V2 = `
+BEGIN IMMEDIATE;
+DROP TABLE IF EXISTS checkins_v2;
 CREATE TABLE checkins_v2 (
   id        TEXT PRIMARY KEY,
   dateKey   TEXT NOT NULL,
@@ -127,6 +135,7 @@ DROP TABLE checkins;
 ALTER TABLE checkins_v2 RENAME TO checkins;
 CREATE INDEX IF NOT EXISTS idx_checkins_date ON checkins(dateKey);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_checkins_date_live ON checkins(dateKey) WHERE deletedAt IS NULL;
+COMMIT;
 `
 
 /* 老库检测：checkins 建表 DDL 里 dateKey 列带 UNIQUE 即 v1 形态（新库该列无 UNIQUE，

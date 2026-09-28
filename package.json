@@ -6,7 +6,7 @@
   "type": "module",
   "main": "src/main/index.js",
   "engines": {
-    "node": ">=22.5"
+    "node": ">=22.13"
   },
   "scripts": {
     "dev": "node scripts/dev.js",

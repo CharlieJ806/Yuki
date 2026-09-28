@@ -870,10 +870,12 @@ function registerIpc() {
       app.setLoginItemSettings({ openAtLogin: Boolean(on), name: LOGIN_ITEM_NAME })
       return true
     },
-    /* 数据目录入口（设置页「备份数据」用）：成功返回 true，失败返回系统错误文案 */
+    /* 数据目录入口（设置页「备份数据」用）。失败走 reject：与 Tauri 壳
+       同语义，设置页的 lastError 错误条才有反馈（返回字符串会被当成功吞掉） */
     'system:openDataDir': async () => {
       const err = await shell.openPath(app.getPath('userData'))
-      return err === '' ? true : err
+      if (err !== '') throw new Error(err)
+      return true
     },
   }
 

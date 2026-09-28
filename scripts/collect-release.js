@@ -47,13 +47,13 @@ copyFileSync(join(TAURI_TARGET, 'app.exe'), portable)
 console.log(`✓ ${portable}`)
 
 /* 安装包：打包器按 productName 产出中文名，归集成规范英文名。
-   按当前版本精确挑选而不是字典序取末位——bundle/nsis 不清理、旧版产物
-   会积累，而 localeCompare 不识别数字（0.2.10 < 0.2.9），跨 .9→.10 边界
-   会把旧 exe 改名成新版本交付。 */
-const wanted = `-${VERSION}-setup.exe`
+   Tauri NSIS 实际命名是 {productName}_{version}_x64-setup.exe（下划线分隔、
+   架构段在 -setup.exe 之前），按 `_版本_` 精确挑选——此前按字典序取末位，
+   不识别数字（0.2.10 < 0.2.9）且旧版产物混在 bundle 里会被误挑。 */
+const wanted = `_${VERSION}_`
 const setupFile = readdirSync(NSIS_DIR).find((f) => f.endsWith('-setup.exe') && f.includes(wanted))
 const setupSource = setupFile ? join(NSIS_DIR, setupFile) : null
-mustExist(setupSource, `先跑 npx tauri build（NSIS bundle，需含 *${wanted}，旧版产物请清理）`)
+mustExist(setupSource, `先跑 npx tauri build（NSIS bundle，需含 *${wanted}*-setup.exe，旧版产物请清理）`)
 copyFileSync(setupSource, setup)
 console.log(`✓ ${setup}（源：${setupSource}）`)
 

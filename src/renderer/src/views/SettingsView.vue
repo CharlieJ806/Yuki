@@ -58,7 +58,7 @@ const savedAt = ref(null)
  * keyLoaded 门控：全量值取回之前 chatApiKey 还是初始空串，此时把表单整体
  * 保存会把已存的 Key 覆盖成空串 —— 取回前发出去的补丁必须摘掉这个键。
  */
-let savedApiKey = ''
+const savedApiKey = ref('')
 const keyLoaded = ref(false)
 
 function formPatch() {
@@ -292,7 +292,7 @@ const dirty = computed(() => {
     if (k === 'chatApiKey') continue
     if (JSON.stringify(form[k]) !== JSON.stringify(state.settings[k])) return true
   }
-  return String(form.chatApiKey ?? '') !== savedApiKey
+  return String(form.chatApiKey ?? '') !== savedApiKey.value
 })
 
 /* 进入设置页就把人设列表拉全；同时拉全量设置 —— state 快照不含 API Key
@@ -303,7 +303,7 @@ onMounted(() => {
     .then((full) => {
       if (full) {
         Object.assign(form, full)
-        savedApiKey = String(full.chatApiKey ?? '')
+        savedApiKey.value = String(full.chatApiKey ?? '')
       }
     })
     .catch(() => {})
@@ -324,7 +324,7 @@ async function save() {
   try {
     const ok = await saveSettings(formPatch())
     if (ok) {
-      if (keyLoaded.value) savedApiKey = String(form.chatApiKey ?? '')
+      if (keyLoaded.value) savedApiKey.value = String(form.chatApiKey ?? '')
       savedAt.value = new Date()
       window.setTimeout(() => (savedAt.value = null), 2200)
     }
@@ -335,14 +335,14 @@ async function save() {
 
 async function revert() {
   Object.assign(form, state.settings)
-  form.chatApiKey = savedApiKey
+  form.chatApiKey = savedApiKey.value
 }
 
 async function reset() {
   const ok = await resetSettings()
   if (ok) {
     Object.assign(form, state.settings)
-    savedApiKey = ''
+    savedApiKey.value = ''
     form.chatApiKey = ''
   }
 }

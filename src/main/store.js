@@ -38,7 +38,16 @@ function ensureSchema(db) {
   if (version >= SCHEMA_VERSION) return
   if (version < 2) {
     const checkins = db.prepare(CHECKINS_DDL_DETECT).get()
-    if (checkins && /dateKey[^,]*UNIQUE/i.test(checkins.sql)) db.exec(MIGRATE_CHECKINS_V2)
+    if (checkins && /dateKey[^,]*UNIQUE/i.test(checkins.sql)) {
+      try {
+        db.exec(MIGRATE_CHECKINS_V2)
+      } catch (err) {
+        /* 迁移段是显式事务：语句失败时事务仍开着，先回滚再上抛，别把
+           半个事务留给后续语句 */
+        try { db.exec('ROLLBACK') } catch { /* 事务可能已自行结束 */ }
+        throw err
+      }
+    }
   }
   db.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`)
 }

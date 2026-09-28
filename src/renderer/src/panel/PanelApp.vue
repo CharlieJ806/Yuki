@@ -12,6 +12,10 @@ const route = ref('home')
 const collapsed = ref(false)
 let stopBridge = null
 let timer = null
+const onVisibilityChange = () => {
+  /* 隐藏期跳过了轮询，回到前台立刻补一次，别让用户看到最长 30s 的陈旧数据 */
+  if (!document.hidden) refresh()
+}
 
 const NAV = [
   { key: 'home', name: '主页', icon: '🏠' },
@@ -68,11 +72,13 @@ onMounted(async () => {
     if (document.hidden) return
     refresh()
   }, 30_000)
+  document.addEventListener('visibilitychange', onVisibilityChange)
 })
 
 onBeforeUnmount(() => {
   stopBridge?.()
   if (timer) window.clearInterval(timer)
+  document.removeEventListener('visibilitychange', onVisibilityChange)
 })
 </script>
 

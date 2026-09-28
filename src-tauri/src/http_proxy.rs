@@ -136,8 +136,9 @@ pub struct OnceReply {
 }
 
 /// 整包请求（非流式对话 / 节假日表 / 测试连接）。响应体按 UTF-8 文本返回。
-/// 单请求总超时 300s：once 没有取消令牌轮询的消费方（如节假日），不兜底就
-/// 可能无限期挂起；上限对齐 Node 基线 undici 的隐式 headers 超时量级。
+/// 单请求总超时 300s 兜底。当前 JS 侧全部走 http_fetch_stream（tauri-transport），
+/// once 暂无调用方——这是为将来接入的非流式调用方预留的兜底，避免挂死；
+/// 真正生效的加固是 client 上的 connect_timeout。
 #[tauri::command]
 pub async fn http_fetch_once(
     window: tauri::WebviewWindow,

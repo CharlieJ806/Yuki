@@ -42,7 +42,13 @@ export function openStoreBridge() {
       if (version < 2) {
         const checkins = await invoke('db_select', { sql: CHECKINS_DDL_DETECT, params: null })
         if (checkins[0] && /dateKey[^,]*UNIQUE/i.test(checkins[0].sql)) {
-          await invoke('db_exec', { sql: MIGRATE_CHECKINS_V2, params: null })
+          try {
+            await invoke('db_exec', { sql: MIGRATE_CHECKINS_V2, params: null })
+          } catch (err) {
+            /* 迁移段是显式事务：语句失败时事务仍开着，先回滚再上抛 */
+            try { await invoke('db_exec', { sql: 'ROLLBACK', params: null }) } catch { /* 事务可能已自行结束 */ }
+            throw err
+          }
         }
       }
       await invoke('db_exec', { sql: `PRAGMA user_version = ${SCHEMA_VERSION}`, params: null })
