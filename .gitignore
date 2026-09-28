@@ -39,3 +39,5 @@ src-tauri/gen/
 .tmp-open-mobile.cjs/
 # Electron 打包暂存区（绿色版 zip 的压缩来源，交付物只有 zip）
 .tmp-release/
+# pack:mobile 的暂存目录（内含完整 Electron 运行时，数百 MB）
+.tmp-launcher/

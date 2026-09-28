@@ -1,0 +1,43 @@
+name: test
+
+# push/PR 常规门禁：测试资产（smoke + chat-test + cargo）不该等到手动发版才跑。
+# 缓存与依赖安装方式与 release.yml 保持一致，两侧结果可互证。
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: test-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      # Rust 首次全量编译慢，rust-cache 之后增量
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      # 测试不需要 electron 二进制本体（版本号解析只读 package.json）
+      - name: Install dependencies
+        run: npm ci
+        env:
+          ELECTRON_SKIP_BINARY_DOWNLOAD: 1
+
+      - name: JS tests
+        run: npm test
+
+      - name: Rust tests
+        run: cargo test
+        working-directory: src-tauri
