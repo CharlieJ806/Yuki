@@ -51,6 +51,21 @@ const PROFILE_SHOTS = [
 const form = reactive({ ...DEFAULT_SETTINGS })
 const saving = ref(false)
 const savedAt = ref(null)
+/*
+ * chatApiKey 不在 state 快照里（广播面脱敏），表单另存「已保存的 Key」：
+ * dirty 判定和 revert 都以它为基准，全量值进设置页时经 getFullSettings 拉取。
+ *
+ * keyLoaded 门控：全量值取回之前 chatApiKey 还是初始空串，此时把表单整体
+ * 保存会把已存的 Key 覆盖成空串 —— 取回前发出去的补丁必须摘掉这个键。
+ */
+let savedApiKey = ''
+const keyLoaded = ref(false)
+
+function formPatch() {
+  const patch = { ...form }
+  if (!keyLoaded.value) delete patch.chatApiKey
+  return patch
+}
 
 const isDev = import.meta.env.DEV
 
@@ -166,7 +181,7 @@ async function testChat() {
   chatTestResult.value = null
   try {
     /* 先把当前表单存下去，测试读的是库里的配置 */
-    await saveSettings({ ...form })
+    await saveSettings(formPatch())
     chatTestResult.value = await testChatConnection()
   } finally {
     chatTesting.value = false
@@ -262,7 +277,7 @@ async function runDiagnose() {
   diagnosing.value = true
   diagResult.value = null
   try {
-    await saveSettings({ ...form })
+    await saveSettings(formPatch())
     diagResult.value = await diagnoseChat()
   } finally {
     diagnosing.value = false
@@ -286,11 +301,16 @@ onMounted(() => {
   loadPersonas().catch(() => {})
   getFullSettings()
     .then((full) => {
-      if (!full) return
-      Object.assign(form, full)
-      savedApiKey = String(full.chatApiKey ?? '')
+      if (full) {
+        Object.assign(form, full)
+        savedApiKey = String(full.chatApiKey ?? '')
+      }
     })
     .catch(() => {})
+    .finally(() => {
+      /* 失败也放行：mock/异常场景下表单值即当前值，继续拦只会让 Key 永远存不上 */
+      keyLoaded.value = true
+    })
 })
 
 watch(
@@ -302,9 +322,9 @@ watch(
 async function save() {
   saving.value = true
   try {
-    const ok = await saveSettings({ ...form })
+    const ok = await saveSettings(formPatch())
     if (ok) {
-      savedApiKey = String(form.chatApiKey ?? '')
+      if (keyLoaded.value) savedApiKey = String(form.chatApiKey ?? '')
       savedAt.value = new Date()
       window.setTimeout(() => (savedAt.value = null), 2200)
     }

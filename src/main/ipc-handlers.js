@@ -80,9 +80,16 @@ export function createIpcHandlers(service, hooks = {}) {
       return activeSessionId
     },
 
-    /* 逐会话状态：渲染端切换会话时必须传 sessionId */
+    /* 逐会话状态：渲染端切换会话时必须传 sessionId。
+       与 state 快照同一脱敏口径：sessionSettings 合并了全局设置，
+       不摘掉 chatApiKey 的话，每次切会话都会把 Key 原文重新注回各窗 state */
     'session:affinity': (sessionId) => service.sessionAffinity(sessionId),
-    'session:settings': (sessionId) => service.sessionSettings(sessionId),
+    'session:settings': async (sessionId) => {
+      const s = await service.sessionSettings(sessionId)
+      if (!s || typeof s !== 'object') return s
+      const { chatApiKey, ...rest } = s
+      return rest
+    },
     'session:setSetting': (sessionId, key, value) => service.setSessionSetting(sessionId, key, value),
     'gallery:get': (sessionId) => service.sessionGallery(sessionId),
     'gallery:clear': (sessionId) => service.clearSessionGallery(sessionId),

@@ -57,17 +57,22 @@ function probeImage(rel) {
   })
 }
 
+/* 弹窗只有 outfit 分支显示 unlockImgSrc（photo/video 走各自的媒体分支），
+   非 outfit 解锁不做任何探测；seq 令牌防快速连续解锁时旧探测结果回写 */
+let probeSeq = 0
 watch(unlock, async (u) => {
+  const seq = ++probeSeq
   unlockImgSrc.value = ''
-  if (!u) return
+  if (!u || u.kind !== 'outfit') return
   for (const rel of photoPathsOf(u.kind, u.slug)) {
-    if (await probeImage(rel)) {
+    const ok = await probeImage(rel)
+    if (seq !== probeSeq) return
+    if (ok) {
       unlockImgSrc.value = rel
       return
     }
   }
-  /* 生活照没有立绘可退，取不到就留空 */
-  unlockImgSrc.value = u.kind === 'photo' ? '' : `yuki-outfit-${u.slug}.png`
+  if (seq === probeSeq) unlockImgSrc.value = `yuki-outfit-${u.slug}.png`
 })
 function closeUnlock() {
   consumeUnlock()
