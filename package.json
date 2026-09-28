@@ -19,13 +19,14 @@
     "mobile:open": "node scripts/open-mobile.js",
     "smoke": "node scripts/smoke.js",
     "test:chat": "node scripts/chat-test.js",
-    "test": "node scripts/smoke.js && node scripts/chat-test.js",
+    "test": "node scripts/check-version.js && node scripts/smoke.js && node scripts/chat-test.js",
     "tauri": "tauri"
   },
   "dependencies": {
     "vue": "^3.5.13"
   },
   "devDependencies": {
+    "@electron/fuses": "^2.1.3",
     "@electron/packager": "^20.3.0",
     "@tauri-apps/cli": "^2.11.5",
     "@vitejs/plugin-vue": "^5.2.1",

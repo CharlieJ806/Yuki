@@ -38,13 +38,14 @@ const setup = join(DIST, `desk-pet-tauri-setup-${VERSION}.exe`)
 copyFileSync(join(TAURI_TARGET, 'app.exe'), portable)
 console.log(`✓ ${portable}`)
 
-/* 安装包：打包器按 productName 产出中文名，归集成规范英文名 */
-const setupSource = readdirSync(NSIS_DIR)
-  .filter((f) => f.endsWith('-setup.exe'))
-  .map((f) => join(NSIS_DIR, f))
-  .sort((a, b) => a.localeCompare(b))
-  .pop()
-mustExist(setupSource, '先跑 npx tauri build（NSIS bundle）')
+/* 安装包：打包器按 productName 产出中文名，归集成规范英文名。
+   按当前版本精确挑选而不是字典序取末位——bundle/nsis 不清理、旧版产物
+   会积累，而 localeCompare 不识别数字（0.2.10 < 0.2.9），跨 .9→.10 边界
+   会把旧 exe 改名成新版本交付。 */
+const wanted = `-${VERSION}-setup.exe`
+const setupFile = readdirSync(NSIS_DIR).find((f) => f.endsWith('-setup.exe') && f.includes(wanted))
+const setupSource = setupFile ? join(NSIS_DIR, setupFile) : null
+mustExist(setupSource, `先跑 npx tauri build（NSIS bundle，需含 *${wanted}，旧版产物请清理）`)
 copyFileSync(setupSource, setup)
 console.log(`✓ ${setup}（源：${setupSource}）`)
 
