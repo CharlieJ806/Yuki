@@ -62,7 +62,12 @@ onMounted(async () => {
   stopBridge = initBridge()
   await loadMeta()
   await refresh()
-  timer = window.setInterval(refresh, 30_000)
+  /* 隐藏期间跳过刷新：隐藏窗的轮询每次都是一趟总线往返 + 宿主全量
+     getState（DB 读 + 重算），隐藏时做全是无用功 */
+  timer = window.setInterval(() => {
+    if (document.hidden) return
+    refresh()
+  }, 30_000)
 })
 
 onBeforeUnmount(() => {
@@ -87,7 +92,7 @@ onBeforeUnmount(() => {
       <header class="topbar">
         <div class="topbar-left">
           <h2>{{ currentTitle }}</h2>
-          <span class="crumb">{{ brand }} · {{ state.backend === 'electron' ? '桌面版' : '预览模式' }}</span>
+          <span class="crumb">{{ brand }} · {{ state.backend === 'native' ? '桌面版' : '预览模式' }}</span>
         </div>
         <div class="topbar-right">
           <span class="chip tabular">今日 {{ state.todayEarnedText }}</span>

@@ -9,57 +9,22 @@
  * 它只负责「显示 + 换装」，不承载对话逻辑。
  */
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
-import { state, refresh, initBridge, saveSettings, refreshGallery } from '../stores/app.js'
-import { OUTFITS, OUTFIT_SLUGS, DEFAULT_OUTFIT, outfitFile, outfitForTime, outfitInfo } from '@shared/interactions.js'
+import { state, refresh, initBridge, refreshGallery } from '../stores/app.js'
+import { outfitFile } from '@shared/interactions.js'
+import { useOutfitState } from '../lib/outfit-state.js'
 
 const pickerOpen = ref(false)
 
-/*
- * 换装清单**只列已解锁的**（与桌宠右键菜单、手机端同一套规则）。
- * 之前列的是 OUTFITS 全量 —— 等于绕过图鉴。
- */
-const outfits = computed(() => {
-  const unlocked = new Set(state.gallery?.outfit?.unlocked ?? [])
-  return OUTFITS.filter((o) => unlocked.has(o.slug))
-})
-
-/** 每分钟对一次时间，跨过时段边界才会自动换装 */
-const clockTick = ref(Date.now())
-let clockTimer = null
-let stopBridge = null
-
-/** 已解锁的服饰（图鉴未就绪时保守为「只有初始那套」） */
-const unlockedOutfits = computed(() => {
-  const list = state.gallery?.outfit?.unlocked
-  return new Set(Array.isArray(list) ? list : [DEFAULT_OUTFIT])
-})
-
-const currentOutfitSlug = computed(() => {
-  if (state.settings.outfitMode !== 'fixed') return outfitForTime(new Date(clockTick.value))
-  const s = state.settings.outfitSlug
-  if (!OUTFIT_SLUGS.includes(s)) return DEFAULT_OUTFIT
-  /*
-   * 未解锁的一律回落。
-   * 守卫放在**展示求值点**：settings 的写入口不止换装菜单
-   * （设置页、IPC、重置都会写），只在菜单挡是绕得过去的。
-   */
-  if (!unlockedOutfits.value.has(s)) return DEFAULT_OUTFIT
-  return s
-})
+/* 换装状态收敛在 useOutfitState（与桌宠/右键菜单/对话窗同一套，守卫规则单源） */
+const { currentOutfitSlug, currentOutfitLabel, outfits, chooseOutfit: pickOutfit } = useOutfitState()
 const currentOutfitImage = computed(() => outfitFile(currentOutfitSlug.value))
-const currentOutfitLabel = computed(() => outfitInfo(currentOutfitSlug.value).label)
+
+let stopBridge = null
 
 /** 选中一套即固定；选「跟随时间」恢复自动（null 表示自动） */
 async function choose(slug) {
   pickerOpen.value = false
-  if (slug === null) {
-    await saveSettings({ outfitMode: 'auto' })
-    return
-  }
-  /* 再挡一道：菜单没列出来的也不给选 */
-  const unlocked = new Set(state.gallery?.outfit?.unlocked ?? [])
-  if (!unlocked.has(slug)) return
-  await saveSettings({ outfitMode: 'fixed', outfitSlug: slug })
+  await pickOutfit(slug)
 }
 
 onMounted(async () => {
@@ -70,12 +35,10 @@ onMounted(async () => {
    * 不拉的话会保守成「只有初始那套」—— 用户会觉得换装坏了。
    */
   await refreshGallery().catch(() => {})
-  clockTimer = window.setInterval(() => (clockTick.value = Date.now()), 60_000)
 })
 
 onBeforeUnmount(() => {
   stopBridge?.()
-  if (clockTimer) window.clearInterval(clockTimer)
 })
 </script>
 

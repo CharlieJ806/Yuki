@@ -24,7 +24,6 @@ import {
   AFFINITY_GAIN,
   OUTFIT_SLUGS,
   PET_EXPRESSIONS,
-  DEFAULT_OUTFIT,
   affinityLevel,
   contextualScene,
   hoverLinesFor,
@@ -33,13 +32,13 @@ import {
   isTiredHour,
   linesFor,
   outfitFile,
-  outfitForTime,
   pickLine,
   poseImageFile,
   IDLE_JITTER_MIN,
   IDLE_JITTER_MAX,
   SEDENTARY_INTERVAL_MS,
 } from '@shared/interactions.js'
+import { useOutfitState } from '../lib/outfit-state.js'
 
 /*
  * 立绘映射统一收在 @shared/interactions.js 的 PET_EXPRESSIONS，
@@ -65,7 +64,6 @@ const dragging = ref(false)
 let timer = null
 let stopBridge = null
 let snackTimer = null
-let outfitClockTimer = null
 /** 拖拽结束也会触发 click，用它区分「拖」和「点」 */
 let movedByDrag = false
 
@@ -122,33 +120,10 @@ const currentExpression = computed(() => emote.value || idlePose.value || mood.v
  * 之前只在对话窗侧边立绘生效，桌宠压根不看这个设置，
  * 于是「右键换装没反应」（用户实测反馈）。
  *
- * clockTick 每分钟推进一次：直接 new Date() 不会触发重渲染，
- * 跨过时段边界（比如 23:00 该换睡衣）就不会自动切换。
+ * 换装状态收敛在 useOutfitState：时钟、解锁集合、守卫规则四窗单源
+ * （clockTick 每分钟推进一次，跨过时段边界才会自动切换）。
  */
-const clockTick = ref(Date.now())
-
-/** 已解锁的服饰集合（未拉到图鉴时保守处理为「只有初始那套」） */
-const unlockedOutfits = computed(() => {
-  const list = state.gallery?.outfit?.unlocked
-  /* 图鉴还没拉回来时不能当成「全解锁」—— 宁可少显示也不要漏 */
-  return new Set(Array.isArray(list) ? list : [DEFAULT_OUTFIT])
-})
-
-const currentOutfitSlug = computed(() => {
-  if (state.settings.outfitMode !== 'fixed') return outfitForTime(new Date(clockTick.value))
-  const s = state.settings.outfitSlug
-  if (!OUTFIT_SLUGS.includes(s)) return DEFAULT_OUTFIT
-  /*
-   * 未解锁的一律回落到默认。
-   *
-   * 守卫放这里而不是只放在菜单窗的换装入口里：换装写的是 settings，
-   * 而 settings 的写入口不止一个（设置页、IPC、将来的重置）。
-   * 在**展示用的求值点**挡一道，才是真正绕不过去的。
-   * 实测过：只在换装入口挡时，直接调 updateSettings 就能穿上未解锁的。
-   */
-  if (!unlockedOutfits.value.has(s)) return DEFAULT_OUTFIT
-  return s
-})
+const { currentOutfitSlug } = useOutfitState()
 
 /**
  * 立绘展示的是动作还是服饰？
@@ -651,8 +626,7 @@ onMounted(async () => {
     fitObserver.observe(stageEl.value)
     reportFit()
   }
-  /* 自动换装要跨过时段边界，每分钟对一次时间 */
-  outfitClockTimer = window.setInterval(() => (clockTick.value = Date.now()), 60_000)
+  /* 自动换装的时钟由 useOutfitState 自管（此处不再重复建定时器） */
   /* 消费跨窗口的表情指令（例如面板里点了补卡） */
   watch(() => state.emoteRequest?.seq, playRequestedEmote, { immediate: true })
   /* 消费菜单窗转来的桌宠本地行为指令（气泡开关/退出挥手） */
@@ -693,7 +667,8 @@ onBeforeUnmount(() => {
   if (longPressTimer) window.clearTimeout(longPressTimer)
   if (idlePoseTimer) window.clearTimeout(idlePoseTimer)
   if (snackTimer) window.clearTimeout(snackTimer)
-  if (outfitClockTimer) window.clearInterval(outfitClockTimer)
+  if (emoteTimer) window.clearTimeout(emoteTimer)
+  if (petStreakTimer) window.clearTimeout(petStreakTimer)
   fitObserver?.disconnect()
 })
 </script>

@@ -348,7 +348,6 @@ const previewText = computed(() => {
 
 const REST_PATTERN_LABELS = { double: '双休', single: '单休', alternate: '大小周', irregular: '不定休' }
 const syncStatus = computed(() => ({
-  pendingCheckins: state.snapshot ? undefined : undefined,
   backend: state.backend,
   dbHint: '本地 SQLite（userData/desk-pet.db）',
 }))
@@ -784,7 +783,7 @@ const syncStatus = computed(() => ({
         <div class="field">
           <label>存储位置</label>
           <span class="value">{{ syncStatus.dbHint }}</span>
-          <span class="hint">运行环境：{{ syncStatus.backend === 'electron' ? 'Electron 桌面版' : '浏览器预览模式（数据不落盘）' }}</span>
+          <span class="hint">运行环境：{{ syncStatus.backend === 'native' ? '桌面版（数据在本机 SQLite）' : '浏览器预览模式（数据不落盘）' }}</span>
         </div>
         <div class="field">
           <label>累计数据</label>

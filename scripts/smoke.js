@@ -586,8 +586,15 @@ try {
          * 匹配两种写法：对象字面量（saveSettings({ outfitMode: 'fixed' })）
          * 与赋值（form.outfitMode = 'fixed'）——
          * 设置页走表单，用的是后者，只认前者会误报。
+         *
+         * 换装写入逻辑收敛进 lib/outfit-state.js（useOutfitState）之后，
+         * 对话窗/立绘窗组件里不再直接写 outfitMode：入口存在性的充分证据
+         * 是「组件引用了 useOutfitState」（解构出 outfits/chooseOutfit 供
+         * 模板使用），所以两种形态任一命中即算入口在。
          */
-        if (!/outfitMode\s*[:=]\s*'fixed'/.test(src)) entriesMissing.push(label)
+        const hasWrite = /outfitMode\s*[:=]\s*'fixed'/.test(src)
+        const usesShared = /useOutfitState/.test(src)
+        if (!hasWrite && !usesShared) entriesMissing.push(label)
       }
       check('换装入口都在（防再次丢失）', entriesMissing, [])
     }

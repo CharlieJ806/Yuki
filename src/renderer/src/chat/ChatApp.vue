@@ -17,24 +17,16 @@ import {
   sendChat,
   abortChat,
   win,
-  saveSettings,
   refreshGallery,
   refreshSessionAffinity,
   consumeUnlock,
   setActiveSession,
   refreshSessionSettings,
 } from '../stores/app.js'
-import {
-  affinityLevel,
-  outfitForTime,
-  outfitInfo,
-  OUTFITS,
-  OUTFIT_SLUGS,
-  DEFAULT_OUTFIT,
-} from '@shared/interactions.js'
+import { affinityLevel } from '@shared/interactions.js'
 import { checkImagesForModel } from '@shared/content.js'
 import { photoPathsOf } from '@shared/photoMessage.js'
-import { PHOTO_SLUGS } from '@shared/photoStories.js'
+import { useOutfitState } from '../lib/outfit-state.js'
 
 const input = ref('')
 /*
@@ -50,46 +42,32 @@ const unlock = computed(() => state.lastUnlock ?? null)
  * 解锁装扮时优先显示**自拍照片**（「她发来的照片」的观感），
  * 没生成过照片的 slug 退回立绘。
  *
- * 探测方式：预加载一次，成功才记进 availablePhotos。
- * 不写死清单是因为照片会分批补，清单要跟着改；而 404 会被浏览器
- * 缓存住，探测成本极低。
+ * 照片**按需探测**：解锁到来时只探该 slug 的候选路径（每套最多几张），
+ * 取最先加载成功的一张。此前是挂载时全量探测 24 套服饰候选 + 23 组
+ * 生活照（最多 ~142 个请求，多数 404），且要等全部探测结束弹窗才可用。
  */
-const availablePhotos = ref(new Set())
-function probePhotos() {
-  /*
-   * 探两类照片：服饰照片 + 生活照。
-   * 存路径而不是 slug —— 一套装扮可能有多张，生活照也是每组多张。
-   */
-  const paths = [
-    ...OUTFITS.flatMap((o) => photoPathsOf('outfit', o.slug)),
-    ...PHOTO_SLUGS.flatMap((g) => photoPathsOf('photo', g)),
-  ]
-  const found = new Set()
-  let pending = paths.length
-  if (!pending) return
-  for (const rel of paths) {
-    const img = new Image()
-    const done = () => {
-      if (--pending === 0) availablePhotos.value = found
-    }
-    img.onload = () => {
-      found.add(rel)
-      done()
-    }
-    img.onerror = done
-    img.src = rel
-  }
-}
-onMounted(probePhotos)
+const unlockImgSrc = ref('')
 
-/** 解锁弹窗该显示哪张图：有照片用第 1 张，没有退立绘 */
-const unlockImgSrc = computed(() => {
-  const u = unlock.value
-  if (!u) return ''
-  /* 按类目分派路径 —— 生活照没有立绘可退，取不到就留空 */
-  const first = photoPathsOf(u.kind, u.slug).find((rel) => availablePhotos.value.has(rel))
-  if (first) return first
-  return u.kind === 'photo' ? '' : `yuki-outfit-${u.slug}.png`
+function probeImage(rel) {
+  return new Promise((resolve) => {
+    const img = new Image()
+    img.onload = () => resolve(true)
+    img.onerror = () => resolve(false)
+    img.src = rel
+  })
+}
+
+watch(unlock, async (u) => {
+  unlockImgSrc.value = ''
+  if (!u) return
+  for (const rel of photoPathsOf(u.kind, u.slug)) {
+    if (await probeImage(rel)) {
+      unlockImgSrc.value = rel
+      return
+    }
+  }
+  /* 生活照没有立绘可退，取不到就留空 */
+  unlockImgSrc.value = u.kind === 'photo' ? '' : `yuki-outfit-${u.slug}.png`
 })
 function closeUnlock() {
   consumeUnlock()
@@ -297,16 +275,11 @@ function removeImage(i) {
  * 立绘已经移到独立的 `ChatPetApp` 窗口，这里只显示当前穿着名 +
  * 提供一个直达开关。这样做是因为对话框宽只有 420，
  * 立绘浮在消息流右侧会压到文字。
+ *
+ * 换装状态收敛在 useOutfitState（与桌宠/立绘窗/右键菜单同一套，
+ * 守卫规则单源）—— 此前这里复制的版本漏了「未解锁回落」守卫。
  */
-const clockTick = ref(Date.now())
-let clockTimer = null
-
-const currentOutfitSlug = computed(() => {
-  if (state.settings.outfitMode !== 'fixed') return outfitForTime(new Date(clockTick.value))
-  const s = state.settings.outfitSlug
-  return OUTFIT_SLUGS.includes(s) ? s : DEFAULT_OUTFIT
-})
-const currentOutfitLabel = computed(() => outfitInfo(currentOutfitSlug.value).label)
+const { currentOutfitLabel, outfits, chooseOutfit: pickOutfit } = useOutfitState()
 
 /*
  * 换装面板：和独立立绘窗里点立绘打开的是同一份设置，改哪边都同步。
@@ -317,28 +290,9 @@ const currentOutfitLabel = computed(() => outfitInfo(currentOutfitSlug.value).la
  */
 const outfitPickerOpen = ref(false)
 
-/** 可换的服饰清单（和设置页、右键菜单同一份数据） */
-/*
- * 换装清单**只列已解锁的**。
- *
- * 之前直接列 OUTFITS（全部 26 套）—— 和 PC 桌宠右键菜单同一个问题：
- * 等于绕过图鉴，随手就能穿上没解锁的衣服。
- */
-const outfits = computed(() => {
-  const unlocked = new Set(state.gallery?.outfit?.unlocked ?? [])
-  return OUTFITS.filter((o) => unlocked.has(o.slug))
-})
-
 async function chooseOutfit(slug) {
   outfitPickerOpen.value = false
-  if (slug === null) {
-    await saveSettings({ outfitMode: 'auto' })
-    return
-  }
-  /* 再挡一道：菜单没列出来的也不能选（settings 的写入口不止这一处） */
-  const unlocked = new Set(state.gallery?.outfit?.unlocked ?? [])
-  if (!unlocked.has(slug)) return
-  await saveSettings({ outfitMode: 'fixed', outfitSlug: slug })
+  await pickOutfit(slug)
 }
 
 const outfitFlash = ref('')
@@ -397,11 +351,8 @@ async function onSend() {
   imageError.value = ''
   await scrollToBottom()
   const res = await sendChat(text, images)
-  await scrollToBottom()
-  if (res && res.ok === false && res.reason && !res.aborted) {
-    /* 错误已作为一条 assistant 消息落库，滚动到底即可 */
-    await scrollToBottom()
-  }
+  /* 落库消息（含作为 assistant 消息落库的错误）由 messages watch 滚到底 */
+  return res
 }
 
 function onKeydown(e) {
@@ -486,20 +437,16 @@ onMounted(async () => {
   await initSession()
   await scrollToBottom()
   textarea.value?.focus()
-  /*
-   * 每分钟对一次时间，让「自动换装」能跨过时段边界。
-   * 一分钟一次足够：换装粒度是「深夜/早晚/白天」，不需要秒级精度。
-   */
-  clockTimer = window.setInterval(() => (clockTick.value = Date.now()), 60_000)
 })
 
 onBeforeUnmount(() => {
   stopBridge?.()
-  if (clockTimer) window.clearInterval(clockTimer)
 })
 
 watch(liveText, scrollToBottom)
-watch(messages, scrollToBottom, { deep: true })
+/* 深监听整条消息数组的代价随会话长度线性涨（含 base64 图块）；
+   流式文本已由 liveText watch 覆盖，这里只跟条数变化 */
+watch(() => messages.value.length, scrollToBottom)
 </script>
 
 <template>

@@ -193,7 +193,9 @@ function createMockBackend() {
 }
 
 const backend = typeof window !== 'undefined' && window.desk ? window.desk : createMockBackend()
-store.backend = backend === window?.desk ? 'electron' : 'mock'
+/* 后端标记用 native 而不是 electron：桌面壳有两个（Electron 与 Tauri），
+   渲染层对它们一视同仁，只有浏览器 mock 是另一回事 */
+store.backend = backend === window?.desk ? 'native' : 'mock'
 
 async function call(label, fn, fallback) {
   try {
