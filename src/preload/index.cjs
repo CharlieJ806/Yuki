@@ -21,6 +21,8 @@ contextBridge.exposeInMainWorld('desk', {
 
   /* 设置 */
   updateSettings: (patch, sessionId) => invoke('settings:update', patch, sessionId),
+  /* 全量设置（含 chatApiKey 原文）：state 快照已脱敏，仅设置页按需拉取 */
+  getFullSettings: () => invoke('settings:getFull'),
   /* 当前活跃会话：对话窗设置，桌宠跟随 */
   getActiveSession: () => invoke('session:getActive'),
   setActiveSession: (sessionId) => invoke('session:setActive', sessionId),
@@ -94,6 +96,8 @@ contextBridge.exposeInMainWorld('desk', {
   /* 开机自启 */
   autostartGet: () => invoke('autostart:get'),
   autostartSet: (on) => invoke('autostart:set', on),
+  /* 备份数据：打开数据所在目录 */
+  openDataDir: () => invoke('system:openDataDir'),
   /* 桌宠窗本地行为指令（气泡开关/退出挥手）：经 service 广播回桌宠窗 */
   petUiCommand: (action) => invoke('ui:pet', action),
   /* 窗口贴合：渲染层量内容尺寸，主进程右下角锚定重设窗口 */

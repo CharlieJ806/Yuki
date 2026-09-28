@@ -5,6 +5,7 @@ import {
   state,
   saveSettings,
   resetSettings,
+  getFullSettings,
   logMoyu,
   win,
   openChatWindow,
@@ -267,11 +268,29 @@ async function runDiagnose() {
     diagnosing.value = false
   }
 }
-const dirty = computed(() => JSON.stringify(form) !== JSON.stringify(state.settings))
+/*
+ * dirty 判定：除 chatApiKey 外逐键与 state.settings 比（不依赖键序，也
+ * 不会因后端多返回字段产生「假 dirty」）；chatApiKey 与已保存值比。
+ */
+const dirty = computed(() => {
+  for (const k of Object.keys(DEFAULT_SETTINGS)) {
+    if (k === 'chatApiKey') continue
+    if (JSON.stringify(form[k]) !== JSON.stringify(state.settings[k])) return true
+  }
+  return String(form.chatApiKey ?? '') !== savedApiKey
+})
 
-/* 进入设置页就把人设列表拉全，下拉框与实际保持一致 */
+/* 进入设置页就把人设列表拉全；同时拉全量设置 —— state 快照不含 API Key
+   原文（广播面脱敏），表单需要真实值 */
 onMounted(() => {
   loadPersonas().catch(() => {})
+  getFullSettings()
+    .then((full) => {
+      if (!full) return
+      Object.assign(form, full)
+      savedApiKey = String(full.chatApiKey ?? '')
+    })
+    .catch(() => {})
 })
 
 watch(
@@ -285,6 +304,7 @@ async function save() {
   try {
     const ok = await saveSettings({ ...form })
     if (ok) {
+      savedApiKey = String(form.chatApiKey ?? '')
       savedAt.value = new Date()
       window.setTimeout(() => (savedAt.value = null), 2200)
     }
@@ -295,17 +315,27 @@ async function save() {
 
 async function revert() {
   Object.assign(form, state.settings)
+  form.chatApiKey = savedApiKey
 }
 
 async function reset() {
   const ok = await resetSettings()
-  if (ok) Object.assign(form, state.settings)
+  if (ok) {
+    Object.assign(form, state.settings)
+    savedApiKey = ''
+    form.chatApiKey = ''
+  }
 }
 
 /* 摸鱼时长快捷记账 */
 const quickMinutes = ref(15)
 async function addMoyu() {
   await logMoyu(quickMinutes.value)
+}
+
+/* 备份数据：打开数据所在目录（浏览器预览无此能力，静默失败） */
+async function onOpenDataDir() {
+  await win.openDataDir()
 }
 
 const previewText = computed(() => {
@@ -772,6 +802,11 @@ const syncStatus = computed(() => ({
           <label>恢复默认</label>
           <button class="btn" @click="reset">重置全部设置</button>
           <span class="hint">不会删除打卡记录</span>
+        </div>
+        <div class="field">
+          <label>备份数据</label>
+          <button class="btn" @click="onOpenDataDir">打开数据目录</button>
+          <span class="hint">数据库与设置都在这个目录，拷走即备份</span>
         </div>
       </div>
     </section>

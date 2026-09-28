@@ -48,6 +48,8 @@ export function createIpcHandlers(service, hooks = {}) {
 
     /* 设置 */
     'settings:update': (patch, sessionId) => service.updateSettings(patch, sessionId),
+    /* 全量设置（含 chatApiKey 原文）：state 快照已剥掉 Key，设置页单独按需取 */
+    'settings:getFull': () => service.getSettings(),
     'settings:reset': async () => {
       const next = await service.resetSettings()
       /* service 已广播 state；petScale 归位等窗口动作由壳层接手 */

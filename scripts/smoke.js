@@ -329,6 +329,9 @@ try {
   check('缺 Key 提示准确', (await await service.chatStatus()).reason.includes('API Key'), true)
   await service.updateSettings({ chatBaseUrl: 'https://api.deepseek.com', chatApiKey: 'sk-test' })
   check('配置完整可用', (await await service.chatStatus()).ready, true)
+  /* state 快照广播到全部窗口，必须脱敏；全量读取仅供设置页按需调用 */
+  check('state 快照不携带 API Key 原文', (await await service.getState()).settings.chatApiKey, undefined)
+  check('getSettings 全量仍含原文', (await service.getSettings()).chatApiKey, 'sk-test')
   await service.updateSettings({ chatBaseUrl: 'http://127.0.0.1:11434/v1', chatApiKey: '' })
   check('本地地址免 Key', (await await service.chatStatus()).ready, true)
   check('本地不需 Key 标记', (await await service.chatStatus()).needsApiKey, false)

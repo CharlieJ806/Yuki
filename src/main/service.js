@@ -99,23 +99,27 @@ export function createService(store, deps = {}) {
   }
 
   async function refreshHolidays(year, { force = false } = {}) {
-    const cached = await store.getMeta(`holiday-${year}`, null)
+    /* year 可能来自渲染层（holiday:refresh），收敛成合法年份再进 meta 键与 URL，
+       防畸形值拼出意外的请求路径 */
+    const n = Number(year)
+    const y = Number.isInteger(n) && n >= 2000 && n <= 2100 ? n : new Date().getFullYear()
+    const cached = await store.getMeta(`holiday-${y}`, null)
     if (!force && isCacheFresh(cached)) {
-      holidayMemory.set(year, cached.table)
+      holidayMemory.set(y, cached.table)
       return { ok: true, cached: true, count: Object.keys(cached.table ?? {}).length }
     }
     try {
-      const table = await fetchHolidayYear(year)
-      await store.setMeta(`holiday-${year}`, { fetchedAt: Date.now(), table })
-      holidayMemory.set(year, table)
+      const table = await fetchHolidayYear(y)
+      await store.setMeta(`holiday-${y}`, { fetchedAt: Date.now(), table })
+      holidayMemory.set(y, table)
       return { ok: true, cached: false, count: Object.keys(table).length }
     } catch (err) {
       /* 有旧缓存就继续用，没有也不阻塞 */
       if (cached?.table) {
-        holidayMemory.set(year, cached.table)
+        holidayMemory.set(y, cached.table)
         return { ok: false, cached: true, stale: true, reason: err?.message ?? String(err) }
       }
-      holidayMemory.set(year, null)
+      holidayMemory.set(y, null)
       return { ok: false, cached: false, reason: err?.message ?? String(err) }
     }
   }
@@ -708,6 +712,18 @@ export function createService(store, deps = {}) {
    * 表现成「对话窗换装点了，立绘窗没反应」。
    * 这是那个 bug 的最后一环。
    */
+  /**
+   * 广播/下发用设置快照：剥掉 API Key 原文。
+   *
+   * state 快照会广播到全部窗口（含渲染模型返回内容的对话窗），带原文等于
+   * 每个窗的内存里常驻一份 Key —— 与 chatStatus「不下发 apiKey 原文」的
+   * 脱敏口径一致。设置页经 settings:getFull 按需拉全量。
+   */
+  function publicSettings(settings) {
+    const { chatApiKey, ...rest } = settings ?? {}
+    return rest
+  }
+
   async function getState(now = new Date(), sessionId) {
     const sid = sessionId === undefined ? await currentSessionId() : sessionId
     const settings = await settingsForSession(sid)
@@ -725,7 +741,7 @@ export function createService(store, deps = {}) {
      */
     for (let y = 1; y <= 10; y++) await holidayTableFor(now.getFullYear() - y)
     return {
-      settings,
+      settings: publicSettings(settings),
       snapshot,
       days,
       /*
@@ -1056,7 +1072,7 @@ export function createService(store, deps = {}) {
       if (!check.ok) return { ok: false, steps }
 
       const key = String(settings.chatApiKey || '').trim()
-      push('API Key', key.length > 0 || !check.cfg.apiKey, key ? `已填，长度 ${key.length}，前缀 ${key.slice(0, 5)}…` : '为空（本地地址可接受）')
+      push('API Key', key.length > 0 || !check.cfg.apiKey, key ? `已填，长度 ${key.length}` : '为空（本地地址可接受）')
 
       /* 1) 非流式：等价于「测试连接」 */
       const ping = await pingChat({ settings, customPersonas: await customPersonas() })
