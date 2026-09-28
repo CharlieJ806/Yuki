@@ -303,7 +303,10 @@ pub async fn pet_menu_resize(app: tauri::AppHandle, height: f64) -> Result<(), S
         return Err("菜单窗不存在".into());
     };
     let h = height.max(120.0);
-    let _ = win.set_size(LogicalSize::new(PETMENU_SIZE.0, h));
+    if let Err(e) = win.set_size(LogicalSize::new(PETMENU_SIZE.0, h)) {
+        /* 渲染层量的高度合法时不应失败；吞掉会让「菜单显示不全」无迹可循 */
+        eprintln!("[desk-pet] 菜单窗高度调整失败: {e}");
+    }
     Ok(())
 }
 
@@ -407,7 +410,9 @@ fn show_or_create_pet(app: &AppHandle) {
             set_shown(&w, true);
         }
         None => {
-            let _ = create_pet(app);
+            if let Err(e) = create_pet(app) {
+                eprintln!("[desk-pet] 重建桌宠窗失败: {e}");
+            }
         }
     }
 }
@@ -475,7 +480,9 @@ pub fn toggle_panel(app: &AppHandle) {
         tray::rebuild(app);
         return;
     }
-    let _ = create_panel(app);
+    if let Err(e) = create_panel(app) {
+        eprintln!("[desk-pet] 建面板窗失败: {e}");
+    }
 }
 
 /* ---------- 对话窗 + 侧边立绘窗 ---------- */
@@ -600,7 +607,7 @@ pub fn create_chat(app: &AppHandle) -> tauri::Result<WebviewWindow> {
 pub fn open_chat_window(app: &AppHandle) {
     /* 建窗失败此前被静默吞掉：托盘/命令两条路径共享这里，失败时两端都无感 */
     if let Err(e) = create_chat(app) {
-        log::warn!("[chat] 打开对话窗失败：{e}");
+        eprintln!("[chat] 打开对话窗失败：{e}");
     }
 }
 
@@ -636,7 +643,9 @@ pub fn toggle_chat_pet(app: &AppHandle) -> bool {
 
 pub fn toggle_pet(app: &AppHandle) -> bool {
     if !pet_alive(app) {
-        let _ = create_pet(app);
+        if let Err(e) = create_pet(app) {
+            eprintln!("[desk-pet] 重建桌宠窗失败: {e}");
+        }
         tray::rebuild(app);
         return pet_visible(app);
     }
@@ -667,7 +676,9 @@ pub fn restore_any_window(app: &AppHandle) -> bool {
 /// 把桌宠和面板都叫出来 —— 兜底入口。
 pub fn show_everything(app: &AppHandle) {
     show_or_create_pet(app);
-    let _ = create_panel(app);
+    if let Err(e) = create_panel(app) {
+        eprintln!("[desk-pet] 建面板窗失败: {e}");
+    }
     tray::rebuild(app);
 }
 
@@ -715,7 +726,9 @@ pub async fn window_show_everything(app: AppHandle) -> bool {
 /// `window:openPanel`
 #[tauri::command]
 pub async fn window_open_panel(app: AppHandle) -> bool {
-    let _ = create_panel(&app);
+    if let Err(e) = create_panel(&app) {
+        eprintln!("[desk-pet] 建面板窗失败: {e}");
+    }
     true
 }
 

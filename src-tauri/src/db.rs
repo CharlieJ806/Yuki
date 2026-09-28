@@ -122,8 +122,16 @@ impl Db {
 }
 
 /// `db:exec` —— 写语句（INSERT/UPDATE/DELETE/DDL/PRAGMA）。
+/// 仅 pet 窗可调（业务宿主所在窗）：Tauri 的 ACL 管不到 app 自定义命令，
+/// 不收权的话任意 webview 都能发任意 SQL（见 lib.rs ensure_pet_window）。
 #[tauri::command]
-pub async fn db_exec(db: tauri::State<'_, Db>, sql: String, params: Option<Vec<Json>>) -> Result<(), String> {
+pub async fn db_exec(
+    window: tauri::WebviewWindow,
+    db: tauri::State<'_, Db>,
+    sql: String,
+    params: Option<Vec<Json>>,
+) -> Result<(), String> {
+    crate::ensure_pet_window(&window)?;
     let db = db.inner().clone();
     let p = params_to_sql(params)?;
     tauri::async_runtime::spawn_blocking(move || db.exec_raw(&sql, p))
@@ -131,9 +139,15 @@ pub async fn db_exec(db: tauri::State<'_, Db>, sql: String, params: Option<Vec<J
         .map_err(|e| format!("执行任务失败: {e}"))?
 }
 
-/// `db:select` —— 查询，行以对象数组返回。
+/// `db:select` —— 查询，行以对象数组返回。仅 pet 窗可调（同 db_exec）。
 #[tauri::command]
-pub async fn db_select(db: tauri::State<'_, Db>, sql: String, params: Option<Vec<Json>>) -> Result<Vec<Json>, String> {
+pub async fn db_select(
+    window: tauri::WebviewWindow,
+    db: tauri::State<'_, Db>,
+    sql: String,
+    params: Option<Vec<Json>>,
+) -> Result<Vec<Json>, String> {
+    crate::ensure_pet_window(&window)?;
     let db = db.inner().clone();
     let p = params_to_sql(params)?;
     tauri::async_runtime::spawn_blocking(move || db.select_raw(&sql, p))
