@@ -50,14 +50,19 @@ export async function loadSettings() {
 
 export async function saveSettings(patch) {
   const allowed = Object.keys(DEFAULT_SETTINGS)
+  /*
+   * 空串的语义要按键区分：
+   * - 默认值非空的键（chatPersona 等）：'' 只可能来自「还没填完的控件」，
+   *   写进去会把默认值顶掉（chatPersona 就踩过这个坑）→ 跳过；
+   * - 默认值就是空串的键（chatApiKey / chatRouteSort）：'' 是合法值。
+   *   一律跳过会让「用户清空 API Key」永远写不进库 —— 旧 Key 静默保留、
+   *   状态仍显示已就绪、导出备份还带着它 → 必须允许写。
+   */
+  const emptyOk = new Set(allowed.filter((k) => DEFAULT_SETTINGS[k] === ''))
   for (const [k, v] of Object.entries(patch ?? {})) {
     /* 和桌面端一致：只接受已知键，避免脏数据写进库 */
     if (!allowed.includes(k)) continue
-    /*
-     * 空串一律不写库 —— 界面上「还没填完的控件」传下来就是 ''，
-     * 存进去会把默认值顶掉（chatPersona 就踩过这个坑）。
-     */
-    if (v === '') continue
+    if (v === '' && !emptyOk.has(k)) continue
     await db.setSetting(k, v)
   }
   return loadSettings()

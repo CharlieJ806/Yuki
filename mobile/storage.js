@@ -142,14 +142,17 @@ export async function deleteSession(id) {
   if (!session) return false
 
   const db = await openDb()
-  /* 先查要删哪些消息（只读事务），再开写事务删 —— 全程不在事务里 await */
-  const keys = await req(
-    db.transaction('messages').objectStore('messages').index('bySession').getAllKeys(id),
-  )
+  /* 先读要软删的消息（只读事务），再开写事务统一写 —— 全程不在事务里 await */
+  const msgs = await req(db.transaction('messages').objectStore('messages').index('bySession').getAll(id))
+  const ts = Date.now()
 
   await tx(['sessions', 'messages'], 'readwrite', (t) => {
-    t.objectStore('sessions').put({ ...session, deletedAt: Date.now() })
-    for (const k of keys) t.objectStore('messages').delete(k)
+    t.objectStore('sessions').put({ ...session, deletedAt: ts, messageCount: 0 })
+    /* 与桌面端同语义：软删而不是物理删。硬删产不出墓碑，将来两端同步时
+       「桌面删了、手机又把旧消息推回去」正是要防的复活路径 */
+    for (const m of msgs) {
+      if (!m.deletedAt) t.objectStore('messages').put({ ...m, deletedAt: ts })
+    }
   })
   return true
 }
@@ -191,7 +194,15 @@ export async function addMessage(sessionId, role, content, { model = null, error
 
   await tx(['messages', 'sessions'], 'readwrite', (t) => {
     t.objectStore('messages').put(msg)
-    if (session) t.objectStore('sessions').put({ ...session, updatedAt: createdAt })
+    /* messageCount 是冗余计数：会话列表每轮刷新都调 countMessages，
+       没有它就得全量扫消息表（含图片消息，几十 MB 级） */
+    if (session) {
+      t.objectStore('sessions').put({
+        ...session,
+        updatedAt: createdAt,
+        messageCount: (Number(session.messageCount) || 0) + 1,
+      })
+    }
   })
   return msg
 }
@@ -203,10 +214,18 @@ export async function recentMessages(sessionId, limit = 100) {
 }
 
 export async function countMessages(sessionId) {
+  /* 优先读冗余计数；老数据没有这个字段，退回全量扫并回填一次 */
+  const s = await getSession(sessionId)
+  if (typeof s?.messageCount === 'number') return s.messageCount
   const db = await openDb()
   const idx = db.transaction('messages').objectStore('messages').index('bySession')
   const rows = await req(idx.getAll(sessionId))
-  return rows.filter((m) => !m.deletedAt).length
+  const live = rows.filter((m) => !m.deletedAt).length
+  if (s) {
+    const dbw = await openDb()
+    await req(dbw.transaction('sessions', 'readwrite').objectStore('sessions').put({ ...s, messageCount: live }))
+  }
+  return live
 }
 
 /* ---------- 亲密度 ---------- */
