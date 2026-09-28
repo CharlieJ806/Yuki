@@ -1,6 +1,7 @@
 # AUTOSTART_PLAN — 开机自启（双壳）实施方案
 
-> 状态：待实施。按步骤顺序执行，每步带验证；全部完成后单提交。
+> 状态：已实施（f1a333c：双壳自启落地，Tauri 走 tauri-plugin-autostart，
+> Electron 走 app.setLoginItemSettings，UI 在设置页，启动对账在 index.js / service-host.js）。
 > 决策已定：官方插件 `tauri-plugin-autostart = "2"`（与本仓 tauri =2.11.6 匹配）；
 > Electron 用 `app.setLoginItemSettings` 对照实现；UI 共享，双壳同构。
 

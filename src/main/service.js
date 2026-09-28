@@ -176,6 +176,10 @@ export function createService(store, deps = {}) {
    * 键名形如 `affinity:<sessionId>`；老的全局键（`affinity`）在首次读取时
    * 迁移给最早的那个会话，之后的会话从零开始。
    *
+   * **与手机端的命名空间差异**：手机端亲密度仍是全局键 `affinity`（无会话
+   * 概念），与这里的 `affinity:<sid>` 语义已分叉——两端备份互通时需要一层
+   * 映射；图鉴/解锁键则是两端真的一致，无需映射。
+   *
    * 之所以不做成「一张表 + sessionId 列」：这些值都是小 JSON，
    * meta 表本来就是键值对，加前缀比新建一张表省事，也不会和同步字段打架。
    */
