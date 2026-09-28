@@ -220,23 +220,27 @@ export function openStoreBridge() {
     return value
   }
 
-  /** 待同步变更集 —— 云端同步实现时直接消费 */
+  /** 待同步变更集 —— 云端同步实现时直接消费（personas 也在写 syncState，清单必须同步收） */
   async function pendingChanges() {
     return {
       settings: await select("SELECT * FROM settings WHERE syncState != 'synced'"),
       checkins: await select("SELECT * FROM checkins WHERE syncState != 'synced'"),
       worklogs: await select("SELECT * FROM worklogs WHERE syncState != 'synced'"),
+      personas: await select("SELECT * FROM personas WHERE syncState != 'synced'"),
       chatSessions: await select("SELECT * FROM chat_sessions WHERE syncState != 'synced'"),
       chatMessages: await select("SELECT * FROM chat_messages WHERE syncState != 'synced'"),
     }
   }
 
+  /* 表名白名单与 node:sqlite 版一致：sync:mark 通道对渲染层开放，键名直拼 SQL 必须收口 */
+  const SYNC_TABLES = new Set(['settings', 'checkins', 'worklogs', 'personas', 'chat_sessions', 'chat_messages'])
+
   async function markSynced(idsByTable) {
-    const ts = now()
     for (const [table, ids] of Object.entries(idsByTable ?? {})) {
+      if (!SYNC_TABLES.has(table)) throw new Error(`markSynced: 未知表 ${table}`)
       if (!Array.isArray(ids) || ids.length === 0) continue
-      const sql = `UPDATE ${table} SET syncState = 'synced', updatedAt = ? WHERE id = ?`
-      for (const id of ids) await exec(sql, [ts, id])
+      const sql = `UPDATE ${table} SET syncState = 'synced' WHERE id = ?`
+      for (const id of ids) await exec(sql, [id])
     }
     return true
   }

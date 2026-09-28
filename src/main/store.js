@@ -211,23 +211,28 @@ export function openStore(filePath) {
     return value
   }
 
-  /** 待同步变更集 —— 云端同步实现时直接消费 */
+  /** 待同步变更集 —— 云端同步实现时直接消费（personas 也在写 syncState，清单必须同步收） */
   function pendingChanges() {
     return {
       settings: db.prepare("SELECT * FROM settings WHERE syncState != 'synced'").all(),
       checkins: db.prepare("SELECT * FROM checkins WHERE syncState != 'synced'").all(),
       worklogs: db.prepare("SELECT * FROM worklogs WHERE syncState != 'synced'").all(),
+      personas: db.prepare("SELECT * FROM personas WHERE syncState != 'synced'").all(),
       chatSessions: db.prepare("SELECT * FROM chat_sessions WHERE syncState != 'synced'").all(),
       chatMessages: db.prepare("SELECT * FROM chat_messages WHERE syncState != 'synced'").all(),
     }
   }
 
+  /* markSynced 的表名来自调用方对象键，而该通道对渲染层开放（sync:mark）。
+     键名会被拼进 SQL，必须白名单收口，否则任意 UPDATE 可直达数据层 */
+  const SYNC_TABLES = new Set(['settings', 'checkins', 'worklogs', 'personas', 'chat_sessions', 'chat_messages'])
+
   function markSynced(idsByTable) {
-    const ts = now()
     for (const [table, ids] of Object.entries(idsByTable ?? {})) {
+      if (!SYNC_TABLES.has(table)) throw new Error(`markSynced: 未知表 ${table}`)
       if (!Array.isArray(ids) || ids.length === 0) continue
-      const stmt = db.prepare(`UPDATE ${table} SET syncState = 'synced', updatedAt = ? WHERE id = ?`)
-      for (const id of ids) stmt.run(ts, id)
+      const stmt = db.prepare(`UPDATE ${table} SET syncState = 'synced' WHERE id = ?`)
+      for (const id of ids) stmt.run(id)
     }
     return true
   }

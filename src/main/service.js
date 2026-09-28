@@ -744,7 +744,6 @@ export function createService(store, deps = {}) {
       todayEarnedText: formatMoney(snapshot.todayEarned, settings.salaryCurrency),
       dailySalaryText: formatMoney(snapshot.dailySalary, settings.salaryCurrency),
       salaryText: formatMoney(settings.salary, settings.salaryCurrency),
-      pendingSync: await store.pendingChanges(),
       loggedMinutesToday: await store.worklogTotal(snapshot.dateKey),
       /* 节假日状态：界面用来显示「春节」「补班」标签 */
       holiday: {

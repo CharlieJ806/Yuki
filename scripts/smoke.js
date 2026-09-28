@@ -217,8 +217,19 @@ try {
   /* ---------- 8. 同步记账 ---------- */
   const pending = await service.pendingChanges()
   check('存在待同步记录', pending.checkins.length > 0 && pending.settings.length > 0, true)
+  check('待同步集含 personas', Array.isArray(pending.personas), true)
+  const pendingCheckinBefore = pending.checkins[0]
   await service.markSynced({ checkins: pending.checkins.map((c) => c.id) })
   check('标记后打卡无待同步', (await await service.pendingChanges()).checkins.length, 0)
+  const markedRow = (await service.listCheckins()).find((c) => c.id === pendingCheckinBefore.id)
+  check('标记同步不改写 updatedAt', markedRow.updatedAt, pendingCheckinBefore.updatedAt)
+  let threwOnUnknownTable = false
+  try {
+    await service.markSynced({ 'settings; DELETE FROM checkins --': ['x'] })
+  } catch {
+    threwOnUnknownTable = true
+  }
+  check('markSynced 表名白名单', threwOnUnknownTable, true)
 
   /* ---------- 10. 未知设置键被忽略 ---------- */
   await service.updateSettings({ hackerKey: 'boom' })
