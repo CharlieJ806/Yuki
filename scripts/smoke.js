@@ -394,6 +394,43 @@ try {
   check('空缓存不新鲜', isCacheFresh(null), false)
   check('结构异常不新鲜', isCacheFresh({ table: {} }), false)
 
+  /* ---------- 15. 偷偷摸摸模式（伪装在数据出口统一生效） ---------- */
+  {
+    const { formatStudyProgress, surfaceText, STUDY_DAILY_WORDS } = await import('../src/shared/disguise.js')
+
+    /* 纯函数换算 */
+    check('学习换算：零收入零词', formatStudyProgress(0, 1000), '0 词')
+    check('学习换算：线性对齐进度', formatStudyProgress(518.5, 1037), '500 词')
+    check('学习换算：日薪为零保守封顶', formatStudyProgress(500, 0), '500 词')
+    check('学习换算：超额封顶', formatStudyProgress(99999, 0), `${STUDY_DAILY_WORDS} 词`)
+
+    /* 词汇表本身不得含敏感字样（含语录与托盘函数产物） */
+    const study = surfaceText(true)
+    const studyVisible = [
+      study.earnedTitle, study.working, study.done, study.doneShort, study.restDay,
+      study.beforeWork, study.disabled, study.earnedLabel, study.workedLabel,
+      study.totalLabel, study.incomeDetail, study.brand, study.tagline,
+      ...study.heroQuotes,
+      study.trayEarned('432 词'),
+      study.trayTotal(3, '摸鱼学徒'),
+    ].join('\n')
+    check('伪装词汇表无摸鱼/已赚/货币符号', /摸鱼|已赚|[¥$]/.test(studyVisible), false)
+    check('伪装托盘等级名学习化', study.trayTotal(3, '摸鱼学徒').includes('学习学徒'), true)
+
+    /* state 出口：三个文本字段全部转换 */
+    await service.updateSettings({ studyDisguise: true })
+    const disguised = await await service.getState(afternoon)
+    check('伪装下收入文案为学习词数形态', /^\d+ 词$/.test(disguised.todayEarnedText), true)
+    check('伪装换算与进度线性对齐', disguised.todayEarnedText, `${Math.round(disguised.snapshot.progress * STUDY_DAILY_WORDS)} 词`)
+    check('伪装下日薪转为今日目标', disguised.dailySalaryText, `${STUDY_DAILY_WORDS} 词`)
+    check('伪装下月薪打码', disguised.salaryText, '***')
+
+    await service.updateSettings({ studyDisguise: false })
+    const normal = await await service.getState(afternoon)
+    check('关闭伪装恢复金额显示', /^¥/.test(normal.todayEarnedText), true)
+    check('关闭伪装日薪恢复金额', /^¥/.test(normal.dailySalaryText), true)
+  }
+
   /* ---------- 16. 互动逻辑 ---------- */
   {
     /* 台词选择：必须避开上一句，否则连着两次一样会很呆 */

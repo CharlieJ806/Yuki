@@ -38,6 +38,7 @@ import {
   IDLE_JITTER_MAX,
   SEDENTARY_INTERVAL_MS,
 } from '@shared/interactions.js'
+import { surfaceText } from '@shared/disguise.js'
 import { useOutfitState } from '../lib/outfit-state.js'
 
 /*
@@ -67,18 +68,21 @@ let snackTimer = null
 /** 拖拽结束也会触发 click，用它区分「拖」和「点」 */
 let movedByDrag = false
 
+/* 可见文案走伪装词汇表（shared/disguise.js），组件不再就地三元判断 */
+const txt = computed(() => surfaceText(Boolean(state.settings.studyDisguise)))
+
 const statusText = computed(() => {
-  const s = state.settings
-  if (!s.enabled) return '摸鱼进度未开启'
+  if (!state.settings.enabled) return txt.value.disabled
   switch (state.snapshot.statusKind) {
     case 'rest-day':
-      return '今日休息，安心躺平'
+      return txt.value.restDay
     case 'before-work':
-      return '尚未开工'
+      return txt.value.beforeWork
     case 'completed':
-      return '今日已赚满 💰'
+      return txt.value.done
     default:
-      return `摸鱼进行中 · 已赚 ${state.todayEarnedText}`
+      /* 纯状态：金额只在上方 bubble-amount 出现一次，不再复述「已赚 ¥」 */
+      return txt.value.working
   }
 })
 
@@ -686,7 +690,7 @@ onBeforeUnmount(() => {
         <div v-if="bubbleOpen" class="bubble" :class="{ speaking: Boolean(speech) }" @dblclick="refresh">
           <div class="bubble-head">
             <span class="bubble-title">
-              {{ speech ? 'Yuki' : state.settings.studyDisguise ? '今日学习进度' : '今日摸鱼收入' }}
+              {{ speech ? 'Yuki' : txt.earnedTitle }}
             </span>
             <span class="bubble-dot" :class="state.snapshot.statusKind" />
           </div>

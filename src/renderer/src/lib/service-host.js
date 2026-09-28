@@ -13,6 +13,7 @@ import { createService } from '../../../main/service.js'
 import { createIpcHandlers } from '../../../main/ipc-handlers.js'
 import { openStoreBridge } from '@shared/bridge/store-bridge.js'
 import { SELF_PORTRAIT_SLUG } from '@shared/content.js'
+import { surfaceText } from '@shared/disguise.js'
 import { installTauriTransport } from './tauri-transport.js'
 import { installServiceBusHost } from './service-bus.js'
 
@@ -81,9 +82,11 @@ export async function bootServiceHost() {
 
   async function pushTraySnapshot(state) {
     if (!state) return
+    /* 托盘文案走伪装词汇表：与 Electron 壳（index.js rebuildTrayMenu）同源 */
+    const txt = surfaceText(Boolean(state.settings?.studyDisguise))
     await invoke('tray_update_snapshot', {
-      earnedLine: `今日已摸鱼赚到 ${state.todayEarnedText}`,
-      daysLine: `累计摸鱼 ${state.days} 天 · ${state.level?.level?.name ?? ''}`,
+      earnedLine: txt.trayEarned(state.todayEarnedText),
+      daysLine: txt.trayTotal(state.days, state.level?.level?.name ?? ''),
       checkedIn: Boolean(state.checkedInToday),
     })
   }

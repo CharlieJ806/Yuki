@@ -1,6 +1,7 @@
 <script setup>
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import { state, refresh, loadMeta, initBridge, win } from '../stores/app.js'
+import { surfaceText } from '@shared/disguise.js'
 import Sidebar from '../components/Sidebar.vue'
 import HomeView from '../views/HomeView.vue'
 import LabView from '../views/LabView.vue'
@@ -35,8 +36,9 @@ const VIEWS = {
 const currentView = computed(() => VIEWS[route.value] ?? HomeView)
 const currentTitle = computed(() => NAV.find((n) => n.key === route.value)?.name ?? '主页')
 
-const brand = computed(() => (state.settings.studyDisguise ? 'Study Desk' : '摸鱼桌宠'))
-const tagline = computed(() => (state.settings.studyDisguise ? '专注当下，持续精进' : '只要胆子大，一周七天假'))
+/* 品牌/标语走伪装词汇表（shared/disguise.js） */
+const brand = computed(() => surfaceText(Boolean(state.settings.studyDisguise)).brand)
+const tagline = computed(() => surfaceText(Boolean(state.settings.studyDisguise)).tagline)
 
 function toggleCollapse() {
   collapsed.value = !collapsed.value

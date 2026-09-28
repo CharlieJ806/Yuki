@@ -10,6 +10,7 @@ import { openStore } from './store.js'
 import { createService } from './service.js'
 import { createIpcHandlers } from './ipc-handlers.js'
 import { SELF_PORTRAIT_SLUG } from '../shared/content.js'
+import { surfaceText } from '../shared/disguise.js'
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..', '..')
 const DEV_URL = process.env.DESK_DEV_URL || null
@@ -693,9 +694,11 @@ async function rebuildTrayMenu() {
     const petVisible = petAlive && petWindow.isVisible()
     const panelOpen = panelWindow && !panelWindow.isDestroyed() && panelWindow.isVisible()
 
+    /* 托盘文案走伪装词汇表：studyDisguise 开启时托盘也是路人可见表面 */
+    const txt = surfaceText(Boolean(state.settings.studyDisguise))
     const menu = Menu.buildFromTemplate([
-      { label: `今日已摸鱼赚到 ${state.todayEarnedText}`, enabled: false },
-      { label: `累计摸鱼 ${state.days} 天 · ${state.level.level.name}`, enabled: false },
+      { label: txt.trayEarned(state.todayEarnedText), enabled: false },
+      { label: txt.trayTotal(state.days, state.level.level.name), enabled: false },
       { type: 'separator' },
       {
         label: state.checkedInToday ? '今日已打卡' : '打卡',

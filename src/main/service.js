@@ -16,6 +16,7 @@ import { buildPhotoMessages, photoPathsOf } from '../shared/photoMessage.js'
 import { PHOTO_STORIES } from '../shared/photoStories.js'
 import { VIDEO_STORIES } from '../shared/videoStories.js'
 import { fetchHolidayYear, isCacheFresh, HOLIDAY_CACHE_TTL_MS } from './holiday.js'
+import { formatStudyProgress, STUDY_SALARY_MASK, STUDY_DAILY_TARGET } from '../shared/disguise.js'
 import {
   CHAT_PERSONAS,
   CHAT_PROVIDERS,
@@ -761,9 +762,18 @@ export function createService(store, deps = {}) {
       checkedInToday: Boolean(checkin),
       checkin,
       workDaysThisMonth: workDaysInMonth(settings, now.getFullYear(), now.getMonth() + 1, table),
-      todayEarnedText: formatMoney(snapshot.todayEarned, settings.salaryCurrency),
-      dailySalaryText: formatMoney(snapshot.dailySalary, settings.salaryCurrency),
-      salaryText: formatMoney(settings.salary, settings.salaryCurrency),
+      /*
+       * 伪装（studyDisguise）在数据出口统一转换：所有窗口、托盘（两壳）
+       * 都消费这三个字段，一处转换全表面生效，组件不再各自三元判断。
+       * 见 shared/disguise.js 的模块注释。
+       */
+      todayEarnedText: settings.studyDisguise
+        ? formatStudyProgress(snapshot.todayEarned, snapshot.dailySalary)
+        : formatMoney(snapshot.todayEarned, settings.salaryCurrency),
+      dailySalaryText: settings.studyDisguise
+        ? STUDY_DAILY_TARGET
+        : formatMoney(snapshot.dailySalary, settings.salaryCurrency),
+      salaryText: settings.studyDisguise ? STUDY_SALARY_MASK : formatMoney(settings.salary, settings.salaryCurrency),
       loggedMinutesToday: await store.worklogTotal(snapshot.dateKey),
       /* 节假日状态：界面用来显示「春节」「补班」标签 */
       holiday: {

@@ -484,7 +484,7 @@ const syncStatus = computed(() => ({
           <label>偷偷摸摸模式</label>
           <label class="switch">
             <input v-model="form.studyDisguise" type="checkbox" />
-            <span>开启后界面文案切换为学习风格，降低划水观感</span>
+            <span>开启后金额显示为学习进度（如「已背 432 词」）、文案切换为学习风格，降低划水观感</span>
           </label>
         </div>
         <div class="field">
