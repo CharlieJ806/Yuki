@@ -1,8 +1,8 @@
 # AGENTS.md — 摸鱼桌宠 (desk-pet)
 
-上班摸鱼用的桌面挂件：透明置顶桌宠 + 打卡 + 摸鱼收入统计 + AI 对话。Electron 38 + Vue 3 + Vite 6 + `node:sqlite`（零外部存储依赖）。单仓库含两端：桌面版在 `src/`，手机 PWA 在 `mobile/`。桌宠动画走纯 2D 路线（立绘切图；3D 方案已移除，2D 可动关节调研见 README「桌宠动画」章）。
+上班摸鱼用的桌面挂件：透明置顶桌宠 + 打卡 + 摸鱼收入统计 + AI 对话。Electron 38 + Vue 3 + Vite 6 + `node:sqlite`（零外部存储依赖）。单仓库含两端：桌面版在 `src/`，手机 PWA 在 `mobile/`。桌宠动画走纯 2D 路线（立绘切图；3D 方案已移除，2D 可动关节调研见 docs/DESIGN.md「桌宠动画」章）。
 
-**`README.md`（约 1200 行）是本项目的完整决策记录**——每个设计都有踩坑因果。改任何敏感区域前，先读 README 对应章节，不要凭直觉回退已有做法。
+**`docs/DESIGN.md` 是本项目的完整决策记录**（约 1500 行）——每个设计都有踩坑因果。改任何敏感区域前，先读该文档对应章节，不要凭直觉回退已有做法。README 只做项目介绍。
 
 **Tauri 2 迁移已完成（Phase 0-5），寄生式为终态**：Rust 只做系统边界（窗口/托盘/缩放/定位、`db.rs` 通用 SQL 桥、`http_proxy.rs` HTTP 代理），业务逻辑留 JS——同一份 JS 业务层跑 Electron 与 Tauri 两种壳，双路线并行。业务层不做 Rust 化：Phase 7 曾执行后退役（性能账单无可下沉重 + 蓝图闸门未触发），全量实现已归档、未随仓库发布，理由见 `TAURI_MIGRATION.md`「当前进度」。动 `src-tauri/` 或渲染层桥接前先读蓝图「当前进度」（含迁移铁律）。
 
@@ -40,7 +40,7 @@ src/renderer/        单份构建产物，main.js 按 ?route=pet|panel|chat 挂�
 - Vite 别名：`@shared` → `src/shared`，`@` → `src/renderer`。
 - 数据库在 `%APPDATA%\desk-pet\desk-pet.db`；所有业务表带 `updatedAt/deletedAt/syncState` 同步字段，新增表保持该约定。
 
-## 硬规则（README 有完整因果，禁止回退）
+## 硬规则（docs/DESIGN.md 有完整因果，禁止回退）
 
 - **窗口只用 `hide()` 不销毁**；任何改动不能让用户失去找回入口（托盘单击兜底 `restoreAnyWindow()`）。
 - **`petScale` 唯一真相来源是 `settings.petScale`**，渲染层用 computed 派生；三条修改路径统一走 `applyPetScale()` 并广播。
@@ -48,7 +48,7 @@ src/renderer/        单份构建产物，main.js 按 ?route=pet|panel|chat 挂�
 - **桌宠位置持久化以右下角锚点为真值（`petPosition.v=4`：顶角+当时尺寸，恢复按锚点−建窗尺寸，两壳同式）**——顶角直存会把贴合位移当用户拖拽，位置每次重启漂移；禁改回纯顶角存档。建窗尺寸优先用存档尺寸（首启才用 petSize/pet_size 猜测），且放置后须按锚点补偿系统最小窗宽钳制（实测 96 宽被钳到 131，右缘 +35/次重启）。
 - **桌宠拖拽用 `-webkit-app-region: drag`**，禁止「mousemove + setPosition」——事件会断流拖不动；交互元素须显式 `no-drag`。
 - 节假日 API（timor.tech）**必须带 User-Agent**，否则返回 Cloudflare 页。
-- 提示词顺序必须「稳定在前、易变在后」（token 差 50 倍）；改对话/人设/表情先读 README「AI 对话」整章。
+- 提示词顺序必须「稳定在前、易变在后」（token 差 50 倍）；改对话/人设/表情先读 docs/DESIGN.md「AI 对话」整章。
 - `scripts/build.js` 已处理三个 Windows 打包坑（TEMP 网络盘、Defender 锁 exe、旧进程占用 EPERM），动打包前先读它的注释。
 - Electron 必须 ≥ 37（`node:sqlite` 需要 Node 22+）。
 
@@ -66,6 +66,6 @@ src/renderer/        单份构建产物，main.js 按 ?route=pet|panel|chat 挂�
 
 ## 本机环境差异（按开发机实际情况调整）
 
-- 机器间网络环境不同：README 里「出网必须走系统代理」只对部分机器成立；需要代理出网时把请求绑到本机代理端口
+- 机器间网络环境不同：docs/DESIGN.md 里「出网必须走系统代理」只对部分机器成立；需要代理出网时把请求绑到本机代理端口
 - 高分屏（显示缩放 200%，dpr=2）：涉及屏幕坐标的测试脚本必须按物理像素换算
-- 合并他人/上游更新后，先看 README 与接口差异再继续开发
+- 合并他人/上游更新后，先看 docs/DESIGN.md 与接口差异再继续开发

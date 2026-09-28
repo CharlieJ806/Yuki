@@ -222,13 +222,27 @@ async function runPackager(attempt) {
       /^\/\.gitignore$/,
       /^\/node_modules($|\/)/,
       /^\/src-tauri($|\/)/,
-      /^\/\.tmp-yuki($|\/)/,
-      /^\/\.mimosa($|\/)/,
-      /^\/\.zcode($|\/)/,
+      /*
+       * 临时/工作目录一律不进产物。
+       *
+       * 原来逐个列名单（`.tmp-yuki` / `.mimosa` / `.zcode`），
+       * 于是每新增一个临时文件都要记得回来加一条 —— 必然漏。
+       * 实测漏过 `.tmp-open-mobile.cjs` 与 `.tmp-release/`（打包暂存目录，
+       * 里面还嵌着上一轮的 asar），两个都被打进了交付产物。
+       * 改成按前缀兜住：`^/\.` 已排除 .git/.gitignore，
+       * 其余点开头的一律视为本地工作产物。
+       */
+      /^\/\./,
       /^\/mobile($|\/)/,
       /^\/dist-mobile($|\/)/,
       /^\/resources($|\/)/,
       /^\/scripts($|\/)/,
+      /*
+       * 设计文档不进产物 —— 它随仓库分发（给人看），不必塞进 exe。
+       * 早先 README 在仓库根，靠下面那条正则排除；现在推理移到了
+       * `docs/DESIGN.md`，必须一并排除，否则 1.5MB 文档白占体积。
+       */
+      /^\/docs($|\/)/,
       /^\/dist\/assets\/.*\.map$/,
       /^\/(README|AGENTS|TAURI_MIGRATION|FIX_PLAN|README_AUDIT|REVIEW_FINDINGS|AUTOSTART_PLAN|PACKAGING_PLAN)\.md$/,
       /^\/package-lock\.json$/,
