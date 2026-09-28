@@ -9,7 +9,7 @@
  * 归集 = 改名拷贝成英文规范名。重命名是必须的：Tauri 打包器产物名跟随
  * productName（中文「摸鱼桌宠」），分发层统一英文 desk-pet-*。
  */
-import { copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync } from 'node:fs'
+import { copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
@@ -31,6 +31,14 @@ mustExist(join(TAURI_TARGET, 'app.exe'), '先跑 npx tauri build')
 
 const DIST = join(RELEASE, 'tauri')
 mkdirSync(DIST, { recursive: true })
+/* 旧版本产物一并清掉：release.yml 按 release/tauri/* 全量上传，
+   混入旧版会照发（bundle/nsis 不清理，这里必须兜一道） */
+for (const f of readdirSync(DIST)) {
+  if (f.startsWith('desk-pet-') && !f.includes(`-${VERSION}-`) && !f.includes(`-${VERSION}.`)) {
+    rmSync(join(DIST, f), { force: true })
+    console.log(`✓ 清理旧版产物: ${f}`)
+  }
+}
 const portable = join(DIST, `desk-pet-tauri-${VERSION}-x64-portable.exe`)
 const setup = join(DIST, `desk-pet-tauri-setup-${VERSION}.exe`)
 

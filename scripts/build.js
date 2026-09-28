@@ -124,6 +124,18 @@ for (const stale of ['创建桌面快捷方式.vbs', '启动.bat', 'debug.log'])
 }
 
 /*
+ * 清掉旧版本的归集产物（release/electron/）：release.yml 按
+ * release/electron/* 全量上传，旧版 zip/setup 混在里面会被当成
+ * 新版本一起发布。
+ */
+for (const f of readdirSync(DIST_DIR)) {
+  if (f.startsWith('desk-pet-') && !f.includes(`-${VERSION}-`) && !f.includes(`-${VERSION}.`)) {
+    rmSync(join(DIST_DIR, f), { force: true })
+    console.log(`  -> 清理旧版产物: ${f}`)
+  }
+}
+
+/*
  * Electron 打包会在临时目录里 patch 运行时再 rename 一次。
  * 本机 TEMP 指向网络盘（Z:\TEMP），rename 会 EPERM，必须落到本地磁盘。
  */
