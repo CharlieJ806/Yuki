@@ -791,6 +791,14 @@ isRestDay(settings, date, holidayTable)
 
 台词选择会避开上一句（`pickLine`），否则连续两次一样会很呆。
 
+**已知待办（2026-09-28 体检结论，未实施）**：台词内容存在 11 条跨池完全
+重复（tapLines.js 跨档位 3 条、tapLines 与 LINES 跨文件双写 7 条、关键词表
+内字面重复 1 条），全部由 69d8889 引入；且 `pickLine` 只滤紧邻上一句、
+跨来源（悬停/单击/挂机/情境/久坐）不查重，intimate 档整体替换基础池导致
+3 句池重复率高。既定方案：内容单一事实源（台词按条登记、场景=标签）、
+全局「最近说过」环形集合替代 lastLine 单值、smoke 锁展示池文本全局唯一、
+intimate 改合并不替换。文案不动，只重组归属。
+
 亲密度存在 `meta.affinity:<sessionId>`（按会话隔离，每个会话是独立的她）
 而不是 `settings`：它是累计计数器，混进设置会让「重置设置」把互动记录一起清掉。
 
@@ -1418,10 +1426,38 @@ const history = store.messagesSince(latest.id, since, 200)
 - 休息日（双休/单休/大小周/不定休）当天收入恒为 0。
 - 状态机：`尚未开工` → `摸鱼进行中` → `今日已赚满`，休息日走 `今日休息`。
 
+## 偷偷摸摸模式（学习化伪装）
+
+设置开关 `studyDisguise`（SettingsView「偷偷摸摸模式」）。**语义（方案 A，已拍板）**：
+开启后任何界面都不出现真实金额——伪装是给「路过者扫屏幕」用的，不是给自己换算
+便利；要看钱就关开关。
+
+**架构：伪装在数据出口统一生效，组件禁止就地三元判断。** 单一出口是
+`src/shared/disguise.js`（词汇表 `SURFACE_TEXT`/`surfaceText` + 换算
+`formatStudyProgress`），`service.getState` 组装 `todayEarnedText` /
+`dailySalaryText` / `salaryText` 时按开关转换。这样气泡、Sidebar、HomeView、
+托盘（两壳）全部自动覆盖——历史上「标题换皮、金额裸奔」的 6 处穿帮，就是
+组件各自三元判断漏掉的。
+
+- 换算规则：`已背 N 词 = round(今日已赚 ÷ 日薪 × 1000)`，一天从 0 走到
+  1000 词，与进度条天然对齐；日薪非正时保守封顶防除零。
+- 「摸鱼」字样集中在词汇表映射（摸鱼→学习、已赚→已背/目标、等级名
+  `studyLevelName` 按词替换、HomeView 语录换学习风文案）。
+- **新增可见文案先在词汇表登记**，组件按 key 取，禁止新写
+  `studyDisguise ? A : B`；smoke 锁「伪装词汇表与 state 三字段不得含
+  摸鱼/已赚/¥」，改漏了 CI 直接红。
+- 语义边界（有意保留）：设置页/研究院计算器/打卡记录是**操作面**，用户
+  主动打开并输入，保留真实值；托盘 tooltip 与进程名的「摸鱼桌宠」属系统
+  身份，无法伪装也不在此范围。
+- 气泡状态行是**纯状态**（「摸鱼进行中」），不复述金额——金额只在
+  bubble-amount 出现一次，状态行带金额是首版信息设计遗留的冗余。
+- 台词（台词库「再摸要收费了哦」类、LLM 现编）暂不在伪装内：涉及「提示词
+  稳定在前」约束，二期随对话提示词单独做。
+
 ## 数据与同步
 
 ```sql
-checkins(id, dateKey UNIQUE, createdAt, note, updatedAt, deletedAt, syncState)
+checkins(id, dateKey, createdAt, note, updatedAt, deletedAt, syncState)
 worklogs(id, dateKey, minutes, kind, createdAt, updatedAt, deletedAt, syncState)
 settings(key, value, updatedAt, syncState)
 events(id, type, payload, createdAt)
@@ -1430,6 +1466,16 @@ personas(id, label, prompt, sortOrder, createdAt, updatedAt, deletedAt, syncStat
 chat_sessions(id, title, createdAt, updatedAt, deletedAt, syncState)
 chat_messages(id, sessionId, role, content, model, error, createdAt, updatedAt, deletedAt, syncState)
 ```
+
+- schema 版本机制：`db-schema.js` 的 `SCHEMA_VERSION` + 两后端
+  （store.js / store-bridge.js）同式推进 `PRAGMA user_version`，结构性变更
+  走迁移段（幂等、显式事务）；**禁止只改 SCHEMA 不加迁移**——
+  `CREATE TABLE IF NOT EXISTS` 对存量库零作用。
+- `checkins.dateKey` 是 partial unique index（`WHERE deletedAt IS NULL`），
+  不是列级 UNIQUE——列级约束不排软删行，删过的日期会被死行永久锁死。
+- `pendingChanges()` 与 `markSynced()` 的表清单（含 personas）在两后端各
+  一份，新增业务表必须四处同步；`markSynced` 表名走白名单（该通道对渲染层
+  开放，键名直拼 SQL）且不改写 `updatedAt`（增量推拉按它判新旧）。
 
 补卡写入的 `checkins.note` 为「补卡」，和现场打卡区分开。
 
@@ -1448,12 +1494,27 @@ chat_messages(id, sessionId, role, content, model, error, createdAt, updatedAt, 
 
 **Electron 壳**：
 
-- `contextIsolation: true`、`nodeIntegration: false`，渲染进程只能用 preload 白名单暴露的 `window.desk`。
+- `contextIsolation: true`、`nodeIntegration: false`、五窗全部 `sandbox: true`（preload 只用 contextBridge + ipcRenderer，开 sandbox 零成本），渲染进程只能用 preload 白名单暴露的 `window.desk`。
 - 主进程 IPC 全部走 `ipcMain.handle`，按 channel 白名单注册，无动态转发。
+- **导航防护**：`web-contents-created` 统一挂 `setWindowOpenHandler` deny + `will-navigate` 白名单（file:// 与 dev origin）——渲染层一旦被注入，远端页面不能带着 preload 拿到 `window.desk` 全部通道。
+- **API Key 脱敏口径**：`chatApiKey` 原文只在两处可达——settings 表（本机）与 `settings:getFull` 通道（设置页按需拉取）；state 快照、`session:settings` 及一切广播均剥掉 Key。新增返回设置的通道必须保持该口径。
+- 打包即 fuse 加固（RunAsNode / NodeCliInspect / NodeOptions 全关，build.js 内翻转、失败即终止）：`DESK_DEBUG_PORT` 门控只管应用自开的调试口，挡不住外部 `ELECTRON_RUN_AS_NODE=1` 直启。
 
 **Tauri 壳**：业务层跑在 pet 窗 webview 里（`service-host` 直建 service），
 其他窗经 `service-bus`（`bus:req`/`bus:res` 事件对，就绪 ping 门控）转发到 pet 窗；
 系统能力走显式注册的 Rust command（窗口/托盘/rusqlite 桥/HTTP 代理），
 contextIsolation 同样开启、无 Node 注入。
 
+- **app 自定义命令不经 ACL**：Tauri 2 的 capabilities 只管 plugin 命令，
+  `db_exec/db_select/db_batch/http_*/tray_update_snapshot/photo_list` 的
+  「仅 pet 窗」靠命令入口 `ensure_pet_window` 按调用窗 label 校验实现。
+  **新增敏感命令必须同样收权**——不收权等于对全部 webview 开放。
+- CSP 已配置（default-src 'self' 等，img/media 放行 asset 协议）；新增
+  远程资源类型时先过安全审查再动 CSP。
+
 两壳共同点：不联网、不上传，全部本地读写（节假日表与 AI 对话按用户配置出网）。
+
+**版本号四处一处不少**：package.json / src-tauri/tauri.conf.json /
+src-tauri/Cargo.toml / scripts/installer.nsi，由 `scripts/check-version.js`
+（挂 `npm test`）锁一致——历史上手改漏过 Cargo.toml，发版 tag 只读
+package.json，错版产物会照常上 Release。
