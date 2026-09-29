@@ -6,7 +6,7 @@
 import { computed, onMounted, ref } from 'vue'
 import { state, doCheckIn, win, openChatWindow } from '../stores/app.js'
 import { formatDuration, formatMoney, REST_PATTERNS } from '@shared/moyu.js'
-import { AFFINITY_GAIN, CHAT_AFFINITY_DAILY_CAP, affinityLevel } from '@shared/interactions.js'
+import { AFFINITY_GAIN, CHAT_AFFINITY_DAILY_CAP, affinityView } from '@shared/interactions.js'
 
 const props = defineProps({
   nav: { type: Array, required: true },
@@ -81,7 +81,7 @@ const detailRows = computed(() => [
 ])
 
 /** 亲密度：等级进度 + 得分规则文案，展示在等级面板里 */
-const affinity = computed(() => affinityLevel(state.affinity?.points ?? 0))
+const affinity = computed(() => affinityView(state.affinity?.points ?? 0, state.settings?.godMode))
 const affinityGain = computed(() => ({ ...AFFINITY_GAIN, chatDailyCap: CHAT_AFFINITY_DAILY_CAP }))
 
 const checkinLabel = computed(() => {

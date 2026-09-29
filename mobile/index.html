@@ -191,15 +191,15 @@
       所以不跟随桌面端那个默认开的开关。
     -->
     <label class="field">
-      <span>主动搭话</span>
+      <span>主动说话</span>
       <label class="switch-row">
         <input type="checkbox" id="f-proactive" />
         <span>挂机时她会自己开口</span>
       </label>
-      <small>到点她会根据最近的聊天说一句，同时进聊天记录</small>
+      <small><b>只在立绘页冒个泡</b>，说完就没 —— 不进聊天记录、不产生未读</small>
     </label>
     <label class="field" id="field-proactive-min">
-      <span>搭话间隔</span>
+      <span>说话间隔</span>
       <select id="f-proactiveMin">
         <option value="5">5 分钟</option>
         <option value="10">10 分钟</option>
@@ -208,6 +208,26 @@
         <option value="60">1 小时</option>
       </select>
       <small>实际间隔会在这个值上下浮动，避免像定时机器人</small>
+    </label>
+
+    <!--
+      「主动找话题」是**独立**于上面那个的功能：它会落成真消息。
+      两者各有各的间隔，互不影响。
+    -->
+    <label class="field">
+      <span>主动找话题</span>
+      <select id="f-topicMin">
+        <option value="0">关闭</option>
+        <option value="30">30 分钟</option>
+        <option value="60">1 小时</option>
+        <option value="120">2 小时</option>
+        <option value="240">4 小时</option>
+        <option value="480">8 小时</option>
+      </select>
+      <small>
+        她会<b>发消息给你</b> —— 进聊天记录、在立绘页的「聊天」按钮上亮未读红点。
+        你切回应用时会补上离开期间该发的那条。
+      </small>
     </label>
 
     <!-- 聊天背景：在「图鉴」里点开某张照片即可设为背景 / 加入轮换池 -->
@@ -464,7 +484,9 @@
     宽度却差不多，既挤又主次不分。次要操作收进右上角的 ⋯ 菜单。
   -->
   <div class="petpage-actions">
-    <button class="btn" id="btn-petpage-chat">聊天</button>
+    <button class="btn" id="btn-petpage-chat">
+      聊天<span class="chat-unread" data-chat-unread hidden></span>
+    </button>
     <button class="btn" id="btn-petpage-wardrobe">换装</button>
   </div>
 

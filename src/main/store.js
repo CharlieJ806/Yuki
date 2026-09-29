@@ -13,7 +13,7 @@ import { mkdirSync } from 'node:fs'
 import { dirname } from 'node:path'
 import { DEFAULT_SETTINGS } from '../shared/moyu.js'
 import { serializeContent } from '../shared/content.js'
-import { SCHEMA } from '../shared/db-schema.js'
+import { SCHEMA, WIPE_TABLES } from '../shared/db-schema.js'
 import {
   mapCheckin,
   mapMessage,
@@ -360,6 +360,24 @@ export function openStore(filePath) {
     )
   }
 
+  /**
+   * 未读数：某会话里**她说的、且晚于 `sinceTs`** 的消息条数。
+   *
+   * 只数 assistant：用户自己发的不算未读。
+   * `sinceTs` 为空（从没读过）时用一个极小值 —— 那样「全新会话」
+   * 会把已有回复全算成未读，符合直觉（确实一条都没看过）。
+   */
+  function countUnread(sessionId, sinceTs = 0) {
+    return Number(
+      db
+        .prepare(
+          `SELECT COUNT(*) AS n FROM chat_messages
+           WHERE sessionId = ? AND deletedAt IS NULL AND role = 'assistant' AND createdAt > ?`,
+        )
+        .get(sessionId, Number(sinceTs) || 0).n,
+    )
+  }
+
   /* ---------- 自定义人设 ---------- */
 
   function listPersonas() {
@@ -406,6 +424,36 @@ export function openStore(filePath) {
     return true
   }
 
+  /* ---------- 清空全部数据 ---------- */
+
+  /**
+   * 删掉所有业务表的数据，库文件本身与表结构保留。
+   *
+   * 为什么用 DELETE 而不是删库文件重开：
+   *   - 删文件要求没有连接持有，Windows 上文件锁很容易 EPERM；
+   *   - 重建连接要动 service/index.js 的实例生命周期，
+   *     而 service 是模块级单例，替换它的引用要改一大片。
+   * 保留库文件后，`getSettings()` 自然回落 DEFAULT_SETTINGS（它本来就是
+   * `{...DEFAULT_SETTINGS}` 合并存下来的行），表结构由 SCHEMA 保证还在，
+   * 效果与「刚装好」一致。
+   *
+   * 单事务：中途失败不能留下「清了一半」的库。
+   */
+  function wipeAll() {
+    db.exec('BEGIN')
+    try {
+      /* 表名走字符串拼接而不是绑定参数：SQLite 不支持 `DELETE FROM ?`。
+         这里是安全的 —— 表名全部来自本仓库的 WIPE_TABLES 常量，
+         没有任何外部输入能流到这里。 */
+      for (const t of WIPE_TABLES) db.exec(`DELETE FROM ${t}`)
+      db.exec('COMMIT')
+    } catch (err) {
+      db.exec('ROLLBACK')
+      throw err
+    }
+    return true
+  }
+
   return {
     db,
     getSettings,
@@ -436,11 +484,13 @@ export function openStore(filePath) {
     addMessage,
     touchSession,
     countMessages,
+    countUnread,
     listPersonas,
     getPersona,
     createPersona,
     updatePersona,
     deletePersona,
+    wipeAll,
     close: () => db.close(),
   }
 }

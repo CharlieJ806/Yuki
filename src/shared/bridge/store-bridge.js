@@ -11,7 +11,7 @@
  */
 import { DEFAULT_SETTINGS } from '../moyu.js'
 import { serializeContent } from '../content.js'
-import { SCHEMA } from '../db-schema.js'
+import { SCHEMA, WIPE_TABLES } from '../db-schema.js'
 import {
   mapCheckin,
   mapMessage,
@@ -358,6 +358,16 @@ export function openStoreBridge() {
     return Number(rows[0]?.n) || 0
   }
 
+  /** 未读数 —— 与 node:sqlite 版同语义（只数 assistant、晚于 sinceTs） */
+  async function countUnread(sessionId, sinceTs = 0) {
+    const rows = await select(
+      `SELECT COUNT(*) AS n FROM chat_messages
+       WHERE sessionId = ? AND deletedAt IS NULL AND role = 'assistant' AND createdAt > ?`,
+      [sessionId, Number(sinceTs) || 0],
+    )
+    return Number(rows[0]?.n) || 0
+  }
+
   /* ---------- 自定义人设 ---------- */
 
   async function listPersonas() {
@@ -402,6 +412,21 @@ export function openStoreBridge() {
     return true
   }
 
+  /* ---------- 清空全部数据 ---------- */
+
+  /**
+   * 与 node:sqlite 版 `wipeAll` 同语义：只删数据，保留库与表结构。
+   *
+   * 不包显式事务：这边每条 exec 都是一次独立 IPC，事务要跨多次往返
+   * 持有，Rust 侧连接是单例、被别的调用共用，跨 IPC 开事务会互相干扰。
+   * 数据量是本地桌宠级（几百行），逐条删的耗时可以忽略，
+   * 换来的是「不会把别的调用拖进我的事务里」。
+   */
+  async function wipeAll() {
+    for (const t of WIPE_TABLES) await exec(`DELETE FROM ${t}`)
+    return true
+  }
+
   return {
     /* schema 就绪后 resolve；宿主可以 await 它确认数据层可用 */
     ready,
@@ -433,11 +458,13 @@ export function openStoreBridge() {
     addMessage,
     touchSession,
     countMessages,
+    countUnread,
     listPersonas,
     getPersona,
     createPersona,
     updatePersona,
     deletePersona,
+    wipeAll,
     /* 连接归 Rust 所有，无需也不应从这里关闭 */
     close: () => {},
   }

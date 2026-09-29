@@ -10,14 +10,12 @@ import {
   refresh,
   initBridge,
   addAffinity,
-  refresh as refreshState,
   refreshGallery,
-  refreshSessionAffinity,
   setActiveSession,
+  openChatWindow,
 } from '../stores/app.js'
 import { formatDuration } from '@shared/moyu.js'
 import {
-  LINES,
   COFFEE_LINES,
   EMOTE_FOR,
   TIRED_POSES,
@@ -25,17 +23,20 @@ import {
   OUTFIT_SLUGS,
   PET_EXPRESSIONS,
   DEFAULT_OUTFIT,
-  affinityLevel,
+  affinityView,
   contextualScene,
   hoverLinesFor,
-  idleCandidatesFor,
   idleIntervalScale,
   isTiredHour,
   linesFor,
   outfitFile,
   outfitForTime,
   pickLine,
+  pickRotation,
   poseImageFile,
+  resolveRotationPool,
+  rotateDelayMs,
+  weightedPool,
   IDLE_JITTER_MIN,
   IDLE_JITTER_MAX,
   SEDENTARY_INTERVAL_MS,
@@ -116,14 +117,14 @@ function setEmote(key, holdMs = 2600) {
 const currentExpression = computed(() => emote.value || idlePose.value || mood.value)
 
 /**
- * 当前穿着（自动模式按时间算，固定模式用设置值）。
+ * 当前穿着（自动模式按时间片哈希从**已解锁池**里挑，固定模式用设置值）。
  *
  * 桌宠也读这个 —— 右键菜单的「换装」改的就是它。
  * 之前只在对话窗侧边立绘生效，桌宠压根不看这个设置，
  * 于是「右键换装没反应」（用户实测反馈）。
  *
  * clockTick 每分钟推进一次：直接 new Date() 不会触发重渲染，
- * 跨过时段边界（比如 23:00 该换睡衣）就不会自动切换。
+ * 跨过**时间片边界**（自动换装是 30 分钟一换的时间片哈希）就不会自动切换。
  */
 const clockTick = ref(Date.now())
 
@@ -135,7 +136,16 @@ const unlockedOutfits = computed(() => {
 })
 
 const currentOutfitSlug = computed(() => {
-  if (state.settings.outfitMode !== 'fixed') return outfitForTime(new Date(clockTick.value))
+  /*
+   * 自动模式必须把**已解锁池**传进去。
+   *
+   * `outfitForTime` 在 `unlocked` 为空/未传时直接返回 `DEFAULT_OUTFIT`
+   * （重构时把旧的「按类别回落」兜底删掉了，这里没跟着改）——
+   * 漏传的后果是自动模式**恒等于 JK**，用户永远看不到换装。
+   * 手机端传了、桌面端没传，正是典型的两端漂移。
+   */
+  if (state.settings.outfitMode !== 'fixed')
+    return outfitForTime(new Date(clockTick.value), [...unlockedOutfits.value])
   const s = state.settings.outfitSlug
   if (!OUTFIT_SLUGS.includes(s)) return DEFAULT_OUTFIT
   /*
@@ -223,7 +233,7 @@ function bump(kind, points = 1) {
   if (state.settings.petAffinity) addAffinity(points).catch(() => {})
 }
 
-const affinity = computed(() => affinityLevel(state.affinity?.points ?? 0))
+const affinity = computed(() => affinityView(state.affinity?.points ?? 0, state.settings?.godMode))
 
 /**
  * 当前关系档位（interactions.js 里的 voice key）。
@@ -414,8 +424,9 @@ async function speakIdleLine() {
     /* 请求期间用户已经互动过，这次就别插话了 */
     if (speech.value) return ''
     /*
-     * 接口没配、近两天没聊天、生成失败 —— 一律回到台词库，
-     * 挂机冒泡不该因为接口抖动就整个哑掉。
+     * 接口没配、生成失败 —— 回到台词库（挂机冒泡不该因为接口抖动整个哑掉）。
+     * 注意「近两天没聊天」**不再是**回落理由：主进程会换成「自言自语 / 开个话头」
+     * 的提示词并照常返回 ok:true（见 service.js 的 generateChatterLine / generateTopicLine）。
      */
     if (res?.ok && res.line) {
       lastChatterKind = 'history'
@@ -455,6 +466,47 @@ function scheduleIdleChatter() {
   }, delay)
 }
 
+/*
+ * ---------- 主动找话题（与「主动说话」相互独立） ----------
+ *
+ * 「主动说话」= 气泡里冒一句，说完就没（上面那个定时器，petChatterInterval）
+ * 「主动找话题」= 落成真消息，有未读红点、进消息列表（这里，petTopicMin）
+ *
+ * 两者各有各的定时器与间隔设置，互不影响 —— 用户明确要求拆开。
+ * 提示词也不同：前者是自言自语，后者要让你愿意接话（见 TOPIC_SYSTEM_PROMPT）。
+ */
+let topicTimer = null
+
+/** 正在找话题时挡住重复触发（要走网络，几秒到几十秒不等） */
+let topicPending = false
+
+function scheduleTopicChat() {
+  if (topicTimer) window.clearTimeout(topicTimer)
+  if (!state.settings.petTopicMin) return
+  /*
+   * 间隔同样做 ±抖动，免得像定时机器人。
+   * 下限 30 秒（防设置成 0 时刷屏），不设固定下限 ——
+   * 固定下限会把「小于 N 分钟」的设置整个吃掉（主动说话那边踩过）。
+   */
+  const base = Math.max(0.5, Number(state.settings.petTopicMin) || 60) * 60 * 1000
+  const delay = Math.max(30_000, base * (0.75 + Math.random() * 0.5))
+  topicTimer = window.setTimeout(async () => {
+    /* 她正在说话 / 用户正在互动时不插队，下一轮再说 */
+    if (!speech.value && !topicPending) {
+      topicPending = true
+      try {
+        /* 落库由主进程做（含广播 + 未读数），这里不需要拿返回值 */
+        await window.desk.chatTopicLine?.()
+      } catch {
+        /* 找话题失败不该影响别的 */
+      } finally {
+        topicPending = false
+      }
+    }
+    scheduleTopicChat()
+  }, delay)
+}
+
 /** 情境台词：每个场景一天只主动说一次，否则会烦 */
 function maybeContextLine(now = new Date()) {
   if (!state.settings.petContextLines) return
@@ -481,69 +533,97 @@ function startSedentaryTimer() {
 }
 
 /**
- * 挂机时的姿态轮换。
+ * 挂机时的立绘轮换 —— 动作和衣服在**同一个池**里轮换。
  *
- * 长时间显示同一个立绘会像静态图；每隔一段时间在「吃零食 / 戴耳机 / 思考 / 打哈欠」
- * 之间换一个，看起来像真人在旁边做自己的事。
- * 深夜和早八优先打哈欠。
+ * 用户要的是「每隔一段时间换一套」：池子里既有「吃零食 / 戴耳机 / 思考 /
+ * 打哈欠」这类动作立绘，也有 `outfit:` 前缀的服饰立绘，轮到哪个算哪个，
+ * 所以「换个动作」和「换套衣服」在这里没有区别，都是到点换一张。
+ *
+ * 池子由用户在设置页自选（`petRotatePool`），但**永远被已解锁范围夹住** ——
+ * 见 `resolveRotationPool`。间隔由 `settings.petRotateMin` 定（默认 10 分钟），
+ * 实际等待叠 ±25% 抖动。深夜和早八给困倦类动作加权。
  */
 const idlePose = ref('')
 let idlePoseTimer = null
-let lastPose = null
+/** 最近展示过的项，越新的越靠前（避免连续重复到像卡带） */
+let recentRotations = []
+
+/** 安排下一次轮换；重复调用会覆盖上一次，间隔设置改了能立刻生效 */
+function scheduleRotation(delayMs) {
+  if (idlePoseTimer) window.clearTimeout(idlePoseTimer)
+  idlePoseTimer = window.setTimeout(rotateIdlePose, delayMs)
+}
 
 function rotateIdlePose() {
-  if (!state.settings.petInteractions) return
-  /* 有台词/表情时不抢画面 */
-  if (speech.value || emote.value) return
-  /*
-   * 手动指定了衣服就不再轮换动作 —— 否则轮换会把用户选的服饰顶掉，
-   * 表现为「换了装但一会儿又变回去了」。挂机池里的服饰项本来就随机出现，
-   * 固定模式下交给用户自己决定穿什么。
-   */
-  if (state.settings.outfitMode === 'fixed') return
+  idlePoseTimer = null
 
   /*
-   * 候选池 = 解锁的动作 + 解锁的服饰。
-   * 亲密度越高池子越大：刚认识时只有 4 个动作、不换装；
-   * 到「形影不离」时 10 个动作 + 9 套衣服一起轮换。
+   * 手动指定了衣服就不再轮换动作 —— 否则轮换会把用户选的服饰顶掉，
+   * 表现为「换了装但一会儿又变回去了」。固定模式下交给用户自己决定穿什么。
    */
-  const unlocked = idleCandidatesFor(voice.value)
-  if (!unlocked.length) return
+  if (!state.settings.petInteractions || state.settings.outfitMode === 'fixed') return
+
+  /*
+   * 有台词/表情时不抢画面，但**必须重排**而不是直接 return。
+   *
+   * 原来间隔只有 1 分钟，撞上的概率低到可以忽略，撞了就当这轮跳过；
+   * 改成 10 分钟后「撞上一次就再也不换」几乎必然发生 ——
+   * 而症状是「轮换彻底不动了」，极难联想到是这个原因。
+   */
+  if (speech.value || emote.value) {
+    scheduleRotation(20_000)
+    return
+  }
+
+  /*
+   * 候选池 = 用户勾选的 ∩ 已解锁（自选为空时就是全部已解锁）。
+   * 亲密度越高可勾的越多：刚认识时只有 4 个动作、不换装；
+   * 到「形影不离」时 10 个动作 + 24 套衣服。
+   */
+  const pool = resolveRotationPool(voice.value, state.settings.petRotatePool, [...unlockedOutfits.value])
+  if (!pool.length) return
 
   /*
    * 深夜/早八把困倦类动作的权重抬高，但**不排除**其他项 ——
-   * 硬过滤会让 23:00–09:00（一天近 10 小时）的池子从 19 项缩到 12 项，
-   * 「每张图都会轮换到」就不成立了。服饰不受时段影响（穿什么跟困不困无关）。
+   * 硬过滤会让 23:00–09:00（一天近 10 小时）的池子缩水近一半，
+   * 「每张图都会轮换到」就不成立了。
+   * 服饰不受时段影响（穿什么跟困不困无关），所以判定里排除了 outfit: 前缀。
    */
-  const tiredNow = isTiredHour()
-  const usable = tiredNow
-    ? weightedPool(unlocked, (k) => !k.startsWith('outfit:') && TIRED_POSES.includes(k))
-    : unlocked
+  const usable = isTiredHour()
+    ? weightedPool(pool, (k) => !k.startsWith('outfit:') && TIRED_POSES.includes(k))
+    : pool
 
-  const next = pickLine(usable, lastPose, Math.random)
-  lastPose = next
+  const next = pickRotation(usable, recentRotations)
+  recentRotations = next ? [next, ...recentRotations].slice(0, 3) : []
   idlePose.value = next
-  /*
-   * 展示 20-40 秒，然后**空一到两轮**再换下一张。
-   *
-   * 节奏：一轮 = 展示 + 间隔，约 60-100 秒换一次。
-   * 之前是「展示 20-50 秒 + 间隔 30-90 秒」，平均 45 秒就变一次，
-   * 用户反馈「切换太快、来不及看清」。
-   *
-   * 空档期间回落到「当前穿着」立绘（idlePose 置空），
-   * 这样她不是一直在换姿势，而是「做事 → 站好 → 再做下一件事」，
-   * 比连续切图更像真人。
-   */
-  const hold = 20_000 + Math.random() * 20_000
-  if (idlePoseTimer) window.clearTimeout(idlePoseTimer)
-  idlePoseTimer = window.setTimeout(() => {
-    idlePose.value = ''
-    idlePoseTimer = window.setTimeout(rotateIdlePose, 40_000 + Math.random() * 60_000)
-  }, hold)
+
+  scheduleRotation(rotateDelayMs(state.settings.petRotateMin))
 }
 
-/** 摸鱼进行中偶尔吃个零食 */
-function startSnackTimer() {
+/**
+ * 轮换池 / 间隔 / 换装模式改了立刻重排，不用等当前这一轮走完
+ * —— 用户刚把 30 分钟调成 2 分钟却要再等半小时才看到效果，很难解释。
+ */
+watch(
+  () => [state.settings.petRotateMin, state.settings.petRotatePool, state.settings.outfitMode],
+  () => {
+    if (!idlePoseTimer) rotateIdlePose()
+    else scheduleRotation(rotateDelayMs(state.settings.petRotateMin))
+  }
+)
+
+/**
+ * 点未读红点 → 打开对话窗。
+ *
+ * 不在红点上直接清未读：用户可能只是想「先看看」，而对话窗
+ * 一获得焦点就会自己 markChatRead。在这里清的话，
+ * 万一窗口打开失败，红点就白消失了。
+ */
+function openUnread() {
+  openChatWindow()
+}
+
+/** 摸鱼进行中偶尔吃个零食 */function startSnackTimer() {
   const tick = () => {
     if (
       state.settings.petInteractions &&
@@ -651,7 +731,7 @@ onMounted(async () => {
     fitObserver.observe(stageEl.value)
     reportFit()
   }
-  /* 自动换装要跨过时段边界，每分钟对一次时间 */
+  /* 自动换装按 30 分钟一个时间片哈希，每分钟对一次时间才能跨片切换 */
   outfitClockTimer = window.setInterval(() => (clockTick.value = Date.now()), 60_000)
   /* 消费跨窗口的表情指令（例如面板里点了补卡） */
   watch(() => state.emoteRequest?.seq, playRequestedEmote, { immediate: true })
@@ -660,10 +740,13 @@ onMounted(async () => {
 
   /* 互动相关定时器 */
   scheduleIdleChatter()
+  scheduleTopicChat()
   startSedentaryTimer()
   startSnackTimer()
-  /* 开局先显示一会儿挂机姿态，避免一直是站姿 */
-  window.setTimeout(rotateIdlePose, 12_000)
+  /* 开局先显示一会儿挂机姿态，避免一直是站姿。
+     走 scheduleRotation 而不是裸 setTimeout：这样它纳管在 idlePoseTimer 里，
+     卸载时才清得掉（裸 setTimeout 在窗口销毁后仍会触发一次 rotateIdlePose）。 */
+  scheduleRotation(12_000)
   /* 启动后延迟几秒打个招呼（走情境台词，没有场景就不说） */
   window.setTimeout(() => maybeContextLine(), 4000)
   /* 立绘预热放空闲队列：全部服饰+表情图提前拉取并解码进缓存，首次上场
@@ -687,6 +770,7 @@ onBeforeUnmount(() => {
   stopBridge?.()
   if (timer) window.clearInterval(timer)
   if (idleTimer) window.clearTimeout(idleTimer)
+  if (topicTimer) window.clearTimeout(topicTimer)
   if (sedentaryTimer) window.clearInterval(sedentaryTimer)
   if (speechTimer) window.clearTimeout(speechTimer)
   if (hoverTimer) window.clearTimeout(hoverTimer)
@@ -780,6 +864,23 @@ onBeforeUnmount(() => {
           <img class="pet-img" :src="petImage" alt="Yuki" draggable="false" />
           <span class="pet-shadow" />
         </div>
+
+        <!--
+          未读红点。
+
+          她的主动搭话（以及我没看过的回复）会点亮它，点一下打开对话窗。
+          放在 `.pet` 外面：`.pet` 上挂了单击/双击互动，红点在里面
+          点它会被当成「摸她」，而且 `-webkit-app-region: drag` 的
+          继承也要显式摘掉才点得动。
+        -->
+        <button
+          v-if="state.unread > 0"
+          class="unread-dot"
+          :title="`她发了 ${state.unread} 条消息，点开看看`"
+          @click.stop="openUnread"
+        >
+          {{ state.unread > 9 ? '9+' : state.unread }}
+        </button>
       </div>
     </div>
 
@@ -813,6 +914,8 @@ onBeforeUnmount(() => {
 
 /* 气泡 + 桌宠：固定在窗口底部，给上方的菜单留出空间 */
 .stage {
+  /* 未读红点靠它定位 —— 之前漏了，红点落到了 .pet-root 的角上 */
+  position: relative;
   flex: 0 0 auto;
   display: flex;
   flex-direction: column;
@@ -1060,8 +1163,48 @@ onBeforeUnmount(() => {
   -webkit-user-drag: none;
   filter: drop-shadow(0 4px 8px rgba(0, 0, 0, 0.14));
 }
-.pet-shadow {
+
+/*
+ * 未读红点。
+ *
+ * 两个必须显式摘掉的东西：
+ *   1. `-webkit-app-region: drag` 是**子元素继承**的，不写 no-drag 就点不动；
+ *   2. 父级 `.stage` 有 overflow/定位约束，红点压在立绘右上角，
+ *      要 `position:absolute` + 高 z-index 才浮得出来。
+ *
+ * 呼吸动画很轻（只有缩放），透明置顶窗上动画太重会很吵。
+ */
+.unread-dot {
   position: absolute;
+  top: 2px;
+  right: 2px;
+  z-index: 5;
+  min-width: 18px;
+  height: 18px;
+  padding: 0 5px;
+  border: 1.5px solid #fff;
+  border-radius: 999px;
+  background: #ef4444;
+  color: #fff;
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 1;
+  cursor: pointer;
+  display: grid;
+  place-items: center;
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.3);
+  -webkit-app-region: no-drag;
+  animation: unread-pulse 2s ease-in-out infinite;
+}
+.unread-dot:hover {
+  background: #dc2626;
+}
+@keyframes unread-pulse {
+  0%, 100% { transform: scale(1); }
+  50% { transform: scale(1.14); }
+}
+
+.pet-shadow {  position: absolute;
   left: 50%;
   bottom: 0;
   width: 54px;

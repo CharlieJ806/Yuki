@@ -26,9 +26,9 @@ import { pickTapLine, pickFromBag } from '../src/shared/tapLines.js'
 import { formatDate, formatClock, weekendText, checkinStatus } from '../src/shared/dayInfo.js'
 import { holidayOf, holidayCountdownText } from '../src/shared/holidays.js'
 import { buildChatterRequest, cleanChatter, nextChatterDelay, FALLBACK_CHATTER } from '../src/shared/chatter.js'
-import { OUTFIT_STORIES } from '../src/shared/outfitStories.js'
+import { OUTFIT_STORIES, outfitConditionParts } from '../src/shared/outfitStories.js'
 import { PHOTO_STORIES, PHOTO_SLUGS } from '../src/shared/photoStories.js'
-import { DEFAULT_OUTFIT, OUTFITS, chatActionFor } from '../src/shared/interactions.js'
+import { DEFAULT_OUTFIT, OUTFITS, chatActionFor, TOPIC_SYSTEM_PROMPT } from '../src/shared/interactions.js'
 import { buildPhotoMessages, photoPathsOf } from '../src/shared/photoMessage.js'
 
 const $ = (id) => document.getElementById(id)
@@ -710,12 +710,16 @@ function revealPhotoSrc(kind, slug) {
  * 把当前设置里的背景应用到消息区。
  *
  * 用 CSS 变量 + `background-image` 而不是塞一个 `<img>`：
- * 背景要**跟着消息区一起滚动**（`background-attachment: local`），
  * 单独一个 img 会浮在内容上层挡着点击。
  *
- * 透明度走 CSS 变量（`--bg-opacity`），因为透明度不能只压背景图 ——
- * 照片亮的地方文字会糊，得靠 `.msgs::before` 那层半透明遮罩压暗。
- * 具体见 style.css 的 `.msgs.has-bg`。
+ * **注意背景定位在「可见框」上，不跟着内容滚** ——
+ * 早先用 `background-attachment: local` 想让背景跟着消息一起滚，
+ * 代价是 `cover` 改按「整段可滚动内容」缩放，照片被放大好几倍；
+ * 且那层 ::before 遮罩只在第一屏有效（绝对定位在滚动容器里会跟着滚）。
+ * 详见 style.css 的 `.msgs.has-bg`。
+ *
+ * 透明度走 CSS 变量（`--bg-opacity`），遮罩已经并进背景层 ——
+ * 照片亮的地方文字会糊，得靠那层半透明底色压暗。
  *
  * 未解锁或文件缺失时回落默认（不设背景），不让界面变花。
  */
@@ -774,8 +778,9 @@ let bgRotateTimer = null
 async function saveSettings(patch) {
   const next = await saveSettingsRaw(patch)
   syncBgRotateTimer()
-  /* 搭话开关/间隔改了要立刻重排 —— 否则要等下一轮才生效 */
+  /* 两个功能的开关/间隔改了都要立刻重排 —— 否则要等下一轮才生效 */
   scheduleChatter()
+  scheduleTopic()
   return next
 }
 
@@ -1360,43 +1365,58 @@ async function onAskHerToSpeak() {
 }
 
 /**
- * 生成一句搭话台词（调模型，失败回落写死的短句）。
+ * 生成一句搭话台词（调模型）。
  *
- * @returns {Promise<string>}
+ * @param {'chatter'|'topic'} mode
+ *   chatter —— ①「主动说话」：自言自语式的一句，失败时回落写死的短句（不能哑）
+ *   topic   —— ②「主动找话题」：要让人愿意接话的那条消息。
+ *              失败返回空串 —— 通用短句落进聊天记录只会把记录冲淡成复读机。
  */
-async function generateChatterLine() {
+async function generateChatterLine(mode = 'chatter') {
+  const topic = mode === 'topic'
   try {
     const history = await db.recentMessages(sessionId, 20)
-    const req = buildChatterRequest({ history })
+    /*
+     * 上下文重建复用 chatter.js 的（按真实 role 拼，模型才分得清哪句是自己说的）；
+     * 只把 system 换成「找话题」那套 —— 两份提示词都在 shared 里，零复制。
+     */
+    const base = buildChatterRequest({ history })
     const raw = await completeOnce({
       settings,
-      system: req.system,
-      messages: req.messages,
-      maxTokens: 80,
+      system: topic ? TOPIC_SYSTEM_PROMPT : base.system,
+      messages: base.messages,
+      /*
+       * 512 而不是 80：模型若先出推理 token，80 会被吃光、正文为空 ——
+       * 桌面端踩过这个坑（表现是「接口返回了空回复」，然后静默回落到台词库）。
+       */
+      maxTokens: 512,
     })
     const line = cleanChatter(raw)
     if (line) return line
   } catch (e) {
     console.warn('[chatter] 生成失败', e)
   }
+  if (topic) return ''
   return FALLBACK_CHATTER[Math.floor(Math.random() * FALLBACK_CHATTER.length)]
 }
 
-/* ---------- 主动搭话（挂机时她自己开口） ---------- */
+/* ---------- 主动开口：拆成两个**互相独立**的功能 ---------- */
 
 /*
- * 默认**关**（`mobileProactive`）。开着时：
- *   到点了 → 调模型生成一句 → 同时做两件事：
- *     ① 在立绘页显示气泡（如果正开着）
- *     ② 落一条 assistant 消息进聊天记录
+ * 用户要求把这两件事拆开，各有各的间隔设置、互不影响：
  *
- * 为什么要落记录：用户要求「两者都做」。
- * 只显示气泡的话，切走了就再也看不到了；落记录才像「她真的发了消息」。
+ *   ① 主动说话（scheduleChatter / speakBubbleLine）
+ *      只在立绘页冒个泡，**说完就没** —— 不入库、不产生未读。
+ *      间隔 settings.mobileProactiveMin
  *
- * 只在前台跑（`document.hidden` 时不排下一轮）——
- * 手机后台会冻结定时器，硬排也没意义。
+ *   ② 主动找话题（scheduleTopic / speakTopicLine）
+ *      落成**真消息**进聊天记录，并累加未读在底部「聊天」标签上亮红点。
+ *      间隔 settings.petTopicMin（0 = 关）
+ *
+ * 两者共用 `generateChatterLine`，只有提示词和「是否落库」不同。
  */
 let chatterTimer = null
+let topicTimer = null
 
 function stopChatterTimer() {
   if (chatterTimer) {
@@ -1405,8 +1425,15 @@ function stopChatterTimer() {
   }
 }
 
+function stopTopicTimer() {
+  if (topicTimer) {
+    clearTimeout(topicTimer)
+    topicTimer = null
+  }
+}
+
 /**
- * 排下一轮主动搭话。
+ * 排下一轮①主动说话。
  *
  * 用 `setTimeout` 递归而不是 `setInterval`：每轮的间隔都不同（带抖动），
  * 而且要拿到「上一轮的结果」再决定下一次 —— interval 做不到。
@@ -1425,15 +1452,13 @@ function scheduleChatter() {
       chatterTimer = null
       return
     }
-    await speakProactively()
+    await speakBubbleLine()
     scheduleChatter()
   }, delay)
 }
 
-/**
- * 她主动说一句 —— 显示 + 落记录。
- */
-async function speakProactively() {
+/** ① 她随口一句 —— **只显示气泡，不落库** */
+async function speakBubbleLine() {
   /*
    * 用户正在打字（或输入框有内容）时不打断 ——
    * 他已经在说话了，她抢先开口会显得很吵。
@@ -1442,27 +1467,118 @@ async function speakProactively() {
   /* 正在流式回复中也不插队 */
   if (streaming) return
 
-  const line = await generateChatterLine()
+  const line = await generateChatterLine('chatter')
+  if (!line) return
+  if (!el.petpage?.hidden) showBubble(line)
+  lastProactiveAt = Date.now()
+  return line
+}
+
+/**
+ * 排下一轮②主动找话题。
+ *
+ * 间隔逻辑与桌面端一致：±25% 抖动，下限 30 秒。
+ */
+function scheduleTopic() {
+  stopTopicTimer()
+  const min = Number(settings.petTopicMin) || 0
+  if (min <= 0) return
+  const delay = Math.max(30_000, min * 60_000 * (0.75 + Math.random() * 0.5))
+  topicTimer = setTimeout(async () => {
+    topicTimer = null
+    /* 后台不发 —— 回到前台由 catchUpTopic 补，见那里的注释 */
+    if (document.hidden) return
+    await speakTopicLine()
+    scheduleTopic()
+  }, delay)
+}
+
+/** ② 她主动发一条消息 —— **落库 + 未读** */
+async function speakTopicLine() {
+  /* 正在流式回复中不插队 */
+  if (streaming) return
+  const line = await generateChatterLine('topic')
+  /* 找话题失败就这轮不发 —— 宁可沉默，也别把通用短句写进聊天记录 */
   if (!line) return
 
-  /* ① 立绘页开着就显示气泡 */
-  if (!el.petpage?.hidden) showBubble(line)
-
-  /* ② 落一条消息进当前会话 */
   try {
     const msg = await db.addMessage(sessionId, 'assistant', line)
     await openSession(sessionId)
-    lastProactiveAt = Date.now()
+    /* 只记 ② 自己的时钟：① 的 lastProactiveAt 不参与这里的判断 */
+    lastTopicAt = Date.now()
     /* 落到别的会话时刷新列表，让侧栏的排序/摘要跟上 */
     await refreshSessions()
+    /*
+     * 红点语义 = 「立绘页的全屏浮层盖住了聊天页，所以你没看到」。
+     * `hidden === true` 表示立绘页**隐藏**（用户正看着聊天页）——
+     * 那种情况消息就在眼前，再 +1 只会留下一个消不掉的红点。
+     */
+    if (!el.petpage?.hidden) addChatUnread()
     return msg
   } catch (e) {
-    console.warn('[chatter] 落库失败', e)
+    console.warn('[topic] 落库失败', e)
   }
 }
 
-/** 上次主动开口的时间 —— 用于「刚说完就别急着再说」 */
+/**
+ * 回到前台时**补发**。
+ *
+ * 这是手机端特有的、桌面端不需要的一步：PWA 切后台时定时器被浏览器冻结，
+ * 不补这一下的话 —— **你不在的时候她永远不会给你发消息**，
+ * 那个未读红点也就永远不会亮，整个功能等于没有。
+ *
+ * 所以回前台时若「距上次**找话题**已超过一个间隔」，立刻补一条。
+ * 判据是 `lastTopicAt`（② 自己的时钟），不是 `lastProactiveAt`（① 的）——
+ * 否则她刚冒过一个气泡，这条本该补的消息就被当成「刚说过」跳过了。
+ */
+async function catchUpTopic() {
+  const min = Number(settings.petTopicMin) || 0
+  if (min <= 0) return
+  if (document.hidden) return
+  /* 用 ② 自己的时钟：① 冒过泡不代表她刚发过消息 */
+  if (Date.now() - lastTopicAt < min * 60_000) return
+  await speakTopicLine()
+  scheduleTopic()
+}
+
+/* ---------- 未读（底部「聊天」标签上的红点） ---------- */
+
+/*
+ * 只存内存、不落库：手机端是单页应用，「已读」的语义就是
+ * 「本次打开期间有没有看过聊天页」，重启后重新计数更符合直觉
+ * （桌面端是按消息时间戳算的，那边有常驻进程，语义不同）。
+ */
+let chatUnread = 0
+
+function addChatUnread() {
+  chatUnread++
+  renderChatUnread()
+}
+
+function clearChatUnread() {
+  if (!chatUnread) return
+  chatUnread = 0
+  renderChatUnread()
+}
+
+function renderChatUnread() {
+  const dot = document.querySelector('[data-chat-unread]')
+  if (!dot) return
+  dot.textContent = chatUnread > 99 ? '99+' : String(chatUnread)
+  dot.hidden = chatUnread <= 0
+}
+
+/**
+ * 上次「主动说话」（①冒泡）的时间。
+ *
+ * 与 ② 的时钟**必须分开** —— 早先两个功能共用这一个变量：
+ * ① 冒出个气泡就把时间戳刷新了，② 的补发随即被判成「刚说过」而跳过。
+ * 两个功能被要求拆开，节拍自然也得各记各的。
+ */
 let lastProactiveAt = 0
+
+/** 上次「主动找话题」（②落库消息）的时间 —— catchUpTopic 的补发依据 */
+let lastTopicAt = 0
 
 /** 她此刻的关系档（给搭话间隔做「越熟越黏」的倍率） */
 let currentVoice = 'familiar'
@@ -1704,10 +1820,10 @@ function renderRules() {
   const html = groups
     .map((g) => {
       const rows = Object.entries(g.table)
-        .map(([, d]) => {
+        .map(([slug, d]) => {
           const how =
             d.unlock === 'condition'
-              ? conditionText(d.condition)
+              ? conditionText(slug, d.condition)
               : (d.keywords ?? []).map((k) => `<code>${esc(k)}</code>`).join(' ')
           return `<div class="rule-row">
             <p class="rule-title">${esc(d.title)}</p>
@@ -1725,13 +1841,16 @@ function renderRules() {
     </p>`
 }
 
-/** 条件的中文描述 */
-function conditionText(c = {}) {
-  const parts = []
-  if (c.minPoints != null) parts.push(c.minPoints === 0 ? '初始就有' : `亲密度 ${c.minPoints}`)
-  if (c.hoursAfter != null) parts.push(`${c.hoursAfter} 点之后`)
-  if (c.restDayOnly) parts.push('休息日')
-  return parts.length ? `<em>${parts.join(' · ')}</em>` : '<em>无条件</em>'
+/**
+ * 条件的中文描述。
+ *
+ * 文案口径统一在 shared 的 `outfitConditionParts` 里 —— 亲密度门槛从
+ * `OUTFIT_MIN_POINTS` 推算，**不能**读故事对象的 `condition.minPoints`
+ * （那个字段已删除：读它会让「睡裙还要 300 点亲密度」在界面上凭空消失，
+ * 用户按文案永远猜不到为什么穿不上）。
+ */
+function conditionText(slug, c = {}) {
+  return `<em>${esc(outfitConditionParts(slug, c).join(' · '))}</em>`
 }
 
 /** 转义，防止故事文案里的尖括号破坏结构 */
@@ -1761,7 +1880,7 @@ async function refreshSetupHint() {
  *
  * 之前只能在图鉴里看，没法指定穿哪套 —— 用户看到心仪的衣服却穿不上。
  * 未解锁的不列，否则等于绕过解锁机制（PC 端踩过这个坑：
- * 右键菜单列了全部 26 套，图鉴的进度与条件全失去意义）。
+ * 右键菜单列了 OUTFITS 全量，图鉴的进度与条件全失去意义）。
  */
 /*
  * 立绘页是否是「从抽屉进来的」。
@@ -2005,6 +2124,8 @@ async function openSettings() {
   $('f-proactive').checked = settings.mobileProactive === true
   $('f-proactiveMin').value = String(settings.mobileProactiveMin ?? 20)
   syncProactiveMinVisibility()
+  /* ② 主动找话题（独立功能，0 = 关） */
+  $('f-topicMin').value = String(settings.petTopicMin ?? 60)
   $('f-bgMode').value = settings.chatBgMode ?? 'off'
   $('f-bgRotateMin').value = String(settings.chatBgRotateMin ?? 30)
   refreshBgPoolInfo()
@@ -2077,6 +2198,8 @@ async function onSaveSettings() {
     collapseInputOnSend: $('f-collapse').checked,
     mobileProactive: $('f-proactive').checked,
     mobileProactiveMin: Number($('f-proactiveMin').value) || 20,
+    /* 0 = 关闭「主动找话题」 */
+    petTopicMin: Number($('f-topicMin').value) || 0,
     chatBgMode: $('f-bgMode').value,
     chatBgRotateMin: Number($('f-bgRotateMin').value) || 30,
     chatBgOpacity: (Number($('f-bgOpacity').value) || 25) / 100,
@@ -2267,6 +2390,8 @@ function bind() {
    */
   on('btn-checkin', 'click', onCheckin)
   on('btn-petpage-chat', 'click', () => {
+    /* 回到聊天页 = 看过了，红点该消 */
+    clearChatUnread()
     closePetPage()
     el.input?.focus()
   })
@@ -2458,6 +2583,9 @@ function bind() {
      * 不重排的话回来就再也不主动说话了。
      */
     scheduleChatter()
+    scheduleTopic()
+    /* 后台期间她'本该'发的消息，在这里补上 */
+    catchUpTopic()
   })
 
   el.send?.addEventListener('click', onSend)
@@ -2532,6 +2660,7 @@ async function main() {
   /* 关系档影响搭话间隔（越熟越黏），启动时先取一次 */
   await refreshVoice()
   scheduleChatter()
+  scheduleTopic()
   await refreshAffinity()
   startPetStripTicker()
   /* 顶部信息栏：时钟 + 打卡状态 */

@@ -92,3 +92,27 @@ CREATE TABLE IF NOT EXISTS chat_messages (
 );
 CREATE INDEX IF NOT EXISTS idx_chat_messages_session ON chat_messages(sessionId, createdAt);
 `
+
+/**
+ * 「清空全部数据」要清的表 —— **子表在前**。
+ *
+ * 顺序不能随便写：schema 开了 `PRAGMA foreign_keys = ON`，而
+ * `chat_messages.sessionId` 对 `chat_sessions` 有外键。虽然写了
+ * `ON DELETE CASCADE`，删父表会连带删子表，但那只覆盖**声明了级联**的
+ * 这一条。万一将来新增一张带外键又忘了写 CASCADE，顺序颠倒就会直接
+ * 抛 FOREIGN KEY constraint failed，而用户看到的是「清空失败」。
+ * 按子表在前排，任何新增外键关系都是安全的。
+ *
+ * 与 `SCHEMA` 放在一起，是为了「加表时一定会看到这段」——
+ * 新表忘了登记进这里的表现是「清空后它还在」，很隐蔽。
+ */
+export const WIPE_TABLES = [
+  'chat_messages', // 有外键指向 chat_sessions，必须先删
+  'chat_sessions',
+  'personas',
+  'worklogs',
+  'checkins',
+  'events',
+  'meta',
+  'settings',
+]

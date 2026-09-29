@@ -113,35 +113,39 @@ body {
 /*
  * 聊天背景（用户在已解锁的背景图里选的那张）。
  *
- * 两层结构：
- *   1. `.msgs` 自身铺 `--bg-image`，用 ::before 那层压透明度
- *   2. 滚动时背景跟着内容走（`local`），不做出「背景定死、字在飘」的割裂感
+ * ## 为什么不再用「::before 遮罩 + attachment: local」
  *
- * 为什么用遮罩而不是直接给图片加 opacity：
- * 照片有的地方亮、有的地方暗，气泡文字压在亮处会糊。
- * 遮罩层用**页面底色**半透明覆盖，等于把整张照片朝底色方向压，
- * 文字对比度就有保证了 —— 这是聊天类 App 的通行做法。
+ * 早先是 `.msgs` 自己铺图（`local`）+ `::before` 压一层半透明底色，
+ * 想让背景跟着消息一起滚。CDP 实测下来两个问题：
+ *
+ * 1. **比例炸掉**：`local` 会把「背景定位区」变成元素的**可滚动溢出区**，
+ *    而 `cover` 按定位区缩放 —— 聊天内容越高，照片被放得越大。
+ *    实测容器可见 260px、内容 1036px 时，照片相对可见框放大约 **4 倍**
+ *    （截图里只能看到背景图圆环的一小段弧）。
+ * 2. **遮罩只盖第一屏**：滚动容器内的绝对定位元素**跟着内容滚**
+ *    （实测滚 300px、遮罩位移 300px）。聊天一长，下半段就没有遮罩了，
+ *    照片原亮度透在文字底下 —— 正是注释里担心的「文字糊」。
+ *
+ * ## 现在：把遮罩并进背景层
+ *
+ * 用一个半透明底色渐变压在照片上，两层共用**同一个定位区**，
+ * 比例与遮罩范围天然一致，也不再依赖「遮罩层盖住可见框」这个做不到的前提。
+ *
+ * 关键就一条：`background-attachment` 用默认的 `scroll`
+ * —— 定位区是元素的**可见框**，`cover` 才是「按可见框铺满」。
+ *
+ * `--bg-opacity` 是「照片保留多少」（0.25 = 留 25%），
+ * 所以遮罩 alpha 取 `1 - opacity`；与 JS 里那个变量的语义保持一致。
  */
 .msgs.has-bg {
-  position: relative;
-  background-image: var(--bg-image, none);
-  background-size: cover;
-  background-position: center;
-  background-attachment: local;
+  --bg-mask: color-mix(in srgb, var(--bg) calc((1 - var(--bg-opacity, 0.25)) * 100%), transparent);
+  background-image:
+    linear-gradient(var(--bg-mask), var(--bg-mask)),
+    var(--bg-image, none);
+  background-size: cover, cover;
+  background-position: center, center;
+  background-repeat: no-repeat, no-repeat;
 }
-.msgs.has-bg::before {
-  content: '';
-  position: absolute;
-  inset: 0;
-  /* 覆盖整块可滚动区域，否则滚动时下半段没有遮罩 */
-  min-height: 100%;
-  background: var(--bg);
-  opacity: calc(1 - var(--bg-opacity, 0.25));
-  pointer-events: none;
-  z-index: 0;
-}
-/* 消息本身要在遮罩之上 */
-.msgs.has-bg > * { position: relative; z-index: 1; }
 
 /* 轻提示：一闪而过，不打断操作 */
 .toast {
@@ -1354,6 +1358,8 @@ body {
  * 高度 ≥44 是触摸目标下限（顶栏那几个按钮当初就因为 38 点不中改过）。
  */
 .petpage-actions .btn {
+  /* 未读红点靠它定位（`position: absolute` 需要定位上下文） */
+  position: relative;
   flex: 1 1 0;
   min-width: 0;
   min-height: 50px;
@@ -1402,6 +1408,36 @@ body {
 }
 .petpage-actions #btn-petpage-chat:active {
   box-shadow: 0 2px 8px rgb(var(--theme-accent, 20 184 166) / 0.4);
+}
+
+/*
+ * 未读红点。
+ *
+ * 挂在这个「聊天」按钮上，因为它是**唯一会被她主动消息挡住的入口**：
+ * 立绘页是全屏浮层，你在这页时聊天页在它底下 ——
+ * 这时她发来的消息你确实没看到，红点才有意义。
+ * 回到聊天页即清零（见 app.js 的 btn-petpage-chat 处理）。
+ */
+.petpage-actions .chat-unread {
+  position: absolute;
+  top: -6px;
+  right: -6px;
+  min-width: 18px;
+  height: 18px;
+  padding: 0 5px;
+  box-sizing: border-box;
+  border-radius: 999px;
+  background: #ef4444;
+  color: #fff;
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 18px;
+  text-align: center;
+  box-shadow: 0 1px 4px rgb(0 0 0 / 0.25);
+}
+.petpage-actions .chat-unread[hidden] {
+  /* `hidden` 在 flex/grid 子项上会被 display 覆盖，必须显式压回 none */
+  display: none;
 }
 
 

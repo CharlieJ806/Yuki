@@ -7,18 +7,25 @@ dist-mobile/
 
 # 打包产物（322MB，不该进仓库；由 npm run pack 本地生成）
 release/
+# 手机端启动器产物（本地便利产物，不随 Release 上传）
+release-mobile/
 
 # 临时/缓存
-.tmp-yuki/
-.tmp-install/
-.tmp-s/
-.tmp-split/
-.tmp-refs/
-.tmp-photos/
-.tmp-photo-refs/
+#
+# 用 `.tmp-*` 而不是逐个枚举：之前是 .tmp-yuki/ .tmp-install/ .tmp-s/ … 一串
+# 具体名字，**每新建一个临时目录就得记得回来加一条**，漏一次就会被提交。
+# 实测踩过：调试用的 `.tmp-smoke.diff` 没被覆盖，`git add -A` 会把它带进去。
+#
+# 注意用 `.tmp-*` 而非 `.tmp*/` —— 后者只匹配目录，
+# 像 `.tmp-smoke.diff` / `.tmp-open-mobile.cjs` 这种**文件**会漏掉。
+.tmp-*
 *.tmp
-# 无头浏览器验证时用的临时 profile
-.tmp-chrome-profile/
+
+# 本地数据库（正常在 %APPDATA%\desk-pet\，仓库内不该出现；
+# 但调试时若把 DB 建在工作区，这条防呆能拦住它进仓库）
+*.db
+*.db-wal
+*.db-shm
 
 # 素材换代时的备份目录（历史遗留的防呆规则，实际已清理干净）
 .backup-*/

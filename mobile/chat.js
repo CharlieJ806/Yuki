@@ -25,6 +25,7 @@ import {
   modelSupportsImages,
   withSelfPortrait,
   buildRouteOptions,
+  splitReplySegments,
 } from '../src/shared/content.js'
 import { createGalleryRunner } from '../src/shared/gallery.js'
 import { AFFINITY_GAIN, affinityLevel, settleAffinity, isUpsetting, outfitForTime } from '../src/shared/interactions.js'
@@ -267,7 +268,32 @@ export async function sendMessage({
 
   if (!full) return { ok: false, reason: '接口返回了空回复', sessionId: sid, userMessage: userMsg }
 
-  const assistantMsg = await db.addMessage(sid, 'assistant', full, { model })
+  /*
+   * 她可以一次生成、按多条发出（用 `<<<MSG>>>` 分隔，见 shared/content.js）。
+   *
+   * 每条落成独立消息、时间戳按固定间隔递增 —— 手机端的消息列表
+   * 直接按 createdAt 顺序渲染，错开时间戳就会自然呈现出
+   * 「一条条冒出来」的节奏（与桌面端同一套约定）。
+   *
+   * 没有标记时返回单条，行为与以前完全一致。
+   */
+  /*
+   * `splitReplySegments` 的文档写明「全空则返回空数组，**调用方据此回落到原文**」。
+   *
+   * 这里原先没回落：模型只输出 `<<<MSG>>>`（或全空白）时 `segments` 为空，
+   * 于是一条消息都不落库、也不报错 —— 界面表现为「她的回复凭空消失」。
+   * 宁可把原文原样落成一条，也不能静默丢。
+   */
+  const segments = splitReplySegments(full)
+  const parts = segments.length ? segments : [full]
+  const baseTs = Date.now()
+  let assistantMsg = null
+  for (const [i, seg] of parts.entries()) {
+    assistantMsg = await db.addMessage(sid, 'assistant', seg, {
+      model,
+      createdAt: baseTs + i * REPLY_SEGMENT_GAP_MS,
+    })
+  }
 
   /*
    * 一轮问答完成：记亲密度（用户消息 + 一轮结束，和桌面端口径一致）。
@@ -279,7 +305,14 @@ export async function sendMessage({
   try {
     const upsetting = isUpsetting(text)
     await bumpAffinity('chatMessage', undefined, { upsetting })
-    await bumpAffinity('chatRound', undefined, { upsetting: false })
+    /*
+     * **惹她生气那轮不给「聊完一次」的分**。
+     *
+     * 上面那次已按 `upsetting` 扣分并把当次加分清零；这里若再记 +3，
+     * 就把扣的分加回来了 —— 实测净变化 `-2 + 3 = +1`，骂她反而涨点。
+     * 两次调用之间抵消掉了 `settleAffinity` 里「生气当次加分清零」的设计。
+     */
+    if (!upsetting) await bumpAffinity('chatRound', undefined, { upsetting: false })
   } catch {
     /* 亲密度记不上不该影响对话 */
   }
@@ -373,6 +406,9 @@ function trim(messages, maxChars, reserve) {
   }
   return kept.reverse()
 }
+
+/** 多段回复的相邻间隔（毫秒）—— 与桌面端 service.js 保持一致 */
+const REPLY_SEGMENT_GAP_MS = 1200
 
 /**
  * 图鉴解锁：用 shared/gallery.js 的执行器，**不再在本文件里重复实现管线**。

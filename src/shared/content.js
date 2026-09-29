@@ -236,6 +236,60 @@ export function parseStoredContent(raw) {
   }
 }
 
+/* ---------- 多段回复 ---------- */
+
+/**
+ * 分段标记 —— 她一次生成、但按条发出的分隔符。
+ *
+ * 选这个而不是 `---` / `|||`：后者在正常文本里太容易出现
+ * （破折号、签名分隔线），一旦误切就会把一句话劈成两条。
+ * 尖括号包起来的长词模型几乎不会自然产出，也不像 Markdown 语法。
+ */
+export const MSG_SPLIT_TOKEN = '<<<MSG>>>'
+
+/**
+ * 把一次生成的文本拆成「要分成几条发」。
+ *
+ * 规则：
+ *   - 没有标记 → 一条（**默认行为不变**，这是最重要的兼容点：
+ *     模型不听话、或用户用的是不支持该指令的自定义人设时，一切照旧）
+ *   - 空段丢弃（模型偶尔会 `A<<<MSG>>><<<MSG>>>B`）
+ *   - 每条 trim；全空则返回空数组，调用方据此回落到原文
+ *
+ * 上限 **4 条**：再多就不像聊天而像刷屏了，而且渲染层的错峰队列
+ * 最长只等到 3 秒，条数太多会让最后一条迟迟不出现。
+ *
+ * @param {string} text
+ * @param {number} [max] 最多几条
+ * @returns {string[]} 至少一条（除非输入全空）；无标记时就是 [原文]
+ */
+export function splitReplySegments(text, max = 4) {
+  const raw = String(text ?? '')
+  if (!raw.includes(MSG_SPLIT_TOKEN)) return raw.trim() ? [raw.trim()] : []
+  const parts = raw
+    .split(MSG_SPLIT_TOKEN)
+    .map((s) => s.trim())
+    .filter(Boolean)
+  if (!parts.length) return []
+  return parts.slice(0, max)
+}
+
+/**
+ * 流式预览该显示到哪儿 —— 只显示**第一条**。
+ *
+ * 为什么要截断：不截的话，生成过程中用户会看到
+ * `第一句<<<MSG>>>第二句` 这条原始文本（标记直接暴露在气泡里），
+ * 然后生成结束再"啪"地重新拆成多个气泡，观感很跳。
+ *
+ * 截到第一个标记之后，观感就是真人聊天：先打完第一条发出来，
+ * 再打第二条 —— 后面几条由错峰队列按 createdAt 间隔陆续出现。
+ */
+export function livePreviewOf(text) {
+  const raw = String(text ?? '')
+  const i = raw.indexOf(MSG_SPLIT_TOKEN)
+  return i < 0 ? raw : raw.slice(0, i)
+}
+
 
 /**
  * 构造路由参数 —— 目前只为 OpenRouter 生成，否则返回 null。

@@ -16,12 +16,29 @@ import {
   deletePersona,
   testChat as testChatConnection,
   resetAffinity as resetAffinityAction,
+  wipeAllData,
 } from '../stores/app.js'
 import { DEFAULT_SETTINGS, formatDuration, formatHours } from '@shared/moyu.js'
-import { affinityLevel, AFFINITY_GAIN, CHAT_AFFINITY_DAILY_CAP, OUTFITS, outfitsFor } from '@shared/interactions.js'
+import {
+  affinityView,
+  AFFINITY_GAIN,
+  CHAT_AFFINITY_DAILY_CAP,
+  OUTFITS,
+  rotationCandidatesFor,
+  resolveRotationPool,
+  outfitUnlockTierName,
+  ROTATE_MIN_MIN,
+  ROTATE_MIN_MAX,
+} from '@shared/interactions.js'
 
-const TABS = [
-  { id: 'work', label: '工作与薪酬' },
+/*
+ * 「主动找话题」的开关与间隔共用一个字段（petTopicMin）。
+ * 关掉 = 0，打开 = 恢复默认 60 分钟 —— 单独存一个布尔量的话，
+ * 用户关掉再打开会丢掉他调过的间隔。
+ */
+const topicDefault = DEFAULT_SETTINGS.petTopicMin ?? 60
+
+const TABS = [  { id: 'work', label: '工作与薪酬' },
   { id: 'pet', label: '桌宠外观' },
   { id: 'chat', label: 'AI 对话' },
   { id: 'data', label: '数据与同步' },
@@ -108,7 +125,7 @@ const keyHint = computed(() => {
 
 /* ---------- 亲密度 ---------- */
 
-const affinityName = computed(() => affinityLevel(state.affinity?.points ?? 0).level.name)
+const affinityName = computed(() => affinityView(state.affinity?.points ?? 0, state.settings?.godMode).level.name)
 const affinityBusy = ref(false)
 const affinityMsg = ref('')
 
@@ -134,6 +151,23 @@ async function onResetAffinity() {
 
 const outfits = OUTFITS
 
+/**
+ * **实际已解锁**的服饰（图鉴清单）—— 全端唯一的「能穿什么」真相源。
+ *
+ * 之前这里用的是 `outfitsFor(voice)`：一个按关系档位手写的近似表，
+ * 跟图鉴里真实解锁了哪些无关。后果是「清单里能选，但照片根本没发过」，
+ * 甚至选了也穿不上（桌宠的守卫查的是图鉴）。
+ */
+const unlockedOutfitSlugs = computed(() => {
+  const list = state.gallery?.outfit?.unlocked
+  return Array.isArray(list) ? list : []
+})
+const unlockedOutfitSet = computed(() => new Set(unlockedOutfitSlugs.value))
+const isOutfitUnlocked = (slug) => unlockedOutfitSet.value.has(slug)
+
+/** 当前档位（含上帝模式覆盖）—— 所有解锁门控都看 voice */
+const voice = computed(() => affinityView(state.affinity?.points ?? 0, state.settings?.godMode).voice)
+
 /** 勾选框是「是否自动」，表单存的是 'auto' | 'fixed'，这里做一层转换 */
 const autoOutfit = computed({
   get: () => form.outfitMode !== 'fixed',
@@ -142,14 +176,69 @@ const autoOutfit = computed({
   },
 })
 
-/** 点了具体某套 → 关掉自动并记下这一套 */
+/** 点了具体某套 → 关掉自动并记下这一套。未解锁的直接拒绝 */
 function pickOutfit(slug) {
+  if (!isOutfitUnlocked(slug)) return
   form.outfitMode = 'fixed'
   form.outfitSlug = slug
 }
 
-/** 提示文案里显示当前亲密度档位解锁了多少套（挂机轮换用的那部分） */
-const unlockedOutfitCount = computed(() => outfitsFor(affinityLevel(state.affinity?.points ?? 0).voice).length)
+/** 提示文案里显示已解锁多少套 */
+const unlockedOutfitCount = computed(() => unlockedOutfitSlugs.value.length)
+
+/* ---------- 轮换池自选 ---------- */
+
+/**
+ * 可勾选项 = **已解锁范围内**的全部候选。
+ *
+ * 刻意不列未解锁的（哪怕灰显）：用户能勾的都必须是真正会轮到的，
+ * 列一堆勾了也不生效的项只会让人困惑、还会去问「为什么没反应」。
+ * 解锁一套就多一项。
+ */
+const rotationCandidates = computed(() => rotationCandidatesFor(voice.value, unlockedOutfitSlugs.value))
+
+/** 空数组 = 全部已解锁（与 resolveRotationPool 的语义必须一致） */
+const rotatePoolSelected = computed(() => (Array.isArray(form.petRotatePool) ? form.petRotatePool : []))
+
+const isInRotatePool = (key) => rotatePoolSelected.value.includes(key)
+
+function toggleRotatePool(key) {
+  const cur = rotatePoolSelected.value
+  form.petRotatePool = cur.includes(key) ? cur.filter((k) => k !== key) : [...cur, key]
+}
+/**
+ * 全选：存**此刻**的全量列表。
+ *
+ * 注意这是**快照**，不等于「不限制」—— 之后新解锁的服饰不会自动进池，
+ * 用户得再点一次全选。要「跟着解锁走」请用「恢复默认（全部）」，那个存空数组。
+ */
+function selectAllRotatePool() {
+  form.petRotatePool = rotationCandidates.value.map((c) => c.key)
+}
+/**
+ * 全不选 → 存空数组，**不是空池**。
+ *
+ * 空数组在 resolveRotationPool 里表示「全部已解锁」，
+ * 所以「全不选」这个按钮会让人意外 —— 它其实是恢复默认。
+ * 按钮文案因此叫「恢复默认」而不是「全不选」。
+ */
+function resetRotatePool() {
+  form.petRotatePool = []
+}
+
+const rotatePoolActions = computed(() => rotationCandidates.value.filter((c) => c.kind === 'action'))
+const rotatePoolOutfits = computed(() => rotationCandidates.value.filter((c) => c.kind === 'outfit'))
+
+/**
+ * 实际生效的池子大小 —— 直接取自解析函数，所见即所得。
+ *
+ * 第三个参数**必须**带上已解锁池，否则解析函数只算动作，
+ * 和上方 `rotationCandidates`（带服饰）同屏两个数字口径不一致。
+ */
+const rotatePoolEffective = computed(
+  () => resolveRotationPool(voice.value, form.petRotatePool, unlockedOutfitSlugs.value).length,
+)
+
 
 /** 切换预设时带上默认 BaseURL 与首个模型 */
 function onProviderChange(id) {
@@ -300,6 +389,72 @@ async function revert() {
 async function reset() {
   const ok = await resetSettings()
   if (ok) Object.assign(form, state.settings)
+}
+
+/* ---------- 聊天背景 ---------- */
+
+/** 已解锁照片的**全部**路径（图鉴快照里有实际存在的那些） */
+const allPhotoPaths = computed(() => {
+  const g = state.gallery
+  const out = new Set()
+  for (const kind of ['outfit', 'photo']) {
+    for (const it of g?.[kind]?.items ?? []) for (const p of it.photos ?? []) out.add(p)
+  }
+  return [...out]
+})
+
+/** 轮换池里那些**仍然存在**的图 —— 池子可能存着已删/未生成的路径 */
+const bgPool = computed(() => (form.chatBgPool ?? []).filter((p) => allPhotoPaths.value.includes(p)))
+
+/**
+ * 「不设背景」是个复选框，而设置里存的是三态字符串。
+ * 这样映射而不是直接暴露 select：三态里的 fixed/rotate 是由
+ * 「在哪儿设的」决定的（图鉴里点「设为背景」→ fixed，勾「加入轮换」→ rotate），
+ * 让用户在一个下拉里再选一遍是重复且容易矛盾的。
+ */
+const bgOffMode = computed({
+  get: () => form.chatBgMode === 'off',
+  set: (off) => {
+    /* 关闭时保留 chatBackground / chatBgPool，用户再打开不用重选 */
+    form.chatBgMode = off ? 'off' : (form.chatBgPool ?? []).length ? 'rotate' : 'fixed'
+  },
+})
+
+async function removeFromBgPool(path) {
+  const next = (form.chatBgPool ?? []).filter((p) => p !== path)
+  form.chatBgPool = next
+  /* 池子空了且正在轮换 → 一起退回关闭，别留个永不生效的「轮换中」 */
+  if (!next.length && form.chatBgMode === 'rotate') form.chatBgMode = 'off'
+}
+
+/* ---------- 清空全部本地数据 ---------- */
+
+const wipeConfirm = ref(false)
+const wipeBusy = ref(false)
+const wipeMsg = ref('')
+
+/**
+ * 两步确认，不做「输入文字确认」。
+ *
+ * 权衡：输入确认能挡住手抖，但这是**本地数据**、不可恢复，
+ * 而按钮藏在设置页的「数据与同步」最下面 —— 两步已经足够，
+ * 再加一道输入门槛反而让人以为这事比实际更危险。
+ * 真要更强的保护，应该问的是「要不要做备份」，不是「要不要多按几次」。
+ */
+async function wipeAll() {
+  wipeBusy.value = true
+  wipeMsg.value = ''
+  try {
+    const ok = await wipeAllData()
+    /* 表单必须回到默认 —— 界面上还留着清空前那份的话，
+       用户会以为没清掉（尤其换装列表和轮换池都跟着回不去了）。 */
+    if (ok) Object.assign(form, { ...DEFAULT_SETTINGS, ...state.settings })
+    wipeMsg.value = ok ? '已清空全部本地数据，正在刷新界面…' : (state.lastError ?? '清空失败')
+    wipeConfirm.value = false
+  } finally {
+    /* 无论如何都要解锁按钮：卡在「清空中…」会让人以为程序死了 */
+    wipeBusy.value = false
+  }
 }
 
 /* 摸鱼时长快捷记账 */
@@ -467,7 +622,30 @@ const syncStatus = computed(() => ({
         <div class="field">
           <label>主动说话间隔（分钟）</label>
           <input v-model.number="form.petChatterInterval" type="number" min="2" max="120" step="1" />
-          <span class="hint">实际间隔会在此基础上随机浮动，免得像定时机器人</span>
+          <span class="hint">
+            只在她旁边的<b>气泡</b>里冒一句，说完就没 —— 不进聊天记录、不产生未读。
+            实际间隔会在此基础上随机浮动，免得像定时机器人。
+          </span>
+        </div>
+
+        <!--
+          「主动找话题」是**独立**于上面那个的功能：它会落成真消息。
+          两者各有各的定时器与间隔，互不影响。
+        -->
+        <div class="field">
+          <label>主动找话题</label>
+          <label class="switch">
+            <input v-model.number="form.petTopicMin" type="checkbox" :true-value="topicDefault" :false-value="0" />
+            <span>她会主动给你发消息（有未读红点）</span>
+          </label>
+        </div>
+        <div v-if="form.petTopicMin" class="field">
+          <label>找话题间隔（分钟）</label>
+          <input v-model.number="form.petTopicMin" type="number" min="5" max="720" step="5" />
+          <span class="hint">
+            这条<b>会进聊天记录</b>、会亮未读红点 —— 和「主动说话」是两回事。
+            正在聊天时她不会另外发，只在你们安静下来之后才找话头。
+          </span>
         </div>
         <div class="field">
           <label>情境台词</label>
@@ -505,28 +683,95 @@ const syncStatus = computed(() => ({
           <span v-if="affinityMsg" class="hint">{{ affinityMsg }}</span>
         </div>
 
+        <!-- 上帝模式：只影响「能看到什么」，不动真实进度 -->
+        <div class="field">
+          <label>上帝模式</label>
+          <label class="switch">
+            <input v-model="form.godMode" type="checkbox" />
+            <span>解锁全部服饰与图鉴，轮换池直接给到满级</span>
+          </label>
+          <span class="hint">
+            只是「显示层」打开：亲密度点数和图鉴进度<strong>一点没动</strong>，
+            关掉开关立刻回到真实档位。真实进度当前 {{ state.affinity?.points ?? 0 }} 点。
+          </span>
+        </div>
+
         <!-- 换装：和对话窗、右键菜单读写同一份设置 -->
         <div class="field">
           <label>换装</label>
           <label class="switch">
             <input v-model="autoOutfit" type="checkbox" />
-            <span>按时间自动换（深夜睡衣 / 早晚居家 / 白天便服）</span>
+            <span>自动轮换（每隔一段时间换一套）</span>
           </label>
+          <div class="field">
+            <label>轮换间隔（分钟）</label>
+            <input
+              v-model.number="form.petRotateMin"
+              type="number"
+              :min="ROTATE_MIN_MIN"
+              :max="ROTATE_MIN_MAX"
+              step="1"
+            />
+            <span class="hint">
+              实际等待会在此基础上随机浮动 ±25%，免得像定时机器人。
+            </span>
+          </div>
+
+          <!-- 轮换池自选：只在已解锁范围内勾 -->
+          <div class="field">
+            <label>轮换内容</label>
+            <div class="pool-toolbar">
+              <button class="btn" @click="selectAllRotatePool">全选</button>
+              <button class="btn" @click="resetRotatePool">恢复默认（全部）</button>
+              <span class="hint">实际轮换 {{ rotatePoolEffective }} 项</span>
+            </div>
+            <div class="pool-group">
+              <span class="pool-group-title">动作</span>
+              <button
+                v-for="c in rotatePoolActions"
+                :key="c.key"
+                class="pool-chip"
+                :class="{ active: isInRotatePool(c.key) }"
+                @click="toggleRotatePool(c.key)"
+              >
+                {{ c.label }}
+              </button>
+            </div>
+            <div class="pool-group">
+              <span class="pool-group-title">服饰</span>
+              <button
+                v-for="c in rotatePoolOutfits"
+                :key="c.key"
+                class="pool-chip"
+                :class="{ active: isInRotatePool(c.key) }"
+                @click="toggleRotatePool(c.key)"
+              >
+                {{ c.emoji }} {{ c.label }}
+              </button>
+            </div>
+            <span class="hint">
+              只列已解锁的（随亲密度解锁，上帝模式下是全部）。一个都没勾 = 全部都轮换。
+              想完全停掉轮换，用上面的「固定穿某一套」。
+            </span>
+          </div>
+
           <div class="outfit-row">
             <button
               v-for="o in outfits"
               :key="o.slug"
               class="outfit-chip"
-              :class="{ active: !autoOutfit && form.outfitSlug === o.slug }"
-              :title="o.hint"
+              :class="{ active: !autoOutfit && form.outfitSlug === o.slug, locked: !isOutfitUnlocked(o.slug) }"
+              :disabled="!isOutfitUnlocked(o.slug)"
+              :title="isOutfitUnlocked(o.slug) ? o.hint : `${o.hint}（未解锁：亲密度到「${outfitUnlockTierName(o.slug)}」、且聊到相关话题后她会发照片给你）`"
               @click="pickOutfit(o.slug)"
             >
-              {{ o.emoji }} {{ o.label }}
+              {{ isOutfitUnlocked(o.slug) ? '' : '🔒 ' }}{{ o.emoji }} {{ o.label }}
             </button>
           </div>
           <span class="hint">
-            选一套即固定不再自动切换；勾上「按时间自动换」恢复自动。
-            挂机时她还会自己轮换衣服，那部分随亲密度解锁（当前 {{ unlockedOutfitCount }} 套）。
+            选一套即固定不再自动切换（轮换会停）；勾上「自动轮换」恢复。
+            清单列出全部 {{ outfits.length }} 套，但<strong>带锁的选不了</strong> ——
+            只有她发过照片的那 {{ unlockedOutfitCount }} 套能穿。去图鉴看还差哪些。
           </span>
         </div>
       </div>
@@ -741,6 +986,58 @@ const syncStatus = computed(() => ({
         对话记录保存在本机 <code>chat_sessions</code> / <code>chat_messages</code> 表，
         与打卡数据同一套同步字段，接入云端后可按增量推拉。
       </p>
+
+      <!-- 聊天背景：与手机端共用 chatBackground.js 的选图逻辑 -->
+      <div class="field bg-field">
+        <label>聊天背景</label>
+        <div class="bg-modes">
+          <label class="switch">
+            <input v-model="bgOffMode" type="checkbox" />
+            <span>不设背景（关闭）</span>
+          </label>
+          <p class="hint">
+            背景只能从<strong>图鉴里已解锁的照片</strong>里选 —— 去图鉴点开一张照片，
+            用「设为背景」或「加入轮换」。
+          </p>
+        </div>
+
+        <template v-if="form.chatBgMode !== 'off'">
+          <div class="field">
+            <label>背景浓度 {{ Math.round((Number(form.chatBgOpacity) || 0.25) * 100) }}%</label>
+            <input
+              v-model.number="form.chatBgOpacity"
+              type="range"
+              min="0.05"
+              max="0.85"
+              step="0.05"
+            />
+            <span class="hint">数值越大照片越清楚、气泡文字越吃力。默认 25%。</span>
+          </div>
+
+          <div v-if="form.chatBgMode === 'rotate'" class="field">
+            <label>轮换间隔（分钟）</label>
+            <input v-model.number="form.chatBgRotateMin" type="number" min="5" max="1440" step="5" />
+            <span class="hint">
+              轮换池 {{ bgPool.length }} 张。<strong>按时间片取模</strong>算，不存「轮到第几张」——
+              所以手机端和桌面端同一时刻显示的永远是同一张，刷新也不会跳回第一张。
+            </span>
+          </div>
+
+          <div v-if="bgPool.length" class="field">
+            <label>轮换池</label>
+            <div class="bg-pool">
+              <div v-for="p in bgPool" :key="p" class="bg-pool-item">
+                <img :src="p" alt="" />
+                <button class="bg-pool-del" title="移出轮换池" @click="removeFromBgPool(p)">✕</button>
+              </div>
+            </div>
+            <span class="hint">在轮换池里的照片，图鉴里会带角标。</span>
+          </div>
+          <p v-else-if="form.chatBgMode === 'rotate'" class="hint warn">
+            轮换池是空的 —— 轮换不会生效（等同关闭）。去图鉴点开一张照片选「加入轮换」。
+          </p>
+        </template>
+      </div>
     </section>
 
     <!-- 数据与同步 -->
@@ -772,6 +1069,30 @@ const syncStatus = computed(() => ({
           <label>恢复默认</label>
           <button class="btn" @click="reset">重置全部设置</button>
           <span class="hint">不会删除打卡记录</span>
+        </div>
+
+        <!-- 破坏性操作：两步确认，且与「重置全部设置」明确分开 -->
+        <div class="field danger">
+          <label>清空全部本地数据</label>
+          <template v-if="!wipeConfirm">
+            <button class="btn danger" @click="wipeConfirm = true">清空全部数据…</button>
+          </template>
+          <template v-else>
+            <div class="danger-warn">
+              将删除：聊天记录、打卡与摸鱼时长、图鉴与亲密度进度、自定义人设、全部设置。
+              <strong>无法恢复</strong>，也没有回收站。确定继续？
+            </div>
+            <div class="inline">
+              <button class="btn danger" :disabled="wipeBusy" @click="wipeAll">
+                {{ wipeBusy ? '清空中…' : '确认清空（不可恢复）' }}
+              </button>
+              <button class="btn" :disabled="wipeBusy" @click="wipeConfirm = false">取消</button>
+            </div>
+          </template>
+          <span v-if="wipeMsg" class="hint">{{ wipeMsg }}</span>
+          <span class="hint">
+            只想改设置请用上面的「重置全部设置」—— 那个不会碰数据。
+          </span>
         </div>
       </div>
     </section>
@@ -983,6 +1304,163 @@ html.dark .tab.active {
   background: var(--theme-accent-soft);
   color: rgb(var(--theme-accent));
   font-weight: 700;
+}
+
+/*
+ * 未解锁的服饰：必须一眼看出「点了没用」。
+ *
+ * 之前锁着的和解锁的长得一模一样，而 `currentOutfitSlug` 是**静默回落**的 ——
+ * 用户点一下发现衣服没变，只能靠猜。列表又必须列全（否则新解锁的那套
+ * 永远没机会被发现），所以「区分」这件事只能靠视觉。
+ */
+.outfit-chip.locked {
+  border-style: dashed;
+  background: transparent;
+  color: var(--text-3);
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+.outfit-chip.locked:hover {
+  border-color: var(--border);
+  color: var(--text-3);
+}
+.outfit-chip.locked.active {
+  border-color: var(--border);
+  background: transparent;
+  color: var(--text-3);
+}
+
+/* ---------- 轮换池选择器 ---------- */
+
+/*
+ * 用比 outfit-chip 更弱的默认态：这一屏可能有 30+ 个格子（满级 10 动作 + 24 服饰），
+ * 全用和「换装」一样的强强调会让人以为这里也是「点一下就穿上」。
+ * 池子的语义是「参与轮换」，弱化是对的。
+ */
+.pool-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin: 8px 0;
+}
+.pool-group {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 5px;
+  margin-bottom: 8px;
+}
+.pool-group-title {
+  width: 34px;
+  flex: none;
+  font-size: 11.5px;
+  color: var(--text-3);
+}
+.pool-chip {
+  padding: 3px 8px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  background: transparent;
+  color: var(--text-3);
+  font-size: 11.5px;
+  line-height: 1.6;
+}
+.pool-chip:hover {
+  border-color: rgb(var(--theme-accent) / 0.5);
+  color: var(--text-2);
+}
+.pool-chip.active {
+  border-color: rgb(var(--theme-accent) / 0.65);
+  background: var(--theme-accent-soft);
+  color: rgb(var(--theme-accent));
+}
+
+/* ---------- 聊天背景 ---------- */
+
+/* 与上面的对话配置隔开：它是外观项，不是「能不能聊」的配置 */
+/*
+ * 同样不加 border-top —— 理由与上面的 `.field.danger` 一致：
+ * grid 是**多列**的，网格项上的边框只跨自己那一列，会变成半截横线。
+ * 靠间距和内容本身的视觉重量分区就够了。
+ */
+.bg-field {
+  padding-top: 4px;
+}
+.bg-modes {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.hint.warn {
+  color: #d97706;
+}
+
+.bg-pool {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 8px;
+}
+.bg-pool-item {
+  position: relative;
+  width: 64px;
+  height: 64px;
+  border-radius: 9px;
+  overflow: hidden;
+  border: 1px solid var(--border);
+}
+.bg-pool-item img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+.bg-pool-del {
+  position: absolute;
+  right: 3px;
+  top: 3px;
+  width: 18px;
+  height: 18px;
+  border: 0;
+  border-radius: 50%;
+  background: rgba(0, 0, 0, 0.55);
+  color: #fff;
+  font-size: 11px;
+  line-height: 1;
+  cursor: pointer;
+  display: grid;
+  place-items: center;
+}
+.bg-pool-del:hover {
+  background: rgba(220, 38, 38, 0.85);
+}
+
+/* ---------- 危险操作 ---------- */
+
+/*
+ * 刻意**不加 border-top**。
+ *
+ * 这里原来有一条 `border-top: 1px solid`，想跟上面的「恢复默认」隔开。
+ * 但 `.grid` 是 `repeat(auto-fill, minmax(240px, 1fr))` 的**多列**网格，
+ * 这个 field 只是其中一个网格项 —— 边框只跨自己那一列，
+ * 渲染出来是「半截横线」，看着像渲染故障而不是分隔线。
+ *
+ * 分隔由两件事提供了：网格自带的 16px 间距，以及红色按钮 + 红框警告块。
+ * 要真做分隔线，得让元素跨满整行（grid-column: 1 / -1），
+ * 但那样得为此单独加一个空元素，不值得。
+ */
+.field.danger {
+  padding-top: 4px;
+}
+.danger-warn {
+  margin: 8px 0;
+  padding: 10px 12px;
+  border-radius: 8px;
+  border: 1px solid rgb(220 38 38 / 0.4);
+  background: rgb(220 38 38 / 0.08);
+  font-size: 12px;
+  line-height: 1.7;
+  color: var(--text-2);
 }
 
 /* ---------- 人设编辑 ---------- */

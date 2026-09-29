@@ -10,7 +10,7 @@
 ;     误删了也会被绿色版下次启动的对账自愈
 ;   - 无升级逻辑：升级 = 先卸载再装（使用说明负责讲清）
 ;
-; 运行：npm run pack 先产出 release\摸鱼桌宠-win32-x64\，再 makensis scripts/installer.nsi
+; 运行：npm run pack:installer（先 build.js 产出 .tmp-release/ 暂存区，再 makensis）
 
 Unicode true
 !include "MUI2.nsh"

@@ -70,6 +70,17 @@ function installDeskShim() {
     pendingChanges: viaBus('sync:pending'),
     markSynced: viaBus('sync:mark'),
 
+    /* 维护：清空全部本地数据（不可恢复）—— stores/app.js 里是无 `?.` 直调，
+       漏登记就是 TypeError「backend.wipeAllData is not a function」，数据一点不清 */
+    wipeAllData: viaBus('data:wipeAll'),
+
+    /* 未读：她说了但我还没看的条数 / 对话窗获得焦点时打点已读 ——
+       漏登记则未读位置永不推进，红点永远消不掉。
+       `chatUnread` 目前渲染层还没有调用点，但 preload 与业务表都有，
+       shim 是它的 1:1 替代，缺一个就是一处静默的两端漂移。 */
+    chatUnread: viaBus('chat:unread'),
+    chatMarkRead: (sessionId) => viaBus('chat:markRead')(sessionId),
+
     /* 节假日 */
     holidayInfo: viaBus('holiday:info'),
     holidayMonth: (year, month) => viaBus('holiday:month')(year, month),
@@ -94,6 +105,8 @@ function installDeskShim() {
     chatDiagnose: viaBus('chat:diagnose'),
     chatSessions: viaBus('chat:sessions'),
     chatChatterLine: viaBus('chat:chatterLine'),
+    /* 主动找话题（落库 + 未读红点）—— 与 chatChatterLine 是两个独立功能 */
+    chatTopicLine: viaBus('chat:topicLine'),
     chatEnsureSession: viaBus('chat:ensure'),
     chatCreateSession: (title) => viaBus('chat:create')(title),
     chatRenameSession: (id, title) => viaBus('chat:rename')(id, title),

@@ -1,11 +1,18 @@
 /**
- * 打包脚本 —— 产出免安装的单文件 exe。
+ * 打包脚本 —— 产出可双击运行的 Electron 绿色版。
  *
  * 流程：vite build（渲染层）→ @electron/packager（Electron 运行时 + 源码）
- *      → rcedit 元信息 → 生成桌面快捷方式脚本
+ *      → 复制到交付区 → 压缩 zip
  *
  * 用法: node scripts/build.js
- * 产物: release/摸鱼桌宠-win32-x64/摸鱼桌宠.exe
+ *
+ * ## 产物（两种形态，同一次打包的同一份内容）
+ *
+ *   release/摸鱼桌宠-win32-x64/摸鱼桌宠.exe      散装目录 —— **双击即用**
+ *   release/electron/desk-pet-electron-<版本>-win-x64-portable.zip   分发用压缩包
+ *
+ * 散装目录是主要交付形态（拿到就能跑，不必先解压）；zip 给需要分发/传输的场合。
+ * 两者都在交付区，用户按需取用。
  */
 import { packager } from '@electron/packager'
 import { execFileSync } from 'node:child_process'
@@ -20,10 +27,12 @@ const APP_NAME = '摸鱼桌宠'
 /* 分发层统一英文规范名（产品显示层保持中文）：{产品}-{形态}-{版本}-{架构} */
 const VERSION = JSON.parse(readFileSync(join(ROOT, 'package.json'), 'utf8')).version
 /*
- * OUT_DIR 是暂存区（.tmp-release/，gitignored，在 release/ 之外）：绿色版交付物
- * 只有 zip，散装目录绝不能出现在交付区。放 release 外面还有个顺序原因——
- * pack:installer 链里 makensis 要从暂存区读文件，而 build.js 先跑且会压缩，
- * 暂存区放 release/ 内会「边交付边消失」。产物每次全量覆盖，可随手删除。
+ * OUT_DIR 是**打包暂存区**（`.tmp-release/`，gitignored，在 release/ 之外）。
+ *
+ * 为什么暂存区不放 release/ 里：pack:installer 链里 makensis 要从这里
+ * 读文件，而 build.js 先跑且会重写交付目录；放在 release/ 内会出现
+ * 「边交付边消失」。打包完会复制到交付区 `release/摸鱼桌宠-win32-x64/`，
+ * 暂存区本身只是中间产物，可随手删除。
  */
 const WORK_DIR = join(ROOT, '.tmp-release')
 const OUT_DIR = join(WORK_DIR, 'desk-pet-win-x64')
@@ -118,6 +127,34 @@ for (const dir of [RELEASE, WORK_DIR, DIST_DIR]) mkdirSync(dir, { recursive: tru
  */
 for (const stale of ['创建桌面快捷方式.vbs', '启动.bat', 'debug.log']) {
   rmSync(join(RELEASE, stale), { force: true })
+}
+
+/*
+ * 清掉**已废弃的旧产物**。
+ *
+ * 交付区里同时提供三种形态：
+ *   - `摸鱼桌宠-win32-x64/`  散装目录，双击 `摸鱼桌宠.exe` 即用（最直接）
+ *   - `electron/*.zip`       绿色版压缩包（分发用，体积小）
+ *   - `electron/*setup.exe`  安装器（pack:installer 产出）
+ * 外加 `README.txt`（使用说明）与 `tauri/`（Tauri 侧由 collect-release 归集）。
+ *
+ * 这里只删**确定已被取代**的东西：
+ *   - `使用说明.txt`  旧的文件名，内容与 `README.txt` 相同且已停更
+ *     （CI 也只上传 README.txt）；留两个名字会让人以为版本不同。
+ *   - `手机端启动器-win32-x64/`  已移到项目根的 `release-mobile/`
+ *     （它是本地便利产物，不随 Release 上传，混在交付区会让
+ *     「该发哪些文件」变含糊）。
+ *
+ * 用**明确名单**而不是白名单：白名单要求穷举「所有合法产物」，
+ * 一改布局就会把当前正在用的产物误删 —— 这正是上一版踩的坑
+ * （它把散装目录当成「旧布局」清掉了，而那恰是最常用的双击入口）。
+ */
+for (const stale of ['使用说明.txt', '手机端启动器-win32-x64']) {
+  const p = join(RELEASE, stale)
+  if (!existsSync(p)) continue
+  /* 走 removeOutDir：这两个都在交付区里，程序没退干净时会被锁住 */
+  removeOutDir(p)
+  console.log(`  -> 清掉已废弃产物: ${stale}`)
 }
 
 /*
@@ -218,6 +255,19 @@ async function runPackager(attempt) {
      */
     ignore: [
       /^\/release($|\/)/,
+      /*
+       * `release-mobile/` 必须单独列 —— `^\/release($|\/)` 的锚点紧跟在
+       * `release` 之后，**匹配不到 `release-mobile`**。
+       *
+       * 踩过：重构打包脚本时新增了这个顶级产物目录，只加进了 .gitignore，
+       * 漏了这里。后果是手机端启动器（200MB）整个被塞进 app.asar ——
+       * asar 从 44.8MB 涨到 369.8MB，绿色版 zip 从 174MB 涨到 305MB，
+       * 而**打包过程一声不吭**（packager 的 ignore 漏配不会报错）。
+       *
+       * 顺带说明为什么这类漏配很隐蔽：产物目录平时是空的或不存在，
+       * 本地连打几次都正常；只有「刚跑过 pack:mobile 再跑 pack」才会暴露。
+       */
+      /^\/release-mobile($|\/)/,
       /^\/\.git($|\/)/,
       /^\/\.gitignore$/,
       /^\/node_modules($|\/)/,
@@ -327,19 +377,94 @@ if (!exePath) throw new Error(`未找到可执行文件，已查找: ${exeCandid
    防护干扰出假错误，见上方 copyTree 注释） */
 copyFileSync(join(ROOT, 'scripts', 'release-readme.txt'), join(RELEASE, 'README.txt'))
 
+/*
+ * 把暂存区复制到交付区 —— **散装目录是主要交付形态**：
+ * 解压好的目录直接放 `release/摸鱼桌宠-win32-x64/`，双击 `摸鱼桌宠.exe` 就跑，
+ * 不需要先解压。zip 是「分发用」的压缩版，两者并存。
+ *
+ * 顺序：先复制，再压缩。压缩读的是交付区的目录（热数据已在页缓存里，
+ * 比重读暂存区快），而且复制完就可以把暂存区留到 pack:installer 用。
+ */
+const DELIVER_APP_DIR = join(RELEASE, `${APP_NAME}-win32-x64`)
+console.log(`  -> 复制到交付区: ${APP_NAME}-win32-x64/`)
+/*
+ * 必须走 removeOutDir，不能裸 rmSync。
+ *
+ * 这一步删的是**程序自己正在跑的那个目录** —— 用户多半是刚双击了上一版
+ * exe 来试功能，进程还活着，exe/asar 就被锁着，裸 rmSync 抛的是
+ * 一坨带乱码的原始 EPERM 堆栈（路径里的中文按控制台代码页打印，更没法看），
+ * 完全看不出「你得先退出程序」。
+ * removeOutDir 才会把它翻译成人话并列出占用进程的 PID。
+ */
+removeOutDir(DELIVER_APP_DIR)
+copyTree(OUT_DIR, DELIVER_APP_DIR)
+const deliveredExe = join(DELIVER_APP_DIR, basename(exePath))
+if (!existsSync(deliveredExe)) {
+  throw new Error(`交付区缺少可执行文件: ${deliveredExe}`)
+}
+console.log(`  -> 双击即用: ${join(`${APP_NAME}-win32-x64`, basename(deliveredExe))}`)
+
 /* ---------- 5. 压缩绿色版 ---------- */
 console.log('\n[5/5] 压缩绿色版 zip...')
-/* Compress-Archive 带 -Path <目录>（不带 \*），zip 内含 desk-pet-win-x64/
-   单层文件夹，解压不散一地。暂存区保留在 .tmp-release/（installer.nsi 要从
-   这里取文件），不进 release/ 交付区。 */
-run('powershell', [
-  '-NoProfile', '-Command',
-  `Compress-Archive -Path '${OUT_DIR}' -DestinationPath '${PORTABLE_ZIP}' -Force`,
-])
+/*
+ * Compress-Archive 带 -Path <目录>（不带 \*），zip 内含 desk-pet-win-x64/
+ * 单层文件夹，解压不散一地。暂存区保留在 .tmp-release/（installer.nsi 要从
+ * 这里取文件），不进 release/ 交付区。
+ *
+ * ## 为什么要重试 + 校验
+ *
+ * 本机实时防护会锁住刚写盘的未签名 exe/dll，`Compress-Archive` 遇到
+ * 「文件被占用」时报 `PermissionDenied`（实测 `vulkan-1.dll`），
+ * **但它仍然退出码 0** —— 于是脚本一路打印「打包完成」，
+ * 交付区里却是个空目录 / 半个 zip。这种「报成功实则啥也没有」
+ * 比直接失败危险得多：CI 会照常上传一个坏包。
+ *
+ * 所以这里两件事缺一不可：
+ *   ① 失败重试（给防护扫描留时间，与上面等文件锁同一个套路）
+ *   ② **校验产物真的存在且非空** —— 不信任 ExitCode
+ */
+const zipStep = () => {
+  /* 先删干净：半成品 zip 会让下面的体积校验误判为成功 */
+  rmSync(PORTABLE_ZIP, { force: true })
+  try {
+    /* 从**交付区**压缩，保证 zip 内容与散装目录逐字节一致
+       （两者都来自同一次打包，不存在「zip 是旧的」这种坑） */
+    run('powershell', [
+      '-NoProfile', '-Command',
+      `Compress-Archive -Path '${DELIVER_APP_DIR}' -DestinationPath '${PORTABLE_ZIP}' -Force -ErrorAction Stop`,
+    ])
+  } catch (e) {
+    /* -ErrorAction Stop 让它变成非零退出，从而被 execFileSync 抛出 */
+    console.warn(`  ! zip 失败（${e.message.split('\n')[0]}），将重试`)
+  }
+  if (!existsSync(PORTABLE_ZIP)) return 0
+  return readFileSync(PORTABLE_ZIP).length
+}
+
+const MIN_ZIP_BYTES = 10 * 1024 * 1024 /* 绿色版实测 ~180MB，10MB 只是「明显不对劲」的下限 */
+let zipBytes = 0
+for (let attempt = 1; attempt <= 3 && zipBytes < MIN_ZIP_BYTES; attempt++) {
+  if (attempt > 1) {
+    console.log(`  -> 第 ${attempt} 次尝试压缩…`)
+    await delay(3000)
+  }
+  zipBytes = zipStep()
+  if (zipBytes > 0 && zipBytes < MIN_ZIP_BYTES) {
+    console.warn(`  ! zip 只有 ${(zipBytes / 1048576).toFixed(1)}MB，明显偏小`)
+  }
+}
+if (zipBytes < MIN_ZIP_BYTES) {
+  throw new Error(
+    `绿色版 zip 压缩失败（产物 ${zipBytes} 字节，期望 ≥ ${MIN_ZIP_BYTES / 1048576}MB）。\n` +
+      `  最常见原因：实时防护锁住刚写盘的 exe/dll。可先把项目目录加入排除项再重试。`,
+  )
+}
+console.log(`  -> zip 就绪 ${(zipBytes / 1048576).toFixed(1)}MB`)
 
 console.log(`
 ========================================
  打包完成
 ========================================
- 绿色版 zip:  ${join('electron', `desk-pet-electron-${VERSION}-win-x64-portable.zip`)}
+ 双击即用:   ${APP_NAME}-win32-x64\\${APP_NAME}.exe
+ 绿色版 zip: ${join('electron', `desk-pet-electron-${VERSION}-win-x64-portable.zip`)}
 `)

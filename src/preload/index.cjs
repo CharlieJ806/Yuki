@@ -52,6 +52,13 @@ contextBridge.exposeInMainWorld('desk', {
   affinityAdd: (delta, opts) => invoke('affinity:add', delta, opts),
   affinityReset: () => invoke('affinity:reset'),
 
+  /* 维护：清空全部本地数据（不可恢复） */
+  wipeAllData: () => invoke('data:wipeAll'),
+
+  /* 未读：她说了但我还没看的条数（对话窗获得焦点时打点已读） */
+  chatUnread: () => invoke('chat:unread'),
+  chatMarkRead: (sessionId) => invoke('chat:markRead', sessionId),
+
   /* 人设 */
   personaList: () => invoke('persona:list'),
   personaCreate: (payload) => invoke('persona:create', payload),
@@ -65,6 +72,8 @@ contextBridge.exposeInMainWorld('desk', {
   chatDiagnose: () => invoke('chat:diagnose'),
   chatSessions: () => invoke('chat:sessions'),
   chatChatterLine: () => invoke('chat:chatterLine'),
+  /* 主动找话题（落库 + 未读红点），与 chatChatterLine 是两个独立功能 */
+  chatTopicLine: () => invoke('chat:topicLine'),
   chatEnsureSession: () => invoke('chat:ensure'),
   chatCreateSession: (title) => invoke('chat:create', title),
   chatRenameSession: (id, title) => invoke('chat:rename', id, title),
@@ -99,6 +108,8 @@ contextBridge.exposeInMainWorld('desk', {
   /* 窗口贴合：渲染层量内容尺寸，主进程右下角锚定重设窗口 */
   refitPet: (size) => invoke('pet:refit', size),
   resizePetMenu: (height) => invoke('menu:resize', height),
+  /* 对话旁立绘窗：换装面板展开时向上长高（底边锚定） */
+  resizeChatPet: (size) => invoke('chatpet:resize', size),
 
   /* 主进程 → 渲染进程 事件 */
   onEvent: (fn) => {

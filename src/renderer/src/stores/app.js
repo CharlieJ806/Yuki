@@ -41,6 +41,11 @@ const store = reactive({
   /* 亲密度：{ points, lastDay, streakDays, gainToday, max, isMax, sessionId } */
   affinity: { points: 0, lastDay: null, streakDays: 0, gainToday: 0, max: 0, isMax: false },
   /*
+   * 未读数：她说的、我还没看过的条数（由 getState 下发）。
+   * 桌宠据此显示红点；对话窗获得焦点时调 markChatRead() 清零。
+   */
+  unread: 0,
+  /*
    * 图鉴：{ sessionId, outfit: {..}, photo: {..} }
    * 每个会话一份（独立角色），所以拉取时必须带 sessionId。
    */
@@ -179,6 +184,16 @@ function createMockBackend() {
     affinityGet: async () => ({ points: 0, lastDay: null, streakDays: 0, gainToday: 0, max: 300, isMax: false }),
     affinityAdd: async (d) => ({ points: d ?? 0, lastDay: null, streakDays: 0, gainToday: 0, max: 300, isMax: false }),
     affinityReset: async () => ({ points: 0, lastDay: null, streakDays: 0, gainToday: 0, max: 300, isMax: false }),
+    /* 预览模式本来就没有真数据，清空即重置内存态 */
+    wipeAllData: async () => {
+      settings = { ...DEFAULT_SETTINGS }
+      checkins = []
+      mockSessions = [
+        { id: 'mock-default', title: '新的对话', createdAt: Date.now(), updatedAt: Date.now(), messageCount: 0 },
+      ]
+      mockMessages = []
+      return recompute()
+    },
     galleryGet: async () => null,
     sessionAffinity: async () => null,
     sessionGallery: async () => null,
@@ -248,6 +263,32 @@ export async function applyBackfill(fromKey) {
 }
 
 /**
+ * 把值转成能安全穿过 IPC 的纯对象。
+ *
+ * Vue 的 `reactive` 是**深**的：`reactive({...DEFAULT_SETTINGS}).chatBgPool`
+ * 拿到的是数组 Proxy，而 `{...form}` 只是浅展开 —— 顶层成了普通对象，
+ * 嵌套值仍然是 Proxy。Electron 的 `ipcRenderer.invoke` 走 structured clone，
+ * 遇到 Proxy 直接抛 `DataCloneError: An object could not be cloned.`
+ *
+ * 症状极有迷惑性：设置页点「保存」必失败，但**改哪个字段都一样失败**
+ * （真正决定成败的是有没有哪个值是对象/数组，而不是刚改的那一项）。
+ * 设置页的 `form` 里恰好有 `chatBgPool: []`，所以整页保存全废；
+ * 而对话窗的 `saveSettings({ outfitMode: 'auto' })` 全是原始值，一直正常 ——
+ * 于是看起来像「只有设置页坏了」，实际是调用方传的东西不同。
+ *
+ * 为什么用 JSON 往返而不是 `toRaw`：
+ *   - `toRaw` 只脱最外层，嵌套 Proxy 原样留着，治不了本；
+ *   - 设置本来就是逐项 `JSON.stringify` 存进 SQLite 的
+ *     （见 store.saveSettings），JSON 往返与落库表示完全一致，
+ *     不会引入「内存里是一种形状、存下去是另一种」。
+ */
+function plainForIpc(value) {
+  /* null 与原始值本来就可克隆，不必也不该走 JSON（JSON.parse(undefined) 会抛） */
+  if (value === null || typeof value !== 'object') return value
+  return JSON.parse(JSON.stringify(value))
+}
+
+/**
  * 保存设置。
  *
  * **必须显式带上活跃会话** —— 人设/穿着是逐会话的，不传的话主进程
@@ -258,11 +299,24 @@ export async function applyBackfill(fromKey) {
  */
 export async function saveSettings(patch, sessionId) {
   const sid = sessionId ?? store.activeSessionId ?? store.chat.sessionId ?? undefined
-  const next = await call('保存失败', () => backend.updateSettings(patch, sid), null)
+  /* 归一化放在这里而不是各个调用点：漏斗只有一处，Proxy 进不来 */
+  const safe = plainForIpc(patch)
+  const next = await call('保存失败', () => backend.updateSettings(safe, sid), null)
   if (next) applyState(next)
   /* 广播回来后 store.settings 会被覆盖，这里再拉一次当前会话的，
      避免「写进了 A，但界面显示的是 B 的值」 */
   if (sid) await refreshSessionSettings(sid)
+  /*
+   * 保存完就重算一次对话可用性。
+   *
+   * 为什么放在**保存这个动作**上，而不是靠 ChatApp 里 watch 某个字段变没变：
+   * `chatStatus` 的结果只存在 store.chat.status 里，而它是从
+   * `validateConfig(settings)` 算出来的 —— 决定结果的字段有 baseUrl / apiKey
+   * 两个，将来还可能加。按「值变了没有」去驱动刷新，等于把这份依赖清单
+   * 抄一遍，抄漏一个就是「配好了却说没配」。
+   * 挂在保存动作上则天然覆盖全部字段，也不依赖密钥是否下发到渲染层。
+   */
+  refreshChatStatus().catch(() => {})
   return !store.lastError
 }
 
@@ -270,6 +324,39 @@ export async function resetSettings() {
   const next = await call('重置失败', () => backend.resetSettings(), null)
   if (next) applyState(next)
   return !store.lastError
+}
+
+/**
+ * 清空全部本地数据 —— **不可恢复**。
+ *
+ * 清完之后要把前端这边一起拉回干净状态：服务端已经删光，
+ * 但 store 里还留着旧的打卡、图鉴、会话列表和亲密度，
+ * 表现会是「数据没了但面板上的数字还在」，
+ * 直到用户手动重启。所以这里主动刷一轮。
+ */
+export async function wipeAllData() {
+  const id = await call('清空失败', () => backend.wipeAllData(), null)
+  if (!id) return false
+  /*
+   * 成功与否**只看 wipe 这一步**，不看后面的刷新。
+   *
+   * 之前把 `return !store.lastError` 放在所有刷新之后，于是：
+   * 任何一次刷新失败/变慢 → 返回 false → 设置页不刷新表单、
+   * 提示文案也不显示，用户看到的是「按钮没反应、界面还是清空前的样子」，
+   * 而数据其实已经清掉了。这是最难排查的一类不一致。
+   *
+   * 刷新改成**不阻塞**：清空已经落库，界面晚几百毫秒追上没关系，
+   * 让它决定成败才是本末倒置。
+   */
+  store.checkins = []
+  store.gallery = null
+  store.lastUnlock = null
+  store.personas = []
+  Object.assign(store.chat, { sessions: [], sessionId: id, messages: [], streamText: '', streaming: false })
+  store.activeSessionId = id
+  /* 不 await：失败也不该把「已清空」这个事实变成失败 */
+  Promise.all([refresh(), refreshCheckins(), refreshChatSessions(), refreshSessionSettings(id)]).catch(() => {})
+  return true
 }
 
 export async function logMoyu(minutes) {
@@ -291,6 +378,11 @@ export function initBridge() {
     if (msg.event === 'state') applyState(msg.payload)
     /* 亲密度单独广播（对话记分不经过 state），不接的话界面要等下一次轮询 */
     if (msg.event === 'affinity' && msg.payload) store.affinity = msg.payload
+    /*
+     * 未读数单独广播 —— 她回复/主动搭话之后立刻更新红点，
+     * 不必等桌宠自己 15 秒轮询（实测那段滞后很明显）。
+     */
+    if (msg.event === 'unread' && msg.payload) store.unread = msg.payload.count ?? 0
     /*
      * 解锁广播。
      *
@@ -335,21 +427,81 @@ export function initBridge() {
     }
     if (msg.event === 'chat-done') {
       if (msg.payload.requestId === store.chat.requestId) {
-        store.chat.streaming = false
-        store.chat.streamText = ''
-        store.chat.requestId = null
+        /*
+         * 只在**没有待落地消息**时兜底撤占位。
+         *
+         * service 里 `chat`/`message` 是先于 `chat-done` emit 的，
+         * 正常路径下撤占位由「消息落地」负责（见下面的 enqueueMessage 回调）。
+         * 这里若无条件撤，就会抢在错峰队列前面把 liveText 清掉 ——
+         * 那正是「回复的瞬间看不见」的空窗。
+         */
+        if (!pendingQueue.length) settleStream()
+        else armSettleWatchdog()
       }
     }
     if (msg.event === 'chat' && msg.payload.type === 'message') {
       const { sessionId, message } = msg.payload
       if (sessionId === store.chat.sessionId) {
-        /* 流式占位在真正落库消息到达时清掉，避免重复显示 */
-        store.chat.streaming = false
-        store.chat.streamText = ''
-        if (!store.chat.messages.some((m) => m.id === message.id)) enqueueMessage(message)
+        /*
+         * 撤占位**必须等消息真的进了 messages**。
+         *
+         * 之前是「立刻清 streaming/streamText + 把消息丢进错峰队列」，
+         * 两者之间隔着 `wait` 毫秒：liveText 已经空了、消息还没 push，
+         * 于是整条回复消失一段再冒出来。
+         *
+         * 错峰队列本意是让**照片连发**一张张出现（间隔按 createdAt 差值），
+         * 但它用 `gap <= 3s` 当作「这是连发」的判据 ——
+         * 而模型流式回复常常就在 3 秒内完成，于是普通回复被误判成连发，
+         * 延迟最多 3 秒才显示。deepseek-flash 上很容易命中。
+         */
+        if (store.chat.messages.some((m) => m.id === message.id)) settleStream()
+        else enqueueMessage(message, settleStream)
       }
     }
   })
+}
+
+/**
+ * 撤掉流式占位（正在打字的那个气泡）。
+ *
+ * 只在「最终消息已经进了列表」或「确认没有消息会再来」时调用 ——
+ * 早撤一步就会露出一段既没有 liveText、也没有落库消息的空窗。
+ */
+function settleStream() {
+  store.chat.streaming = false
+  store.chat.streamText = ''
+  store.chat.requestId = null
+  if (settleWatchdog) {
+    window.clearTimeout(settleWatchdog)
+    settleWatchdog = null
+  }
+}
+
+/*
+ * 撤占位的**看门狗**。
+ *
+ * 为什么必须有：`streaming` 卡在 true 会让发送键**永久变成暂停键**，
+ * 用户再也发不出消息 —— 只能关掉对话窗重开。而撤占位依赖
+ * 「错峰队列把消息播完」，任何一环出问题（消息没落地、队列被吞、
+ * 事件顺序异常）都会把它永久挂住。
+ *
+ * 实测踩到过：`streaming` 一直为 true，那个没有时间戳的流式气泡
+ * 永远挂在那儿，发送键变成暂停键。
+ *
+ * 所以 `chat-done` 之后若队列还没播完，就上一道超时：
+ * 队列最长也就 STAGGER_MAX_MS 一跳，给足余量后**强制收尾**。
+ * 宁可偶尔早撤一次占位，也不能让界面卡死 —— 卡死是不可恢复的，
+ * 早撤只是少看半秒。
+ */
+let settleWatchdog = null
+
+function armSettleWatchdog() {
+  if (settleWatchdog) window.clearTimeout(settleWatchdog)
+  settleWatchdog = window.setTimeout(() => {
+    settleWatchdog = null
+    /* 只有还卡着才动手 —— 正常路径早就撤干净了 */
+    if (store.chat.streaming) settleStream()
+  }, STAGGER_MAX_MS + 1500)
 }
 
 /* ---------- 照片消息的「逐条出现」队列 ---------- */
@@ -366,18 +518,31 @@ export function initBridge() {
  * 只对**间隔很小**的相邻消息递延：正常对话两条消息可能隔几分钟，
  * 那种情况必须立刻显示（否则她会「迟到」几分钟才回话）。
  */
-const STAGGER_MAX_MS = 3000 /* 相邻两条 createdAt 差超过这个数，视为普通对话，不递延 */
+/*
+ * 导出是为了和主进程的 `REPLY_SEGMENT_GAP_MS` 对账（smoke 断言间隔 < 窗口）。
+ * 这两个常量跨模块，改了其中一个而另一个没跟上时不会报任何错，
+ * 症状是多段回复整段立即弹出、逐条冒出来的节奏消失。
+ */
+export const STAGGER_MAX_MS = 3000 /* 相邻两条 createdAt 差超过这个数，视为普通对话，不递延 */
 
 let pendingQueue = []
 let pendingTimer = null
 
-function enqueueMessage(message) {
-  pendingQueue.push(message)
+/**
+ * 入队一条待展示的消息。
+ *
+ * @param {object} message
+ * @param {() => void} [onLanded] 这条消息**真正 push 进数组之后**才调用。
+ *   用来把「撤流式占位」和「消息落地」绑成同一个时刻 ——
+ *   分开做就会露出一段两边都没有的空窗（见 settleStream 的注释）。
+ */
+function enqueueMessage(message, onLanded = null) {
+  pendingQueue.push({ message, onLanded })
   /*
    * 队列按 createdAt 排序 —— 消息从 IPC 来，顺序有保证，
    * 但延迟插队后仍以时间戳为准更稳。
    */
-  pendingQueue.sort((a, b) => (a.createdAt ?? 0) - (b.createdAt ?? 0))
+  pendingQueue.sort((a, b) => (a.message.createdAt ?? 0) - (b.message.createdAt ?? 0))
   pumpQueue(0)
 }
 
@@ -390,9 +555,28 @@ function pumpQueue(extraDelay) {
     pendingTimer = null
     if (!pendingQueue.length) return
 
-    const next = pendingQueue[0]
+    const entry = pendingQueue[0]
+    const next = entry.message
     const last = store.chat.messages[store.chat.messages.length - 1]
-    const gap = last ? (next.createdAt ?? 0) - (last.createdAt ?? 0) : 0
+    /*
+     * gap **只在「她连发」时才算** —— 上一条必须也是 assistant。
+     *
+     * 踩过的坑：原来无条件拿「数组最后一条」算差值，而待落地的第一条
+     * 前面排的正是**用户刚发的那条**。于是
+     *     gap = 回复的 createdAt − 用户消息的 createdAt = 整轮 API 往返耗时
+     * 模型 3 秒内答完时它就落进 `gap <= STAGGER_MAX_MS` 分支，
+     * 普通回复被误判成连发、被延迟最多 3 秒才显示 ——
+     * **而这期间流式气泡已经被撤掉，屏幕上就是「一闪就没了」。**
+     *
+     * 多段回复让这个窗口更明显：`createdAt` 是模型答完后才写的时间戳，
+     * gap 因此等于完整往返耗时，很容易卡在 3 秒以内。
+     *
+     * 连发递延只在**她自己的两条之间**才有意义，用户那条不该参与。
+     */
+    const gap =
+      last && last.role === 'assistant' && next.role === 'assistant'
+        ? (next.createdAt ?? 0) - (last.createdAt ?? 0)
+        : 0
     /*
      * gap <= 0：乱序或同毫秒（不该发生，落库已保证递增）→ 立即出。
      * gap >  STAGGER_MAX_MS：普通对话 → 立即出。
@@ -406,6 +590,8 @@ function pumpQueue(extraDelay) {
     }
     pendingQueue.shift()
     if (!store.chat.messages.some((m) => m.id === next.id)) store.chat.messages.push(next)
+    /* 落地回调必须在 push 之后 —— 顺序反了就等于没修 */
+    entry.onLanded?.()
     /* 出队一条后立刻看下一条（它可能与这条很近，需要继续递延） */
     if (pendingQueue.length) pumpQueue(1)
   }
@@ -418,9 +604,37 @@ function pumpQueue(extraDelay) {
 export function resetPhotoQueue() {
   pendingQueue = []
   if (pendingTimer) {
-    clearTimeout(pendingTimer)
+    window.clearTimeout(pendingTimer)
     pendingTimer = null
   }
+  if (settleWatchdog) {
+    window.clearTimeout(settleWatchdog)
+    settleWatchdog = null
+  }
+  /*
+   * 队列被丢弃 = 那些消息永远不会落地，挂在它们上面的 onLanded（撤占位）
+   * 也就永远不会跑。不补这一下，切会话后 streaming 会卡在 true，
+   * 输入框一直是禁用的（`canSend` 里有 !streaming）。
+   */
+  settleStream()
+}
+
+/* ---------- 未读 ---------- */
+
+/**
+ * 标记当前会话已读。
+ *
+ * 对话窗「获得焦点 / 重新可见」时调用 —— 那是「用户真的在看」的
+ * 最可靠信号。不用 onMounted：窗口只 hide 不销毁，不会再挂载。
+ *
+ * 打点后把 store 里的未读清零，并让主进程推一次 state
+ * （红点要立刻消失，不能等下一次轮询）。
+ */
+export async function markChatRead(sessionId) {
+  const sid = sessionId ?? store.chat.sessionId ?? store.activeSessionId ?? undefined
+  await call('标记已读失败', () => backend.chatMarkRead?.(sid), null)
+  store.unread = 0
+  return true
 }
 
 /* ---------- 对话 ---------- */
@@ -462,8 +676,8 @@ export async function openChatSession(id) {
   resetPhotoQueue()
   store.chat.sessionId = id
   store.chat.messages = data.messages ?? []
-  store.chat.streaming = false
-  store.chat.streamText = ''
+  /* 换会话 = 那个会话的流跟这里无关了，直接撤干净（含 requestId） */
+  settleStream()
   return data
 }
 
@@ -477,8 +691,7 @@ export async function newChatSession() {
     resetPhotoQueue()
     store.chat.sessionId = s.id
     store.chat.messages = []
-    store.chat.streaming = false
-    store.chat.streamText = ''
+    settleStream()
     await refreshChatSessions()
   }
   return s
@@ -511,9 +724,14 @@ export async function sendChat(text, images = []) {
     backend.chatSend?.({ sessionId: store.chat.sessionId, text: clean, requestId, images: pics }),
   )
   if (result?.sessionId && result.sessionId !== store.chat.sessionId) store.chat.sessionId = result.sessionId
-  /* 兜底：主进程事件丢失时也要解除 loading */
-  store.chat.streaming = false
-  store.chat.streamText = ''
+  /*
+   * 兜底：主进程事件丢失时也要解除 loading。
+   *
+   * 但**队列里还有消息待落地时不能撤** —— 那会抢在错峰队列前面把
+   * liveText 清掉，重新制造「消息还没进列表、占位已经没了」的空窗，
+   * 也就是「回复的瞬间看不见」。此时交给 onLanded 回调去撤。
+   */
+  if (!pendingQueue.length) settleStream()
   await refreshChatSessions()
   return result
 }
@@ -521,7 +739,12 @@ export async function sendChat(text, images = []) {
 export async function abortChat() {
   const id = store.chat.requestId
   if (!id) return false
-  store.chat.streaming = false
+  /*
+   * 用户主动取消：立刻撤占位，不等消息落地（不会有消息了）。
+   * 走 settleStream 而不是手写，是为了「清 streaming 只有一处」这条约束
+   * 能被 smoke 的源码断言盯住 —— 散着写必然有人漏掉 streamText/requestId。
+   */
+  settleStream()
   return call('取消失败', () => backend.chatAbort?.(id), false)
 }
 

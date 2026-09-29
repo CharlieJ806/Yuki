@@ -17,7 +17,7 @@
 | 渲染 | Vue 3 + Vite 6 | 单份产物按 `?route=` 挂 5 个应用（pet/panel/chat/chatpet/petmenu） |
 | 存储 | Electron `node:sqlite` / Tauri rusqlite 桥 | 两壳共用表结构，service 层全异步 |
 | 立绘 | 切好的透明 PNG | 由 AI 多格图切分；无 3D、无骨骼 |
-| 打包 | @electron/packager / tauri build | 免安装单文件 exe 或 NSIS 安装包 |
+| 打包 | @electron/packager / tauri build | 绿色版目录（双击即用）或 NSIS 安装包 |
 
 > Electron ≥ 37（Node 22+，`node:sqlite` 所需）；该要求只约束 Electron 壳。
 
@@ -29,7 +29,7 @@ npm install
 npm approve-scripts electron && npm approve-scripts esbuild && npm rebuild electron
 
 npm run dev      # 开发（Vite HMR + Electron）
-npm run pack     # 打包免安装 exe 到 release/
+npm run pack     # 打包 → release/摸鱼桌宠-win32-x64/（双击即用）
 npm test         # 冒烟 + 对话/SSE 测试
 ```
 

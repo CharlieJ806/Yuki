@@ -7,11 +7,11 @@ import { existsSync, readFileSync, mkdtempSync, readdirSync, rmSync } from 'node
 import { tmpdir } from 'node:os'
 import { join, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { createService } from '../src/main/service.js'
+import { createService, REPLY_SEGMENT_GAP_MS } from '../src/main/service.js'
 import { openStore } from '../src/main/store.js'
 import { toDateKey, isRestDay, levelOf, todaySnapshot, workDaysInMonth, timeContextFor, dayPartOf } from '../src/shared/moyu.js'
 import { isCacheFresh } from '../src/main/holiday.js'
-import { OUTFIT_STORIES } from '../src/shared/outfitStories.js'
+import { OUTFIT_STORIES, conditionUnlocks, OUTFIT_MIN_POINTS, outfitMinPoints } from '../src/shared/outfitStories.js'
 import { PHOTO_SLUGS, photoFiles } from '../src/shared/photoStories.js'
 import { GALLERY_KINDS, GALLERY_KEYS } from '../src/shared/gallery.js'
 import { pickChatBackground, rotateIntervalMs } from '../src/shared/chatBackground.js'
@@ -33,7 +33,8 @@ import {
   MAX_PHOTOS_PER_OUTFIT,
 } from '../src/shared/photoMessage.js'
 import { OUTFIT_LOOKS, ORIENTATIONS, PER_SHEET, PHOTO_SHOTS, buildSheetBody, shotsByOrient } from './gen-photos.js'
-import { normalizeForRequest, textOfContent } from '../src/shared/content.js'
+import { normalizeForRequest, textOfContent, splitReplySegments, livePreviewOf, MSG_SPLIT_TOKEN } from '../src/shared/content.js'
+import { SCHEMA, WIPE_TABLES } from '../src/shared/db-schema.js'
 import { resolveChatConfig } from '../src/main/chat.js'
 import { CHAT_PERSONAS, DEFAULT_SETTINGS } from '../src/shared/moyu.js'
 import {
@@ -43,6 +44,7 @@ import {
   affinityGain,
   AFFINITY_GAIN,
   AFFINITY_MAX_POINTS,
+  AFFINITY_LEVELS,
   AFFINITY_DAILY_CAP,
   AFFINITY_DECAY,
   affinityDecay,
@@ -53,10 +55,8 @@ import {
   idleIntervalScale,
   idlePosesFor,
   idleCandidatesFor,
-  outfitsFor,
   IDLE_POSES_BY_VOICE,
   OUTFITS,
-  OUTFITS_BY_VOICE,
   OUTFIT_SLUGS,
   DEFAULT_OUTFIT,
   outfitFile,
@@ -64,6 +64,16 @@ import {
   outfitInfo,
   poseImageFile,
   weightedPool,
+  pickRotation,
+  resolveRotationPool,
+  rotationCandidatesFor,
+  outfitUnlockTierName,
+  affinityView,
+  rotateDelayMs,
+  clampRotateMin,
+  ROTATE_MIN_MIN,
+  ROTATE_MIN_MAX,
+  DEFAULT_ROTATE_MIN,
   TIRED_POSE_WEIGHT,
   TIRED_POSES,
   contextualScene,
@@ -76,6 +86,8 @@ import {
   CHAT_ACTION_RULES,
   chatActionFor,
   IDLE_POSES,
+  ALL_IDLE_POSES,
+  IDLE_POSE_LABELS,
   sanitizeChatter,
   recentDialogueMessages,
 } from '../src/shared/interactions.js'
@@ -381,14 +393,21 @@ try {
     check('超长截断带省略号', sanitizeChatter('啊'.repeat(60)).endsWith('…'), true)
     check('截断后长度受控', sanitizeChatter('啊'.repeat(60), 10).length, 11)
 
-    /* ---------- 挂机姿态：随亲密度解锁，且每张图都要有文件 ---------- */
+    /* ---------- 挂机姿态：不再分档，一开始就全给 ---------- */
     {
       const voices = ['stranger', 'familiar', 'friend', 'close', 'intimate']
-      /* 越熟动作越多，必须单调不减 —— 这是「关系变近」的可见表现 */
+      /*
+       * 用户要求「动作初始全都可用」。
+       *
+       * 早先是按亲密档位阶梯解锁的（最低档只有 4 个动作），
+       * 现在每个档位都返回全集、且不再随关系变化。
+       * 动作本身没有「私密」语义 —— 打哈欠和比心不该分亲疏；
+       * 真正该按解锁走的是**服饰**那一侧。
+       */
       const counts = voices.map((v) => idlePosesFor(v).length)
-      check('姿态数量随亲密度递增', counts.every((n, i) => i === 0 || n >= counts[i - 1]), true)
-      check('最低档最少', counts[0], IDLE_POSES.length)
-      check('最高档最多', counts[counts.length - 1] > counts[0], true)
+      check('每档动作数一致（不再分档）', new Set(counts).size, 1)
+      check('初始就给全部动作', counts[0], ALL_IDLE_POSES.length)
+      check('全集含深夜那几张', ALL_IDLE_POSES.includes('yawn') && ALL_IDLE_POSES.includes('sleep'), true)
 
       /* 每个档位的池子都必须有对应图片，否则挂机时 404 */
       let poolFilesOk = true
@@ -407,7 +426,7 @@ try {
       }
       check('高档次集合包含低档', monotoneSets, true)
 
-      check('未知档位回落最低档', idlePosesFor('nope').length, IDLE_POSES.length)
+      check('未知档位也返回全集（不分档了）', idlePosesFor('nope').length, ALL_IDLE_POSES.length)
 
       /* 深夜/早八只显示这几个，不能出现精神头很足的动作 */
       check('深夜池是挂机池子集', TIRED_POSES.every((k) => idlePosesFor('intimate').includes(k)), true)
@@ -425,28 +444,19 @@ try {
       check('服饰文件名带 outfit 前缀', outfitFile(DEFAULT_OUTFIT).startsWith('yuki-outfit-'), true)
       check('服饰与动作命名空间不重叠', OUTFIT_SLUGS.some((s) => PET_EXPRESSIONS[s]) , false)
 
-      /* 解锁只增不减 */
-      const voices = ['stranger', 'familiar', 'friend', 'close', 'intimate']
-      const counts = voices.map((v) => outfitsFor(v).length)
-      check('服饰数量随亲密度递增', counts.every((n, i) => i === 0 || n >= counts[i - 1]), true)
-      check('刚认识不换装', counts[0], 0)
-      check('最熟悉解锁全部', counts[counts.length - 1], OUTFITS.length)
+      /*
+       * 服饰**不再按关系档位分层** —— 「能不能穿」由图鉴的已解锁清单决定
+       * （照片发过了才算），亲密度只决定「够不够格去触发」。
+       * 原来这里有一整组 outfitsFor 的档位断言，随那张手写表一起删了。
+       */
 
-      /* 高分档包含低分档全部服饰 */
-      let superset = true
-      for (let i = 1; i < voices.length; i++) {
-        const prev = outfitsFor(voices[i - 1])
-        for (const s of prev) if (!outfitsFor(voices[i]).includes(s)) superset = false
-      }
-      check('高档次集合包含低档（服饰）', superset, true)
-
-      check('未知档位服饰回落最低', outfitsFor('nope').length, 0)
-
-      /* 挂机候选 = 动作 + 服饰，且服饰带可辨识前缀 */
-      const intimate = idleCandidatesFor('intimate')
+      /* 挂机候选 = 动作 + 传入的已解锁服饰，且服饰带可辨识前缀 */
+      const intimate = idleCandidatesFor('intimate', OUTFIT_SLUGS)
       check('候选含动作', intimate.includes('snack'), true)
       check('候选含服饰且带前缀', intimate.includes(`outfit:${DEFAULT_OUTFIT}`), true)
-      check('候选总数 = 动作 + 服饰', intimate.length, idlePosesFor('intimate').length + outfitsFor('intimate').length)
+      check('候选总数 = 动作 + 服饰', intimate.length, idlePosesFor('intimate').length + OUTFIT_SLUGS.length)
+      /* 没给清单就没有服饰可换 —— 不是「回落到档位近似」 */
+      check('不给解锁清单就没有服饰', idleCandidatesFor('intimate').some((k) => k.startsWith('outfit:')), false)
 
       /* 候选 -> 文件名：前缀决定取图逻辑 */
       check('动作候选解析', poseImageFile('snack'), 'yuki-snack.png')
@@ -456,18 +466,32 @@ try {
       check('空候选回落默认', poseImageFile(''), expressionFile('idle'))
       check('未知名服饰回落默认', outfitFile('nope'), outfitFile(DEFAULT_OUTFIT))
 
-      /* 时间换装（未给解锁清单时的类别回落）：深夜/早晚在家穿睡衣，白天常服 */
+      /*
+       * 自动换装：**从已解锁池里随机，不看时段**。
+       *
+       * 早先是「时段适配表」（深夜睡衣 / 白天常服），用户明确要求改掉。
+       * 所以这里反过来断言：**任何时刻都可能穿到任何一套**，
+       * 包括凌晨穿 JK —— 那正是要的行为，不是 bug。
+       */
       const at = (h) => outfitForTime(new Date(2026, 8, 21, h, 0))
-      check('03:00 睡衣', at(3), 'pajamas')
-      check('23:30 睡衣', at(23), 'pajamas')
-      check('08:00 睡衣（在家）', at(8), 'pajamas')
-      check('21:00 睡衣（在家）', at(21), 'pajamas')
-      check('12:00 常服', at(12), DEFAULT_OUTFIT)
-      check('15:00 常服', at(15), DEFAULT_OUTFIT)
+      check('无解锁清单时回落默认', at(3), DEFAULT_OUTFIT)
+
       /* 任何时刻都必须返回合法 slug，否则界面会拿到 404 图 */
       let allValid = true
-      for (let h = 0; h < 24; h++) if (!OUTFIT_SLUGS.includes(at(h))) allValid = false
+      for (let h = 0; h < 24; h++) if (!OUTFIT_SLUGS.includes(outfitForTime(new Date(2026, 8, 21, h, 0), OUTFIT_SLUGS))) allValid = false
       check('24 小时都能返回合法服饰', allValid, true)
+
+      /*
+       * 不能有**时段偏向**：把所有时段扫一遍，应该出现多套而不是恒同一套。
+       * 这条是「不再跟随时间」的正面证据 —— 若哪天有人把时段适配加回来，
+       * 凌晨那批会退化成睡衣，这里就会红。
+       */
+      {
+        const fresh = OUTFIT_SLUGS.slice()
+        const seen = new Set()
+        for (let h = 0; h < 24; h++) seen.add(outfitForTime(new Date(2026, 8, 21, h, 0), fresh))
+        check('不同时片会换到不同套（真的在轮）', seen.size > 1, true)
+      }
 
       /*
        * 传入解锁清单时同样必须返回合法 slug。
@@ -484,11 +508,34 @@ try {
       }
       check('给了清单也必须返回合法服饰', badHours, [])
 
-      /* 同一小时内稳定（不闪），否则立绘会不停跳 */
-      const stable =
-        outfitForTime(new Date(2026, 8, 24, 14, 0), OUTFIT_SLUGS) ===
-        outfitForTime(new Date(2026, 8, 24, 14, 59), OUTFIT_SLUGS)
-      check('同一小时内换装稳定', stable, true)
+      /*
+       * **同一时间片内必须稳定**（不闪）。
+       *
+       * 这条最要紧：`outfitForTime` 是在 computed 里调的，每次依赖变化都会重算。
+       * 如果实现里用了 `Math.random()`，立绘和标签会在重渲染时乱跳 ——
+       * 那种 bug 只在界面上看得见，单测不写这条就防不住。
+       */
+      const slot = 30 * 60 * 1000
+      const t0 = new Date(2026, 8, 24, 14, 0, 0).getTime()
+      check('同一时间片内稳定', outfitForTime(new Date(t0), OUTFIT_SLUGS) === outfitForTime(new Date(t0 + slot - 1), OUTFIT_SLUGS), true)
+      /* 跨片才换 —— 用固定片长扫一整天，应出现多套 */
+      {
+        const seen = new Set()
+        for (let i = 0; i < 48; i++) seen.add(outfitForTime(new Date(t0 + i * slot), OUTFIT_SLUGS))
+        check('跨时间片会变', seen.size > 1, true)
+      }
+      /*
+       * 片长可覆盖（调用方想换更快的节奏时用）。
+       *
+       * 不能只断言「返回 string」—— 那个恒真，`slotMs` 整份忽略也照样绿
+       * （参数删掉、或实现里写死 30 分钟，都测不出来）。
+       * t0 = 14:00 起这 20 分钟**全落在同一个 30 分钟片内**：
+       * 传了片长则每一分钟都是一片，结果会出现多套；
+       * 忽略第三个参数时只会得到 1 个值。
+       */
+      const shortSlots = new Set()
+      for (let i = 0; i < 20; i++) shortSlots.add(outfitForTime(new Date(t0 + i * 60_000), OUTFIT_SLUGS, 60_000))
+      check('片长参数生效', shortSlots.size > 1, true)
 
       /* 返回的必须是**解锁池里的**那几套，不能跑到池外 */
       const small = ['jk', 'pajamas']
@@ -579,6 +626,590 @@ try {
         }
       }
       check('跨模块函数都已导入（防 ReferenceError）', badRefs, [])
+
+      /*
+       * 同一条纪律，推广到 @shared/interactions.js 的**全部**导出。
+       *
+       * 为什么必须单独加：上面那条只硬编码了 6 个 store 函数，
+       * 于是 `weightedPool` 漏导入活了下来 —— 它在深夜分支里被调用，
+       * 但没人跑得到（单测不渲染 .vue），Vite 也不报（自由变量在 ESM 里
+       * 只在**执行到**那一行才抛）。
+       * 症状是「每天 23:00–09:00 桌宠的挂机轮换整个停住」，
+       * 且因为异常抛在重排定时器**之前**，一次就再也接不上，
+       * 必须重启进程。靠人眼看 import 列表是防不住的。
+       */
+      const interactionsExports = Object.keys(await import('../src/shared/interactions.js'))
+      /* 渲染层里所有 .vue（不只上面那几个）都要查 */
+      const vueFiles = files.concat([
+        'src/renderer/src/chat/ChatPetApp.vue',
+        'src/renderer/src/components/Sidebar.vue',
+        'src/renderer/src/pet/PetMenu.vue',
+        'src/renderer/src/panel/PanelApp.vue',
+        'src/renderer/src/views/GalleryView.vue',
+        'src/renderer/src/views/HomeView.vue',
+        'src/renderer/src/views/LabView.vue',
+      ]).filter((f, i, a) => a.indexOf(f) === i && existsSync(join(root, f)))
+
+      const missingImports = []
+      for (const rel of vueFiles) {
+        const src = readFileSync(join(root, rel), 'utf8')
+        const m = /<script setup>([\s\S]*?)<\/script>/.exec(src)
+        let script = m ? m[1] : src
+        /* 去掉注释与字符串字面量，避免注释里的函数名被当成调用 */
+        script = script
+          .replace(/\/\*[\s\S]*?\*\//g, '')
+          .replace(/^\s*\/\/.*$/gm, '')
+          .replace(/`(?:[^`\\]|\\.)*`/g, '``')
+          .replace(/'(?:[^'\\\n]|\\.)*'/g, "''")
+          .replace(/"(?:[^"\\\n]|\\.)*"/g, '""')
+
+        const imported = new Set()
+        for (const im of script.matchAll(/import\s*\{([^}]+)\}/g)) {
+          for (const raw of im[1].split(',')) {
+            const name = raw.trim().split(/\s+as\s+/).pop().trim()
+            if (name) imported.add(name)
+          }
+        }
+        /* 本地声明过的名字（const/let/function）不算缺导入 */
+        const local = new Set()
+        for (const d of script.matchAll(/(?:const|let|function)\s+([A-Za-z_$][\w$]*)/g)) local.add(d[1])
+
+        for (const name of interactionsExports) {
+          const called = new RegExp(`(^|[^.\\w])${name}\\s*\\(?`, 'm').test(script)
+          if (called && !imported.has(name) && !local.has(name)) missingImports.push(`${rel}: ${name}`)
+        }
+      }
+      check('interactions 导出用而未导入（防 ReferenceError）', missingImports, [])
+    }
+
+    /* ---------- 对话窗必须在配置变化时重拉状态 ---------- */
+    {
+      /*
+       * `chatStatus` 只算一次存在 `store.chat.status` 里，而设置保存广播的
+       * `state` **不含** chat.status（getState 没有这个字段）。
+       * 窗口又是「只 hide 不销毁」的，重新打开走 `chatWindow.show()`
+       * 而**不重新加载页面**，`onMounted` 不会再跑。
+       *
+       * 于是有条极隐蔽的断链：开着对话窗 → 去设置填 API Key → 回来
+       * → 对话窗仍以为没填，`status.ready` 为假 → **输入框整个被禁用**，
+       * 表现成「明明填了却说未填写，而且打不了字」。
+       *
+       * 这条断言把「watch 列表要覆盖 validateConfig 的判定依据」钉住：
+       * 将来 validateConfig 新增一个决定 ok 的设置项时，这里会红。
+       */
+      const chatPath = join(dirname(fileURLToPath(import.meta.url)), '..', 'src/renderer/src/chat/ChatApp.vue')
+      const chatSrc = readFileSync(chatPath, 'utf8')
+      const chatWatch = /watch\(\s*\(\)\s*=>\s*\[([\s\S]*?)\]/.exec(chatSrc)
+      const watched = chatWatch ? chatWatch[1] : ''
+      /* validateConfig 判 ok/reason 只看这两个；chatModel 决定标题文案 */
+      const notWatched = ['chatApiKey', 'chatBaseUrl', 'chatModel'].filter((k) => !watched.includes(k))
+      check('对话窗监听了决定可用性的设置', notWatched, [])
+      /*
+       * 注意要连 `addEventListener('` 一起匹配：ChatApp 的**注释里**就出现过
+       * `visibilitychange` 这个词，只测裸词的话监听真被删掉也照样绿。
+       */
+      check('对话窗在窗口重新可见时也刷新', /addEventListener\('visibilitychange'/.test(chatSrc), true)
+      /* 只挂 visibilitychange 不够：Chromium 在 hide/show 路径上不保证派发它，
+         而 createChatWindow 对已存在窗口做的是 show()+focus() */
+      check('对话窗在窗口重新聚焦时也刷新', /addEventListener\('focus'/.test(chatSrc), true)
+      check(
+        '设置保存后主动重算对话可用性',
+        /refreshChatStatus\(\)\.catch\(\(\) => \{\}\)/.test(readFileSync(join(dirname(fileURLToPath(import.meta.url)), '..', 'src/renderer/src/stores/app.js'), 'utf8')),
+        true,
+      )
+    }
+
+    /* ---------- 流式占位不能早撤 ---------- */
+    {
+      /*
+       * 「回复的瞬间看不见」的根因是一条**时序**约束：
+       * 撤掉 liveText 占位和「最终消息 push 进 messages」必须是同一个时刻。
+       * 分开做就露出一段两边都没有的空窗。
+       *
+       * 这条约束没法用普通单测覆盖（在渲染层、依赖事件时序），
+       * 所以用源码级断言把结构钉住 —— 这个仓库已有同类先例
+       * （导入守卫、广播窗口守卫）。
+       */
+      const storeSrc = readFileSync(join(dirname(fileURLToPath(import.meta.url)), '..', 'src/renderer/src/stores/app.js'), 'utf8')
+
+      /* 清 streaming 的地方只能有一处（settleStream），否则必然有人抢跑 */
+      const clearSites = [...storeSrc.matchAll(/store\.chat\.streaming\s*=\s*false/g)].length
+      check('撤流式占位只有一处', clearSites, 1)
+
+      /* 那唯一一处必须在 settleStream 里 */
+      const settleFn = /function settleStream\(\)\s*\{([\s\S]*?)\n\}/.exec(storeSrc)
+      check('撤占位集中在 settleStream', Boolean(settleFn) && /streaming\s*=\s*false/.test(settleFn[1]), true)
+
+      /* 入队要能带落地回调 */
+      check('enqueueMessage 支持落地回调', /function enqueueMessage\(message, onLanded/.test(storeSrc), true)
+
+      /*
+       * 回调必须在 push **之后** —— 顺序反了等于没修，
+       * 而且是那种「看起来改了、实际没生效」的错。
+       */
+      const pushIdx = storeSrc.indexOf('store.chat.messages.push(next)')
+      const cbIdx = storeSrc.indexOf('entry.onLanded?.()')
+      check('落地回调排在 push 之后', pushIdx >= 0 && cbIdx > pushIdx, true)
+
+      /* chat-done 的兜底不能无条件撤 */
+      check('chat-done 兜底受队列长度约束', /if \(!pendingQueue\.length\) settleStream\(\)/.test(storeSrc), true)
+    }
+
+    /* ---------- 两端图鉴的「看大图」必须都是全屏 ---------- */
+    {
+      /*
+       * 桌面端原来是一张 **380px 窄卡片里最高 300px** 的图，移动端却是全屏 ——
+       * 同一个功能两端观感差一大截，用户会问「为什么这边看不清」。
+       *
+       * 这条断言把「查看大图 = 全屏」钉住：谁把其中一端改回小卡片，这里就红。
+       * 只断言**全屏**这个本质，不管具体用 flex 还是 grid、有没有工具条 ——
+       * 那些是实现细节，各端本来就该按平台习惯不同。
+       */
+      const rroot = join(dirname(fileURLToPath(import.meta.url)), '..')
+      const desktopGallery = readFileSync(join(rroot, 'src/renderer/src/views/GalleryView.vue'), 'utf8')
+      const mobileCss = readFileSync(join(rroot, 'mobile/style.css'), 'utf8')
+
+      /* 抓 `.viewer { ... }` 规则体 */
+      const ruleBody = (src, sel) => {
+        const m = new RegExp(`\\${sel}\\s*\\{([^}]*)\\}`).exec(src)
+        return m ? m[1] : ''
+      }
+      const isFullscreen = (body) => /position:\s*fixed/.test(body) && /inset:\s*0/.test(body)
+
+      check('桌面图鉴查看器是全屏', isFullscreen(ruleBody(desktopGallery, '.viewer')), true)
+      check('移动图鉴查看器是全屏', isFullscreen(ruleBody(mobileCss, '.viewer')), true)
+
+      /*
+       * 图必须能吃到整个图区高度。
+       * `max-height: 100%` 而不是写死 px —— 写死就是「小图」的根因。
+       */
+      check('桌面大图不限死高度', /max-height:\s*100%/.test(ruleBody(desktopGallery, '.viewer-img')), true)
+      check('移动大图不限死高度', /max-height:\s*100%/.test(ruleBody(mobileCss, '.viewer-img')), true)
+
+      /* 桌面是键鼠环境，Esc / 方向键该能用 */
+      check('桌面查看器支持 Esc 关闭', /key === 'Escape'/.test(desktopGallery), true)
+      check('桌面查看器支持方向键翻页', /ArrowLeft/.test(desktopGallery) && /ArrowRight/.test(desktopGallery), true)
+      /* 键盘监听必须解绑，否则反复进出图鉴页会累积监听 */
+      check('键盘监听有解绑', /removeEventListener\('keydown'/.test(desktopGallery), true)
+    }
+
+    /* ---------- 手机端聊天背景不能再用 attachment:local ---------- */
+    {
+      /*
+       * 实测（CDP 在真实页面上量的）：`.msgs` 可见高 604px、可滚动内容 4266px。
+       * `background-attachment: local` 会把「背景定位区」变成**可滚动溢出区**，
+       * 而 `cover` 按定位区缩放 —— 照片被放大 7 倍，只剩一块无法辨认的色块。
+       *
+       * 顺带：原来那层 `::before` 遮罩是滚动容器内的绝对定位元素，
+       * **会跟着内容一起滚**（实测滚 300px、遮罩位移 300px），
+       * 所以聊天一长下半段就没遮罩了。现在遮罩并进背景层解决。
+       *
+       * 这条断言把两个坑都钉住：不能再出现 `local`，且遮罩必须还在
+       * （并进背景层，用 color-mix 生成半透明底色渐变）。
+       */
+      const mroot = join(dirname(fileURLToPath(import.meta.url)), '..')
+      const mcss = readFileSync(join(mroot, 'mobile/style.css'), 'utf8')
+      const body = (() => {
+        const m = /\.msgs\.has-bg\s*\{([^}]*)\}/.exec(mcss)
+        return m ? m[1] : ''
+      })()
+      check('聊天背景不用 attachment:local', /background-attachment:\s*local/.test(body), false)
+      check('聊天背景遮罩并进背景层', /linear-gradient\(var\(--bg-mask\)/.test(body), true)
+      check('遮罩色由 color-mix 生成', /color-mix\(/.test(body), true)
+      /* 遮罩 alpha 必须跟随 --bg-opacity，否则「背景浓淡」滑杆会失效 */
+      check('遮罩 alpha 跟随 --bg-opacity', /--bg-opacity/.test(body), true)
+    }
+
+    /* ---------- 多段回复的拆分 ---------- */
+    {
+      /*
+       * 跨模块的两个字面量必须守住不等式。
+       *
+       * 主进程落库时按 `REPLY_SEGMENT_GAP_MS` 把相邻两条的时间戳错开，
+       * 渲染层的错峰队列按 `STAGGER_MAX_MS` 判定「这是她在连发」并递延显示。
+       * 间隔一旦不小于窗口，每条都会被当成「普通对话」立即弹出 ——
+       * 多段回复的逐条出现彻底失效，而两侧单独看都完全正常、不报任何错。
+       * 实测把 1200 改成 5000，原有那批断言依旧全绿，所以必须专门钉住。
+       *
+       * `stores/app.js` 是 Vue 渲染层模块（`import { reactive } from 'vue'` +
+       * `@shared` 别名），smoke 在 Node 里 import 不了，只能读源码抽数字：
+       * 常量改名/删掉时正则抽不到 → `NaN` → 下面第一条直接红，不会静默放过。
+       */
+      {
+        const appStoreSrc = readFileSync(join(ROOT, 'src/renderer/src/stores/app.js'), 'utf8')
+        const staggerMatch = /export const STAGGER_MAX_MS\s*=\s*(\d+)/.exec(appStoreSrc)
+        const staggerMaxMs = staggerMatch ? Number(staggerMatch[1]) : NaN
+        check('渲染层错峰窗口可读', Number.isFinite(staggerMaxMs), true)
+        check('分段间隔必须落在错峰窗口内', REPLY_SEGMENT_GAP_MS < staggerMaxMs, true)
+      }
+
+      /*
+       * 她可以一次生成、按多条发出。拆分的**兼容底线**是：
+       * 没有标记时必须原样返回一条 —— 模型不听话、或用户用自定义人设
+       * 没写这条指令时，行为要和以前一模一样。
+       */
+      check('无标记时原样一条', splitReplySegments('哈哈哈你好呀'), ['哈哈哈你好呀'])
+      check('空输入返回空数组', splitReplySegments(''), [])
+      check('纯空白返回空数组', splitReplySegments('   \n  '), [])
+
+      check('两段拆分', splitReplySegments(`甲${MSG_SPLIT_TOKEN}乙`), ['甲', '乙'])
+      check('三段拆分', splitReplySegments(`甲${MSG_SPLIT_TOKEN}乙${MSG_SPLIT_TOKEN}丙`), ['甲', '乙', '丙'])
+      /* 模型偶尔会连发标记，空段必须丢掉，否则会出现空气泡 */
+      check('丢弃空段', splitReplySegments(`甲${MSG_SPLIT_TOKEN}${MSG_SPLIT_TOKEN}乙`), ['甲', '乙'])
+      check('首尾标记不产生空段', splitReplySegments(`${MSG_SPLIT_TOKEN}甲${MSG_SPLIT_TOKEN}`), ['甲'])
+      check('全是标记则返回空', splitReplySegments(`${MSG_SPLIT_TOKEN}${MSG_SPLIT_TOKEN}`), [])
+      /* 每段 trim —— 模型常在标记两侧留换行 */
+      check('分段后 trim', splitReplySegments(`甲  \n${MSG_SPLIT_TOKEN}\n  乙`), ['甲', '乙'])
+      /* 上限：超过 4 段只取前 4，防止刷屏 */
+      const many = ['1', '2', '3', '4', '5', '6'].join(MSG_SPLIT_TOKEN)
+      check('超过上限只取前 4 段', splitReplySegments(many).length, 4)
+      check('上限可覆盖', splitReplySegments(many, 2).length, 2)
+
+      /*
+       * 拆条**落库**：一次生成产出 N 条，且相邻 `createdAt` 差值正好 = 分段间隔。
+       *
+       * 只有 `splitReplySegments` 的纯函数单测是不够的 —— 拆出来之后
+       * service 是否真按 GAP 逐条写库、写库后时间戳有没有保住，
+       * 才是「一条条冒出来」能否成立的关键（渲染层就是按这个差值排队的）。
+       * `sendChat` 要真实 LLM，跑不了，于是分两段验：
+       *   ① 源码级：service 的落库循环确实在用 `baseTs + i * REPLY_SEGMENT_GAP_MS`
+       *   ② 数据级：按同一公式写进真库，条数与差值都读得回来
+       * ① 挡住「公式被搬出循环」，② 挡住「store 层把时间戳吃掉了」。
+       */
+      {
+        const segSrc = readFileSync(join(ROOT, 'src/main/service.js'), 'utf8')
+        /*
+         * 变量名**不固定**成 `segments`：那段代码要先做「分段全空回落原文」
+         * （`const parts = segments.length ? segments : [result.content]`），
+         * 循环体遍历的是 `parts`。断言真正的不变量 —— **时间戳公式** ——
+         * 而不是某个局部变量叫什么，否则重构一次就误报一次。
+         */
+        const segLoop = /for \(const \[i, \w+\] of \w+\.entries\(\)\)\s*\{[^}]*createdAt:\s*baseTs \+ i \* REPLY_SEGMENT_GAP_MS/.exec(segSrc)
+        check('service 按分段间隔逐条落库', Boolean(segLoop), true)
+        /* 分段全空必须回落原文，否则她的回复会凭空消失（两端都要有） */
+        check('service 分段全空回落原文', /segments\.length \? segments : \[result\.content\]/.test(segSrc), true)
+
+        const segDir = mkdtempSync(join(tmpdir(), 'desk-seg-'))
+        const segStore = openStore(join(segDir, 'seg.db'))
+        const segSvc = createService(segStore)
+        const segSid = (await segSvc.ensureChatSession()).id
+        const segments = splitReplySegments(`甲${MSG_SPLIT_TOKEN}乙${MSG_SPLIT_TOKEN}丙`)
+        const baseTs = Date.now()
+        for (const [i, seg] of segments.entries()) {
+          await segStore.addMessage(segSid, 'assistant', seg, { createdAt: baseTs + i * REPLY_SEGMENT_GAP_MS })
+        }
+        const stored = (await segStore.listMessages(segSid)).filter((mm) => mm.role === 'assistant')
+        check('三段回复落库成三条', stored.length, segments.length)
+        check('相邻时间戳差值 = 分段间隔', stored.slice(1).map((mm, i) => mm.createdAt - stored[i].createdAt), [
+          REPLY_SEGMENT_GAP_MS,
+          REPLY_SEGMENT_GAP_MS,
+        ])
+        await segSvc.close()
+      }
+
+      /*
+       * 流式预览必须**截到第一个标记为止** —— 否则生成过程中
+       * 用户会在气泡里看到 `甲<<<MSG>>>乙` 这种原始文本，
+       * 标记直接暴露，生成完又重排一次，观感很跳。
+       */
+      check('预览无标记时是全文', livePreviewOf('哈哈哈你好呀'), '哈哈哈你好呀')
+      check('预览截到第一个标记', livePreviewOf(`甲${MSG_SPLIT_TOKEN}乙`), '甲')
+      check('预览只有标记时为空', livePreviewOf(`${MSG_SPLIT_TOKEN}乙`), '')
+      check('预览空输入为空', livePreviewOf(''), '')
+
+      /* 拆出来的段拼回去应等于去掉标记的原文（不丢字） */
+      const original = '第一句。' + MSG_SPLIT_TOKEN + '第二句！'
+      check('拆分不丢内容', splitReplySegments(original).join(''), '第一句。第二句！')
+    }
+
+    /* ---------- 惹她生气必须是**净负** ---------- */
+    {
+      /*
+       * 一轮对话被拆成两次结算：
+       *   chatMessage(+2) —— 带上 upsetting
+       *   chatRound(+3)   —— 聊完的额外一笔
+       *
+       * 踩过的坑：第二轮没带 upsetting，于是「先扣 2 再加 3」净 **+1**，
+       * **骂她反而涨亲密度**。`settleAffinity` 里「生气当次加分清零」
+       * 本身是对的，但抵消发生在两次调用**之间**，函数内部管不着。
+       * 所以两端的调用点都得用同一个 `upsetting` 挡住 chatRound。
+       */
+      const base = { points: 100, lastActive: '2026-09-24', lastDay: '2026-09-24', gainDay: '2026-09-24', gainToday: 0 }
+
+      const afterMsg = settleAffinity(base, {
+        today: '2026-09-24',
+        delta: AFFINITY_GAIN.chatMessage,
+        upsetting: true,
+      })
+      check('惹她生气当次是净负', afterMsg.points < base.points, true)
+      check('扣的量正好是 UPSET', base.points - afterMsg.points, AFFINITY_DECAY.UPSET)
+
+      /* 同一轮若再补一笔 chatRound，就会把扣的分加回来 —— 这就是那个 bug 的形态 */
+      const wrong = settleAffinity(afterMsg, { today: '2026-09-24', delta: AFFINITY_GAIN.chatRound })
+      check('补记 chatRound 会抵消掉扣分（所以要挡住）', wrong.points > afterMsg.points, true)
+
+      const normal = settleAffinity(base, { today: '2026-09-24', delta: AFFINITY_GAIN.chatMessage })
+      check('正常一轮是净正', normal.points > base.points, true)
+
+      /*
+       * 源码级守卫：两端的 chatRound 都必须在 `upsetting` 为假时才记。
+       * 纯函数测不到调用点 —— 而 bug 恰恰出在调用点。
+       *
+       * 必须绑到**块体**上，不能只测「文件里出现过 `!isUpsetting(text)`」：
+       * 把那笔 `addAffinity(AFFINITY_GAIN.chatRound, …)` 挪到 if 之外，
+       * 字符串照样在、断言照样绿，而毛病（骂她还涨点）就回来了。
+       * 所以用 `[^}]*` 卡住「中间不能有关闭括号」，保证它真在同一个块里。
+       */
+      for (const f of ['../src/main/service.js', '../mobile/chat.js']) {
+        const src = readFileSync(new URL(f, import.meta.url), 'utf8')
+        const ok = /if \(!isUpsetting\(text\)\)\s*\{[^}]*AFFINITY_GAIN\.chatRound[^}]*\}/
+          .test(src) || /if \(!upsetting\)\s*await bumpAffinity\('chatRound'/.test(src)
+        check(`${f.split('/').pop()} 的 chatRound 受 upsetting 约束`, ok, true)
+      }
+
+      /* 口径：骂她的话要认得出；诉苦的话不能（误扣比漏判更糟） */
+      check('骂她会被认出来', isUpsetting('讨厌你'), true)
+      check('诉苦不算骂她', isUpsetting('今天好委屈'), false)
+      check('自己的情绪不算骂她', isUpsetting('烦死了'), false)
+    }
+
+    /* ---------- 解锁门槛只有一个来源 ---------- */
+    {
+      /*
+       * 用户的解锁逻辑：**亲密度达标 + 对话触发场景 → 发照片 → 解锁衣服**。
+       * 其中「亲密度达标」对所有解锁类型都必须成立。
+       *
+       * 踩过的坑：`conditionUnlocks` 原来读的是故事对象自己的
+       * `condition.minPoints`，而 `pajamas` 那条写的是 `{hoursAfter:23}`、
+       * 压根没有 minPoints 字段 —— 于是**过了 23 点就无条件送睡裙**，
+       * 哪怕亲密度是 0，而表里它标的是 300（最私密那一档）。
+       *
+       * 根因是门槛有两个来源。现在统一到 `OUTFIT_MIN_POINTS`。
+       */
+      const lowNight = conditionUnlocks({ points: 0, hour: 23, isRestDay: false }, [])
+      check('低亲密度深夜不解锁睡裙', lowNight.includes('pajamas'), false)
+
+      const highNight = conditionUnlocks(
+        { points: OUTFIT_MIN_POINTS.pajamas, hour: 23, isRestDay: false },
+        [],
+      )
+      check('亲密度够+深夜才给睡裙', highNight.includes('pajamas'), true)
+
+      /* 亲密度够了但时段不对，仍然不给 —— 两个条件必须同时成立 */
+      const highDay = conditionUnlocks({ points: OUTFIT_MIN_POINTS.pajamas, hour: 12, isRestDay: false }, [])
+      check('亲密度够但非深夜不给睡裙', highDay.includes('pajamas'), false)
+
+      /* jk 是基准装扮：门槛 0，第一轮对话就该给 */
+      check('基准装扮无条件给', conditionUnlocks({ points: 0, hour: 12, isRestDay: false }, []).includes('jk'), true)
+      check('已解锁的不再给', conditionUnlocks({ points: 0, hour: 12, isRestDay: false }, ['jk']).includes('jk'), false)
+
+      /*
+       * 防回流：故事对象里**不许再出现 `condition.minPoints`**。
+       * 它已经无人读取，留着就是第二个真相源 —— 下次有人改它，
+       * 会以为生效了，实际一点用没有。
+       */
+      const offenders = Object.entries(OUTFIT_STORIES)
+        .filter(([, d]) => d.condition && 'minPoints' in d.condition)
+        .map(([slug]) => slug)
+      check('故事对象里没有第二个门槛来源', offenders, [])
+
+      /*
+       * 每个 condition 类故事都必须真的登记在门槛表里。
+       *
+       * 不能断言 `Number.isFinite(outfitMinPoints(slug))` —— 它内部是
+       * `OUTFIT_MIN_POINTS[slug] ?? 0`，对**任何** slug 都恒 true：
+       * 新增一个 condition 类故事却忘了进表，门槛会静默变成 0（等于白送），
+       * 而这条旧断言只会继续绿。
+       */
+      const condMissing = Object.entries(OUTFIT_STORIES)
+        .filter(([, d]) => d.unlock === 'condition')
+        .map(([slug]) => slug)
+        .filter((slug) => !(slug in OUTFIT_MIN_POINTS))
+      check('condition 类的门槛都能查到', condMissing, [])
+    }
+
+    /* ---------- 未读：她说了但我还没看 ---------- */
+    {
+      const udir = mkdtempSync(join(tmpdir(), 'desk-unread-'))
+      const ustore = openStore(join(udir, 'u.db'))
+      const usvc = createService(ustore)
+
+      const sid = (await usvc.ensureChatSession()).id
+
+      check('新会话未读为 0', await usvc.unread(), 0)
+
+      /* 我自己发的不算未读 —— 只数 assistant */
+      ustore.addMessage(sid, 'user', '在吗')
+      check('用户消息不算未读', await usvc.unread(), 0)
+
+      ustore.addMessage(sid, 'assistant', '在的呀')
+      ustore.addMessage(sid, 'assistant', '刚下课')
+      check('她说的算未读', await usvc.unread(), 2)
+
+      await usvc.markChatRead(sid)
+      check('读过之后未读清零', await usvc.unread(), 0)
+
+      /*
+       * 关键回归：多段回复的时间戳是**未来时间**（now + i×间隔）提前写好的。
+       * 已读位置若取 `Date.now()`，这些消息会被判成「还没发生」而继续算未读
+       * —— 表现是「点开对话窗红点也不消失」。所以必须取**最新消息的时间戳**。
+       */
+      ustore.addMessage(sid, 'assistant', '未来时间戳', { createdAt: Date.now() + 5000 })
+      check('未来时间戳算未读', await usvc.unread(), 1)
+      await usvc.markChatRead(sid)
+      check('读过未来时间戳也清零', await usvc.unread(), 0)
+
+      /* 反复打点不能把已读位置往回退（多窗口竞争） */
+      const before = await usvc.markChatRead(sid)
+      const again = await usvc.markChatRead(sid)
+      check('重复标已读不回退', again >= before, true)
+
+      ustore.close()
+      rmSync(udir, { recursive: true, force: true })
+    }
+
+    /* ---------- ref / computed 在 script 里必须带 .value ---------- */
+    {
+      /*
+       * 踩过的坑：`computed(() => { if (!status.ready) ... })`。
+       *
+       * `status` 是 ComputedRef 对象，`<script setup>` 里**没有**模板那层
+       * 自动解包，所以 `status.ready` 恒为 undefined —— `!undefined` 恒真，
+       * 那个 computed 永远返回「未配置」分支，用户看到的是
+       * 「明明配好了 Key，输入框一直说未配置」。
+       *
+       * 为什么难发现：**同一个名字在模板里是对的**（模板自动解包），
+       * 于是同一个元素上 `:disabled="!status.ready"` 正常、只有 placeholder 坏，
+       * 看起来像响应式失效，而不是「少写了 .value」。
+       *
+       * 这条静态检查：把顶层的 ref/computed 名字收集起来，
+       * 在 <script setup> 里凡是 `名字.属性` 且不是 `名字.value` 的都报出来。
+       */
+      const vueFiles = [
+        'src/renderer/src/chat/ChatApp.vue',
+        'src/renderer/src/chat/ChatPetApp.vue',
+        'src/renderer/src/pet/PetApp.vue',
+        'src/renderer/src/pet/PetMenu.vue',
+        'src/renderer/src/pet/MenuApp.vue',
+        'src/renderer/src/panel/PanelApp.vue',
+        'src/renderer/src/components/Sidebar.vue',
+        'src/renderer/src/views/SettingsView.vue',
+        'src/renderer/src/views/GalleryView.vue',
+        'src/renderer/src/views/HomeView.vue',
+        'src/renderer/src/views/RecordsView.vue',
+        'src/renderer/src/views/LabView.vue',
+      ]
+      const vroot = join(dirname(fileURLToPath(import.meta.url)), '..')
+      const missingValue = []
+
+      for (const rel of vueFiles) {
+        const full = join(vroot, rel)
+        if (!existsSync(full)) continue
+        const src = readFileSync(full, 'utf8')
+        const m = /<script setup>([\s\S]*?)<\/script>/.exec(src)
+        if (!m) continue
+        let js = m[1]
+        /* 去注释与字符串，免得注释里的示例被当成代码 */
+        js = js
+          .replace(/\/\*[\s\S]*?\*\//g, '')
+          .replace(/^\s*\/\/.*$/gm, '')
+          .replace(/`(?:[^`\\]|\\.)*`/g, '``')
+          .replace(/'(?:[^'\\\n]|\\.)*'/g, "''")
+          .replace(/"(?:[^"\\\n]|\\.)*"/g, '""')
+
+        /* 顶层 ref / computed（含 reactive 之外的响应式句柄） */
+        const refs = new Set()
+        for (const d of js.matchAll(/^(?:const|let)\s+([A-Za-z_$][\w$]*)\s*=\s*(?:ref|computed|shallowRef)\s*\(/gm)) {
+          refs.add(d[1])
+        }
+        if (!refs.size) continue
+
+        for (const name of refs) {
+          /*
+           * 匹配 `name.xxx`，但排除 `name.value`（正确写法）、
+           * `name.` 出现在对象属性访问链里的情况（如 `foo.name.bar`）。
+           */
+          const re = new RegExp(`(^|[^.\\w$])${name}\\.(?!value\\b)([A-Za-z_$][\\w$]*)`, 'gm')
+          for (const hit of js.matchAll(re)) {
+            missingValue.push(`${rel}: ${name}.${hit[2]}（应为 ${name}.value.${hit[2]}）`)
+          }
+        }
+      }
+      check('ref/computed 在 script 里都带了 .value', missingValue, [])
+    }
+
+    /* ---------- 产物目录必须排除在 app.asar 之外 ---------- */
+    {
+      /*
+       * 踩过：重构打包脚本时新增了顶级产物目录 `release-mobile/`，
+       * 只加进了 .gitignore，漏了 build.js 的 packager ignore 名单。
+       * 后果是手机端启动器（200MB）整个进了 app.asar ——
+       * asar 44.8MB → 369.8MB，zip 174MB → 305MB，**而且不报错**。
+       *
+       * 这类漏配的隐蔽点：产物目录平时不存在，连打几次都正常；
+       * 只有「先跑 pack:mobile 再跑 pack」才暴露。
+       *
+       * 这条断言的做法：从 build.js 里把 ignore 的正则字面量抠出来，
+       * 拿 .gitignore 里登记的顶层产物目录去试 —— 任何一个没被覆盖就报错。
+       * 将来新增产物目录时，只要加了 .gitignore 就会在这里被提醒。
+       */
+      const groot = join(dirname(fileURLToPath(import.meta.url)), '..')
+      const buildSrc = readFileSync(join(groot, 'scripts/build.js'), 'utf8')
+
+      /* 抠出 ignore 数组里的正则字面量 */
+      const ignoreBlock = /ignore:\s*\[([\s\S]*?)\]/.exec(buildSrc)
+      const patterns = []
+      if (ignoreBlock) {
+        for (const m of ignoreBlock[1].matchAll(/\/((?:\\.|[^/\\])+)\/([gimsuy]*)/g)) {
+          try {
+            patterns.push(new RegExp(m[1], m[2]))
+          } catch {
+            /* 抠错的跳过，不影响其余判断 */
+          }
+        }
+      }
+      check('能解析出打包 ignore 规则', patterns.length > 0, true)
+
+      /*
+       * 候选 = .gitignore 里那些「看起来是本地产物」的顶层目录。
+       * 只取**目录名不含点、且带 build/dist/release 语义**的，
+       * 避免把 `docs/` 这类「该不该进包」的判断题也拉进来。
+       *
+       * `dist/` 要**排除在候选之外**：它虽然叫 dist，却是应用本体 ——
+       * 打包后主进程就是靠 `dist/index.html` 起窗口的，必须进包。
+       * 这条 allowlist 是「确实要随包分发」的产物目录白名单。
+       */
+      const REQUIRED_IN_PACKAGE = ['dist']
+      const gi = readFileSync(join(groot, '.gitignore'), 'utf8')
+      const artifactDirs = gi
+        .split(/\r?\n/)
+        .map((l) => l.trim())
+        .filter((l) => l && !l.startsWith('#') && !l.startsWith('!'))
+        .map((l) => l.replace(/^\//, '').replace(/\/$/, ''))
+        .filter((l) => /^[A-Za-z][\w.-]*$/.test(l))
+        .filter((l) => /(^|-)(release|dist|build|out|target)/i.test(l))
+        .filter((l) => !REQUIRED_IN_PACKAGE.includes(l))
+
+      const notIgnored = artifactDirs.filter((d) => !patterns.some((re) => re.test(`/${d}/x`)))
+      check('产物目录都已排除出 app.asar', notIgnored, [])
+    }
+
+    /* ---------- 聊天背景的 URL 必须是绝对路径 ---------- */
+    {
+      /*
+       * 实测（打包版）：`--bg-image: url("photos/x.png")` 会被解析成
+       * `dist/assets/photos/x.png`（404），因为自定义属性里的 url()
+       * 相对**消费它的样式表**解析，而桌面端样式被编译进 `dist/assets/`。
+       *
+       * 只在内联样式的 dev 模式下恰好正确 —— 典型的「开发能跑、打包裂图」。
+       * 所以这条断言：设置 `--bg-image` 时必须经过 `new URL(...)`。
+       */
+      const croot = join(dirname(fileURLToPath(import.meta.url)), '..')
+      const chatSrc2 = readFileSync(join(croot, 'src/renderer/src/chat/ChatApp.vue'), 'utf8')
+      check('背景 URL 经 new URL 解析成绝对路径', /--bg-image':\s*`url\("\$\{new URL\(/.test(chatSrc2), true)
+      /* 不该再有裸的 url("${chatBg...}") 写法 */
+      const rawUrl = /--bg-image':\s*`url\("\$\{(?!new URL)/.test(chatSrc2)
+      check('背景 URL 没有裸用相对路径', rawUrl, false)
     }
 
     /* ---------- 广播不能漏窗口 ---------- */
@@ -621,25 +1252,30 @@ try {
       /* 加权池必须包含原池的每一项（不丢项） */
       let noLoss = true
       for (const v of voices) {
-        const base = idleCandidatesFor(v)
+        const base = idleCandidatesFor(v, OUTFIT_SLUGS)
         const weighted = weightedPool(base, (k) => !k.startsWith('outfit:') && TIRED_POSES.includes(k))
         for (const k of base) if (!weighted.includes(k)) noLoss = false
       }
       check('加权不丢项（每个都还在）', noLoss, true)
 
       /* 模拟真实轮换：白天与深夜都必须覆盖到每一项 */
+      /*
+       * 这里必须用 `pickRotation` 而不是 `pickLine` ——
+       * 生产路径已经换成前者（避最近三项），用旧的单项避让去模拟
+       * 会让「覆盖全部项」这条断言替一个没人跑的分支背书。
+       */
       const simulate = (voice, rounds, night) => {
-        const base = idleCandidatesFor(voice)
+        const base = idleCandidatesFor(voice, OUTFIT_SLUGS)
         const pool = night
           ? weightedPool(base, (k) => !k.startsWith('outfit:') && TIRED_POSES.includes(k))
           : base
         const uniq = [...new Set(pool)]
         const counts = new Map(uniq.map((k) => [k, 0]))
-        let last = null
+        let recent = []
         for (let i = 0; i < rounds; i++) {
-          const n = pickLine(pool, last, Math.random)
-          counts.set(n, counts.get(n) + 1)
-          last = n
+          const n = pickRotation(pool, recent)
+          counts.set(n, (counts.get(n) ?? 0) + 1)
+          recent = [n, ...recent].slice(0, 3)
         }
         return uniq.filter((k) => counts.get(k) === 0)
       }
@@ -654,7 +1290,7 @@ try {
       check('深夜轮换也覆盖全部项', nightMissing, [])
 
       /* 深夜加权：困倦项应明显更频繁，但仍非独占 */
-      const base = idleCandidatesFor('intimate')
+      const base = idleCandidatesFor('intimate', OUTFIT_SLUGS)
       const pool = weightedPool(base, (k) => !k.startsWith('outfit:') && TIRED_POSES.includes(k))
       const yawnCount = pool.filter((k) => k === 'yawn').length
       const outfitCount = pool.filter((k) => k === `outfit:${DEFAULT_OUTFIT}`).length
@@ -678,13 +1314,307 @@ try {
        * 结果加完素材后这条一直红 —— 是断言错了，不是代码错了。
        */
       check(
-        '满级候选池 = 挂机动作 + 全部服饰',
-        idleCandidatesFor('intimate').length,
-        idlePosesFor('intimate').length + outfitsFor('intimate').length,
+        '全解锁时候选池 = 挂机动作 + 全部服饰',
+        idleCandidatesFor('intimate', OUTFIT_SLUGS).length,
+        idlePosesFor('intimate').length + OUTFIT_SLUGS.length,
       )
-      check('满级服饰池 = 全部服饰', outfitsFor('intimate').length, OUTFITS.length)
       check('服饰表非空', OUTFITS.length > 0, true)
       check('服饰 slug 唯一', new Set(OUTFIT_SLUGS).size, OUTFITS.length)
+
+      /* ---------- 轮换节拍 ---------- */
+
+      /*
+       * 间隔钳制。
+       *
+       * 重点是空串：设置页是 number 输入框，用户清空时 v-model 给的是 ''，
+       * 而 Number('') === 0 —— 不特判就会被钳到下限 1 分钟，
+       * 也就是「一秒钟换一套」，桌宠变成幻灯片且没人知道是为什么。
+       */
+      check('间隔默认', clampRotateMin(undefined), DEFAULT_ROTATE_MIN)
+      check('间隔空串回落默认', clampRotateMin(''), DEFAULT_ROTATE_MIN)
+      check('间隔 null 回落默认', clampRotateMin(null), DEFAULT_ROTATE_MIN)
+      check('间隔非数字回落默认', clampRotateMin('abc'), DEFAULT_ROTATE_MIN)
+      check('间隔 NaN 回落默认', clampRotateMin(NaN), DEFAULT_ROTATE_MIN)
+      check('间隔下限', clampRotateMin(0), ROTATE_MIN_MIN)
+      check('间隔负数收敛到下限', clampRotateMin(-30), ROTATE_MIN_MIN)
+      check('间隔上限', clampRotateMin(9999), ROTATE_MIN_MAX)
+      check('间隔向下取整', clampRotateMin(7.9), 7)
+      check('间隔字符串可用', clampRotateMin('12'), 12)
+      check('区间内原样返回', clampRotateMin(30), 30)
+
+      /* 等待时长：基准 ±25%，且不低于 15 秒 */
+      const baseMs = clampRotateMin(10) * 60_000
+      check('等待无抖动时等于基准', rotateDelayMs(10, () => 0.5), baseMs)
+      check('等待抖动下限', rotateDelayMs(10, () => 0), Math.round(baseMs * 0.75))
+      check('等待抖动上限', rotateDelayMs(10, () => 1), Math.round(baseMs * 1.25))
+      check('最短间隔也不会低于 15 秒', rotateDelayMs(1, () => 0) >= 15_000, true)
+      /* 抖动必须是真抖动：同一间隔连续取值不该全一样 */
+      const delays = [0.1, 0.9, 0.3, 0.7].map((r) => rotateDelayMs(10, () => r))
+      check('等待确实在抖动', new Set(delays).size > 1, true)
+
+      /*
+       * 抽选：动作与服饰同池，且避开最近三项。
+       *
+       * 避让数不能超过池子大小，否则 usable 会空掉（`pickLine([])` 返回 ''
+       * -> 立绘直接不显示）。最低档只有 4 项，必须专门覆盖。
+       */
+      check('空池返回空串', pickRotation([]), '')
+      check('null 池安全', pickRotation(null), '')
+      check('单项池返回该项', pickRotation(['a'], ['a', 'b', 'c']), 'a')
+      check('两项池不返回空串', pickRotation(['a', 'b'], ['a', 'b']) !== '', true)
+      /* 避让不能把池子清空：清空 -> 空串 -> 立绘回落站姿，比重复一次糟得多 */
+      check('避让过头仍从原池抽', pickRotation(['a', 'b'], ['a', 'b', 'a']) !== '', true)
+      check('四项池避三项仍能选出', ['a', 'b', 'c', 'd'].includes(pickRotation(['a', 'b', 'c', 'd'], ['a', 'b', 'c'])), true)
+      /* 最近三项都要避开（池里只剩 w 可选，结果必须不是 x/y/z） */
+      check('避开最近三项', ['x', 'y', 'z'].includes(pickRotation(['x', 'y', 'z', 'w'], ['x', 'y', 'z'])), false)
+      check('只剩一项时选中它', pickRotation(['x', 'y', 'z', 'w'], ['x', 'y', 'z']), 'w')
+      /* 满级池跑一轮，相邻两次必不同 */
+      const fullPool = idleCandidatesFor('intimate', OUTFIT_SLUGS)
+      let rotationCandidatesOk = true
+      let hist = []
+      let immediateRepeat = false
+      for (let i = 0; i < 300; i++) {
+        const n = pickRotation(fullPool, hist)
+        if (n === hist[0]) immediateRepeat = true
+        hist = [n, ...hist].slice(0, 3)
+      }
+      check('不会连续重复同一项', immediateRepeat, false)
+      /* 服饰项要真的能被轮到（否则「换一套衣服」名不副实） */
+      const seenOutfits = new Set()
+      hist = []
+      for (let i = 0; i < 400; i++) {
+        const n = pickRotation(fullPool, hist)
+        if (n.startsWith('outfit:')) seenOutfits.add(n)
+        hist = [n, ...hist].slice(0, 3)
+      }
+      check('轮换里能轮到衣服', seenOutfits.size > 0, true)
+      check('轮换到的都是池内项', [...seenOutfits].every((k) => fullPool.includes(k)), true)
+
+      /* ---------- 轮换池自选 ---------- */
+
+      /*
+       * 三条语义，逐条钉死：
+       *   空选 = 全部（不是「什么都不换」）
+       *   自选必须被已解锁范围夹住（防穿未解锁的衣服）
+       *   过滤后为空要回落全池（老库里存着失效项时不至于变哑巴）
+       */
+      const allPool = idleCandidatesFor('intimate')
+      check('空选 = 全部已解锁', resolveRotationPool('intimate', []).length, allPool.length)
+      check('非数组视同空选', resolveRotationPool('intimate', null).length, allPool.length)
+      check('空选与不传等价', resolveRotationPool('intimate', undefined).length, allPool.length)
+
+      const sub = ['snack', 'outfit:jk']
+      check('自选只保留勾选项', resolveRotationPool('intimate', sub, OUTFIT_SLUGS), sub)
+      /* 未解锁的项必须被滤掉：'outfit:qipao' 在 stranger 档不可用 */
+      const stranger = resolveRotationPool('stranger', ['snack', 'outfit:qipao', 'outfit:swimsuit'])
+      check('未解锁的服饰被滤掉', stranger.filter((k) => k.startsWith('outfit:')).length, 0)
+      check('已解锁的动作保留', stranger.includes('snack'), true)
+      /* 全是未解锁项 -> 回落全池，而不是空池 */
+      const allLocked = resolveRotationPool('stranger', ['outfit:qipao'])
+      check('全失效时回落全池', allLocked.length, idleCandidatesFor('stranger').length)
+      check('回落结果非空（立绘不能哑）', allLocked.length > 0, true)
+      /*
+       * 动作不分档了 —— 最低档也拿得到 yawn。
+       * 这一条原来断言「低档位滤掉高档动作」，那是阶梯时代的语义。
+       */
+      const allTiers = resolveRotationPool('stranger', ['yawn', 'snack'])
+      check('最低档也能选到全部动作', allTiers.includes('yawn'), true)
+
+      /*
+       * 服饰则相反：**必须以实际解锁清单为准**。
+       * 传空数组表示「图鉴里一套都没解锁」，此时池子里不该有任何 outfit。
+       */
+      const noOutfit = idleCandidatesFor('intimate', [])
+      check('未传解锁清单时不含任何服饰', noOutfit.some((k) => k.startsWith('outfit:')), false)
+      const someOutfit = idleCandidatesFor('intimate', ['jk', 'qipao'])
+      check('按解锁清单给服饰', someOutfit.filter((k) => k.startsWith('outfit:')).length, 2)
+      /* 清单里没解锁的不能出现在池里 —— 这是「能穿的必须是发过照片的」 */
+      check('清单外的服饰不出现', someOutfit.includes('outfit:swimsuit'), false)
+
+      /*
+       * 选择器候选必须全在已解锁池内（用户勾的都得真会轮到）。
+       *
+       * 两边都必须**显式传解锁清单**：不传时 `unlockedOutfits` 默认 `[]`，
+       * 服饰那一侧两边都是空集，「候选 ⊆ 池」就退化成「全集 ⊆ 全集」的恒真式，
+       * 标题里的「已解锁池／全部服饰」一格都没测到。
+       */
+      for (const v of ['stranger', 'familiar', 'friend', 'close', 'intimate']) {
+        const pool = idleCandidatesFor(v, OUTFIT_SLUGS)
+        const cands = rotationCandidatesFor(v, OUTFIT_SLUGS)
+        if (cands.some((c) => !pool.includes(c.key))) rotationCandidatesOk = false
+        /*
+         * 动作项的中文名要看**对照表里有没有登记**，不能看 `c.label` 是否真值 ——
+         * 实现用 `IDLE_POSE_LABELS[k] ?? k` 回落，key 本身也是 truthy，
+         * 漏登记的格子会显示成 `yawn` 这种英文 key 而测试照样绿。
+         */
+        if (cands.some((c) => c.kind === 'action' && IDLE_POSE_LABELS[c.key] == null)) rotationCandidatesOk = false
+      }
+      check('选择器候选都在已解锁池内且有名字', rotationCandidatesOk, true)
+      check('满级候选 = 动作 + 全部服饰', rotationCandidatesFor('intimate', OUTFIT_SLUGS).length, ALL_IDLE_POSES.length + OUTFIT_SLUGS.length)
+      check('候选数与已解锁池一致', rotationCandidatesFor('intimate', OUTFIT_SLUGS).length, idleCandidatesFor('intimate', OUTFIT_SLUGS).length)
+      check('动作与服饰分开统计', rotationCandidatesFor('intimate', OUTFIT_SLUGS).filter((c) => c.kind === 'outfit').length, OUTFITS.length)
+      check('未知档位回落最低档候选', rotationCandidatesFor('nope').length, rotationCandidatesFor('stranger').length)
+
+      /* ---------- 上帝模式：读时覆盖 ---------- */
+
+      const plain = affinityView(120, false)
+      check('关闭时与 affinityLevel 一致', plain.voice, affinityLevel(120).voice)
+      check('关闭时不带 godMode 标记', plain.godMode, false)
+
+      const god = affinityView(0, true)
+      check('上帝模式：0 点也到满档', god.voice, 'intimate')
+      check('上帝模式：显示为上帝模式', god.level.name, '上帝模式')
+      check('上帝模式：进度满', god.progress, 100)
+      check('上帝模式：标记为 true', god.godMode, true)
+      check('上帝模式：视为已满级', god.isMax, true)
+      check('上帝模式：没有下一档', god.next, null)
+      /*
+       * 上帝模式覆盖 voice —— 但**服饰不再由档位决定**，所以这里只断言
+       * 动作那一侧（动作本来就不分档了，这里验证 voice 确实被顶到满档）。
+       */
+      check('上帝模式：voice 顶到最高档', god.voice, 'intimate')
+      check('对照：0 点真实档位是最低档', affinityLevel(0).voice, 'stranger')
+      /* 缺省参数不能当成开启 */
+      check('缺省 godMode 为关闭', affinityView(300).godMode, false)
+
+      /* ---------- 上帝模式：图鉴也全解锁（读时覆盖，不写库） ---------- */
+      {
+        /*
+         * `affinityView` 那几条只覆盖了 voice/progress，**图鉴那一侧没测**：
+         * service 的 `const unlocked = godMode ? Object.keys(table) : real`
+         * 一旦写坏（或 godMode 判定改错），表现是「开了上帝模式图鉴还是黑的」，
+         * 但没有任何断言会红。
+         *
+         * 顺带把「读时覆盖」这条纪律也钉住：快照能全解锁，但**不许写库** ——
+         * 关掉开关后必须立刻回到真实清单（真的灌过 meta 的话就回不去了，
+         * 用户会以为「这些衣服我明明有，怎么变回没解锁」）。
+         */
+        const gDir = mkdtempSync(join(tmpdir(), 'desk-god-'))
+        const gStore = openStore(join(gDir, 'g.db'))
+        const gSvc = createService(gStore)
+        const gSid = (await gSvc.ensureChatSession()).id
+
+        const snapOff = await gSvc.gallery(gSid)
+        check('关闭上帝模式：服饰图鉴只有初始那套', snapOff.outfit.unlocked, [DEFAULT_OUTFIT])
+        check('关闭上帝模式：图鉴不带 godMode 标记', snapOff.outfit.godMode, false)
+
+        await gSvc.updateSettings({ godMode: true })
+        const snapOn = await gSvc.gallery(gSid)
+        check('上帝模式：服饰图鉴全解锁', snapOn.outfit.unlocked.length, OUTFIT_SLUGS.length)
+        check('上帝模式：每套都标为已获得', snapOn.outfit.items.every((it) => it.got), true)
+        check('上帝模式：生活照图鉴也全解锁', snapOn.photo.unlocked.length, PHOTO_SLUGS.length)
+        check('上帝模式：快照带标记', snapOn.outfit.godMode, true)
+
+        await gSvc.updateSettings({ godMode: false })
+        const snapBack = await gSvc.gallery(gSid)
+        check('关掉后回到真实清单（覆盖不写库）', snapBack.outfit.unlocked, [DEFAULT_OUTFIT])
+        await gSvc.close()
+      }
+
+      /* ---------- 未解锁的服饰必须能被标出来 ---------- */
+      /*
+       * 换装列表列的是全量 OUTFITS（不然新解锁的没机会被发现），
+       * 所以「锁住的那部分」只能靠 UI 标出来。`outfitUnlockTierName`
+       * 就是那个标识的依据 —— 它和 OUTFIT_MIN_POINTS 必须同源，
+       * 否则会出现「列表说解锁了、轮换池里却没有」。
+       *
+       * 旧断言（`name` 非空且不是字符串 'undefined'）恒真：
+       * 实现里 `outfitMinPoints` 是 `?? 0`、必然落在最低档，对**任何**
+       * 输入都返回一个档位名 —— 它连 `outfitUnlockTierName('nope')`
+       * 都算过，等于没有测「同源」这件事。
+       * 真正要钉的是：每套服饰都登记在门槛表里，且档位名恰好等于
+       * 「第一个 `min >= outfitMinPoints(slug)` 的档位名」。
+       */
+      const tierMismatch = OUTFIT_SLUGS.filter((slug) => {
+        if (!(slug in OUTFIT_MIN_POINTS)) return true
+        const lvl = AFFINITY_LEVELS.find((l) => outfitMinPoints(slug) <= l.min)
+        const expect = lvl?.name ?? AFFINITY_LEVELS[AFFINITY_LEVELS.length - 1].name
+        return outfitUnlockTierName(slug) !== expect
+      })
+      check('每套服饰的档位名与门槛表同源', tierMismatch, [])
+      check('门槛 0 的服饰落在最低档', outfitUnlockTierName(DEFAULT_OUTFIT), AFFINITY_LEVELS[0].name)
+      check('未登记的 slug 按门槛 0 落在最低档', outfitUnlockTierName('nope'), AFFINITY_LEVELS[0].name)
+      /* 档位名必须真的是某一档 —— 不能返回内部 voice 标识 */
+      check('返回的是档位名不是 voice 标识', AFFINITY_LEVELS.some((l) => l.name === outfitUnlockTierName('swimsuit')), true)
+    }
+
+    /* ---------- 清空全部数据 ---------- */
+    {
+      /*
+       * SCHEMA 里的表必须都在 WIPE_TABLES 里登记。
+       *
+       * 漏登记的表现极隐蔽：「清空」跑成功了，但新表的数据还在，
+       * 而用户以为已经清干净了 —— 比直接报错糟得多。
+       * 所以这里从 SCHEMA 正则抽表名，跟 WIPE_TABLES 对账。
+       */
+      const schemaTables = [...SCHEMA.matchAll(/CREATE TABLE IF NOT EXISTS (\w+)/g)].map((m) => m[1])
+      const notWiped = schemaTables.filter((t) => !WIPE_TABLES.includes(t))
+      check('schema 里的表都已登记进清空清单', notWiped, [])
+      check('清空清单无多余表', WIPE_TABLES.filter((t) => !schemaTables.includes(t)), [])
+      /*
+       * 外键子表必须排在父表前面。
+       * chat_messages.sessionId 引用 chat_sessions.id ——
+       * 顺序反了就算开了 CASCADE 也可能先撞约束。
+       */
+      check('子表排在父表前', WIPE_TABLES.indexOf('chat_messages') < WIPE_TABLES.indexOf('chat_sessions'), true)
+
+      const wipeDir = mkdtempSync(join(tmpdir(), 'desk-wipe-'))
+      const store3 = openStore(join(wipeDir, 'w.db'))
+      const svc = createService(store3)
+
+      /* 铺足够杂的数据：每张表都要有行，否则「删干净了」证明不了什么。
+         消息直接走 store 写，不走 sendChat —— 那条路要 API Key，
+         失败时消息表会是空的，这条断言就白写了。 */
+      await svc.checkIn(new Date())
+      await svc.logMoyu(45)
+      await svc.updateSettings({ salary: 99999, petRotateMin: 3 })
+      await svc.createPersona({ label: '测试人设', prompt: 'x' })
+      const ss = await svc.ensureChatSession()
+      store3.addMessage(ss.id, 'user', '在吗')
+      store3.addMessage(ss.id, 'assistant', '在的')
+      await svc.addEvent('test', { a: 1 })
+
+      const before = {
+        settings: Object.keys(await svc.getSettings()).length,
+        checkins: (await store3.listCheckins({})).length,
+        worklogs: (await store3.listWorklogs(toDateKey(new Date()))).length,
+        events: (await store3.listEvents('test')).length,
+        personas: (await store3.listPersonas()).length,
+        sessions: (await svc.listChatSessions()).length,
+        msgs: (await store3.listMessages(ss.id)).length,
+      }
+      check('清空前数据齐全', Object.values(before).every((n) => n > 0), true)
+
+      await svc.wipeAllData()
+
+      const after = {
+        settings: (await store3.getSettings()).petScale,
+        checkins: (await store3.listCheckins({})).length,
+        worklogs: (await store3.listWorklogs(toDateKey(new Date()))).length,
+        events: (await store3.listEvents('test')).length,
+        personas: (await store3.listPersonas()).length,
+      }
+      check('打卡已清空', after.checkins, 0)
+      check('摸鱼时长已清空', after.worklogs, 0)
+      check('事件已清空', after.events, 0)
+      check('人设已清空', after.personas, 0)
+      /* 设置不是「空」而是回落默认值 —— 空设置会让界面全 undefined */
+      check('设置回落默认值', after.settings, DEFAULT_SETTINGS.petScale)
+
+      /* 表结构必须还在：库没被删，重开一次即可用 */
+      const reopened = openStore(join(wipeDir, 'w.db'))
+      check('库文件保留、表结构完好', typeof reopened.getSettings, 'function')
+      check('重开后能读设置', reopened.getSettings().workStart, DEFAULT_SETTINGS.workStart)
+
+      /* 会话必须重建：全空时所有读路径会拿到 undefined，界面静默空白 */
+      const sessions = await reopened.listSessions()
+      check('已重建默认会话', sessions.length, 1)
+      check('新会话为空', sessions[0].messageCount, 0)
+
+      /* 关掉所有句柄再删临时目录，否则 node:sqlite 仍持有文件 -> EPERM */
+      reopened.close()
+      store3.close()
+      rmSync(wipeDir, { recursive: true, force: true })
     }
 
     /* ---------- 素材对账：清单、图片文件、代码表三者一致 ---------- */

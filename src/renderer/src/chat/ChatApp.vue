@@ -23,18 +23,21 @@ import {
   consumeUnlock,
   setActiveSession,
   refreshSessionSettings,
+  markChatRead,
 } from '../stores/app.js'
 import {
-  affinityLevel,
+  affinityView,
   outfitForTime,
   outfitInfo,
   OUTFITS,
   OUTFIT_SLUGS,
   DEFAULT_OUTFIT,
 } from '@shared/interactions.js'
-import { checkImagesForModel } from '@shared/content.js'
+import { checkImagesForModel, livePreviewOf } from '@shared/content.js'
 import { photoPathsOf } from '@shared/photoMessage.js'
 import { PHOTO_SLUGS } from '@shared/photoStories.js'
+import { pickChatBackground } from '@shared/chatBackground.js'
+import { ChatBackgroundMode } from '@shared/moyu.js'
 
 const input = ref('')
 /*
@@ -123,7 +126,7 @@ const personaName = computed(() => {
  * 聊天是提升亲密度最快的途径，所以进度必须显示在聊天窗里 ——
  * 否则用户聊了半天看不到任何反馈，也就不会在意这个数值。
  */
-const affinity = computed(() => affinityLevel(state.affinity?.points ?? 0))
+const affinity = computed(() => affinityView(state.affinity?.points ?? 0, state.settings?.godMode))
 const affinityPoints = computed(() => state.affinity?.points ?? 0)
 /* 后端快照的字段是 gainToday/dailyCap（每日额度对所有来源合计封顶）；
    旧名 chatToday/chatDailyCap 是「只封聊天」时代的遗产，快照里已不再带 */
@@ -153,7 +156,14 @@ onMounted(() => {
 })
 
 /** 流式中的内容作为一条临时消息显示在末尾 */
-const liveText = computed(() => (chat.value.streaming ? chat.value.streamText : ''))
+/*
+ * 流式预览只显示**第一条**（截到分段标记为止）。
+ *
+ * 不截的话生成过程中会在气泡里看到 `第一句<<<MSG>>>第二句` 这种原始文本
+ * —— 标记直接暴露给用户；生成结束又"啪"地重排成多个气泡，观感很跳。
+ * 截断之后的观感才是真人聊天：先打完第一条发出去，再接着打下一条。
+ */
+const liveText = computed(() => (chat.value.streaming ? livePreviewOf(chat.value.streamText) : ''))
 
 /* ---------- 图片输入（选文件 / 粘贴 / 拖拽） ---------- */
 
@@ -168,7 +178,19 @@ const dragActive = ref(false)
 const MAX_IMAGES_PER_MESSAGE = 4
 
 const composerPlaceholder = computed(() => {
-  if (!status.ready) return '请先在设置里配置 API Key'
+  /*
+   * 必须 `status.value.ready`，**不能写 `status.ready`**。
+   *
+   * `status` 是 ComputedRef 对象；`<script setup>` 里没有模板的自动解包，
+   * 写成 `status.ready` 拿到的是 undefined —— `!undefined` 恒为 true，
+   * 于是这句永远是「请先在设置里配置 API Key」，
+   * 哪怕 Key 早就配好了、标题栏也已经显示 deepseek-flash。
+   *
+   * 极难发现的原因：**同一个 `status` 在模板里是对的**（那边自动解包），
+   * 所以同一个元素上 `:disabled="!status.ready"` 正常、只有 placeholder 坏掉，
+   * 看起来像是「placeholder 的响应式失效了」。
+   */
+  if (!status.value.ready) return '请先在设置里配置 API Key'
   if (pendingImages.value.length) return '说点什么（也可以直接发图）…'
   return '和 Yuki 说点什么…  📎 发图 / Ctrl+V 粘贴'
 })
@@ -301,10 +323,25 @@ function removeImage(i) {
 const clockTick = ref(Date.now())
 let clockTimer = null
 
+/** 已解锁的服饰集合（图鉴未就绪时保守为「只有初始那套」，宁可少显示也不放宽解锁） */
+const unlockedOutfits = computed(() => {
+  const list = state.gallery?.outfit?.unlocked
+  return new Set(Array.isArray(list) ? list : [DEFAULT_OUTFIT])
+})
+
 const currentOutfitSlug = computed(() => {
-  if (state.settings.outfitMode !== 'fixed') return outfitForTime(new Date(clockTick.value))
+  /* 必须传已解锁池：不传时 outfitForTime 直接回落默认那套（自动模式恒为 JK） */
+  if (state.settings.outfitMode !== 'fixed')
+    return outfitForTime(new Date(clockTick.value), [...unlockedOutfits.value])
   const s = state.settings.outfitSlug
-  return OUTFIT_SLUGS.includes(s) ? s : DEFAULT_OUTFIT
+  if (!OUTFIT_SLUGS.includes(s)) return DEFAULT_OUTFIT
+  /*
+   * 未解锁的一律回落 —— 与 PetApp / PetMenu / ChatPetApp 同一道守卫。
+   * settings 的写入口不止换装菜单（设置页、IPC、重置都会写），
+   * 守卫放在**展示求值点**才绕不过去。
+   */
+  if (!unlockedOutfits.value.has(s)) return DEFAULT_OUTFIT
+  return s
 })
 const currentOutfitLabel = computed(() => outfitInfo(currentOutfitSlug.value).label)
 
@@ -321,13 +358,10 @@ const outfitPickerOpen = ref(false)
 /*
  * 换装清单**只列已解锁的**。
  *
- * 之前直接列 OUTFITS（全部 26 套）—— 和 PC 桌宠右键菜单同一个问题：
+ * 之前直接列 OUTFITS 全量 —— 和 PC 桌宠右键菜单同一个问题：
  * 等于绕过图鉴，随手就能穿上没解锁的衣服。
  */
-const outfits = computed(() => {
-  const unlocked = new Set(state.gallery?.outfit?.unlocked ?? [])
-  return OUTFITS.filter((o) => unlocked.has(o.slug))
-})
+const outfits = computed(() => OUTFITS.filter((o) => unlockedOutfits.value.has(o.slug)))
 
 async function chooseOutfit(slug) {
   outfitPickerOpen.value = false
@@ -336,8 +370,7 @@ async function chooseOutfit(slug) {
     return
   }
   /* 再挡一道：菜单没列出来的也不能选（settings 的写入口不止这一处） */
-  const unlocked = new Set(state.gallery?.outfit?.unlocked ?? [])
-  if (!unlocked.has(slug)) return
+  if (!unlockedOutfits.value.has(slug)) return
   await saveSettings({ outfitMode: 'fixed', outfitSlug: slug })
 }
 
@@ -487,8 +520,8 @@ onMounted(async () => {
   await scrollToBottom()
   textarea.value?.focus()
   /*
-   * 每分钟对一次时间，让「自动换装」能跨过时段边界。
-   * 一分钟一次足够：换装粒度是「深夜/早晚/白天」，不需要秒级精度。
+   * 每分钟对一次时间，让「自动换装」能跨过**时间片边界**。
+   * 一分钟一次足够：换装粒度是 30 分钟一个时间片，不需要秒级精度。
    */
   clockTimer = window.setInterval(() => (clockTick.value = Date.now()), 60_000)
 })
@@ -496,10 +529,163 @@ onMounted(async () => {
 onBeforeUnmount(() => {
   stopBridge?.()
   if (clockTimer) window.clearInterval(clockTimer)
+  if (bgTimer) window.clearInterval(bgTimer)
+  document.removeEventListener('visibilitychange', onVisibilityChange)
+  window.removeEventListener('focus', onWindowFocus)
+})
+
+/**
+ * 对话配置变了要重拉状态。
+ *
+ * `chatStatus` 只算一次存在 `store.chat.status` 里，而设置保存广播的
+ * `state` **不含** chat.status（见 service 的 getState），所以对话窗不会
+ * 自己知道用户刚填了 Key。
+ *
+ * 窗口又是「只 hide 不销毁」的（硬规则），再打开走的是 `chatWindow.show()`，
+ * **不重新加载页面**，`onMounted` 不会再跑 ——
+ * 于是「填好 Key 再打开对话窗，还是说未填写」。
+ *
+ * 这里只盯真正影响对话可用性的那几个字段，避免任何设置变动都打一次 IPC。
+ * （设置页保存时 `saveSettings` 也会主动刷一次 —— 两条路互为补充：
+ * 这条管「值确实变了」，那条管「保存这个动作发生了」。）
+ */
+watch(
+  () => [
+    state.settings?.chatApiKey,
+    state.settings?.chatBaseUrl,
+    state.settings?.chatModel,
+    state.settings?.chatProvider,
+  ],
+  () => {
+    refreshChatStatus().catch(() => {})
+  },
+)
+
+/**
+ * 窗口重新获得焦点 / 重新可见时都对一次。
+ *
+ * 为什么两个都听：`createChatWindow()` 对已存在的窗口做的是
+ * `show() + focus()`，而 Chromium 的 Page Visibility 在某些
+ * 隐藏/显示路径上并不保证派发 `visibilitychange` ——
+ * 只挂那一个的话，「关掉再打开对话窗」可能一次都不刷新，
+ * 症状就是用户看到的「一直是请先在设置里配置 API Key」。
+ * 两个事件都幂等，重复触发无副作用。
+ */
+function onVisibilityChange() {
+  if (document.visibilityState === 'visible') {
+    refreshChatStatus().catch(() => {})
+    markChatRead().catch(() => {})
+  }
+}
+function onWindowFocus() {
+  refreshChatStatus().catch(() => {})
+  /* 用户切回对话窗 = 他看到了，清未读 */
+  markChatRead().catch(() => {})
+}
+document.addEventListener('visibilitychange', onVisibilityChange)
+window.addEventListener('focus', onWindowFocus)
+
+/* ---------- 聊天背景 ---------- */
+
+/*
+ * 与手机端同一套逻辑（`shared/chatBackground.js`）——
+ * 两端读同一份 settings，选图算法不一致的话同一时刻会显示不同的图。
+ *
+ * 「这张图还在不在」直接复用上面 `probePhotos()` 探好的 `availablePhotos`：
+ * 那已经是一个覆盖全部照片路径的存在性集合，再算一份必然走偏。
+ */
+
+/*
+ * 轮换是「按时间片取模」算的，不是存「轮到第几张」——
+ * 所以要有一个会走的时钟，computed 才会跟着重算。
+ * 不引时钟的话 `pickChatBackground` 里的 `Date.now()` 永远只算第一次。
+ */
+const bgClock = ref(Date.now())
+
+const chatBg = computed(() =>
+  pickChatBackground({
+    mode: state.settings?.chatBgMode,
+    fixed: state.settings?.chatBackground,
+    pool: state.settings?.chatBgPool ?? [],
+    available: (p) => availablePhotos.value.has(p),
+    rotateMin: state.settings?.chatBgRotateMin,
+    now: bgClock.value,
+  }),
+)
+
+/** 照片保留多少（0.05~0.85）；遮罩 alpha 取它的补数，见 CSS 的 --bg-mask */
+const bgOpacity = computed(() => Math.min(0.85, Math.max(0.05, Number(state.settings?.chatBgOpacity) || 0.25)))
+
+const msgsStyle = computed(() => {
+  if (!chatBg.value) return null
+  /*
+   * 必须解析成**绝对 URL**，不能直接塞相对路径。
+   *
+   * CSS 自定义属性里的 `url()` 是相对**消费它的那条规则所在的样式表**解析的，
+   * 不是相对文档。桌面端的组件样式会被 Vite 编译进 `dist/assets/index-*.css`，
+   * 于是 `photos/x.png` 被解析成 `dist/assets/photos/x.png` → 404，背景画不出来。
+   *
+   * 这个坑**只在打包版出现**：dev 模式样式是内联注入的，基准就是文档 URL，
+   * 相对路径恰好正确。实测过 —— 同一个路径用 `new Image()` 探测能加载
+   * （那是相对文档），但用作背景就是裂的。
+   *
+   * 手机端没这个问题：它的样式表在产物根目录，正好和文档同级。
+   */
+  return {
+    '--bg-image': `url("${new URL(chatBg.value, location.href).href}")`,
+    '--bg-opacity': String(bgOpacity.value),
+  }
+})
+
+let bgTimer = null
+
+/**
+ * 轮换定时器开关。
+ *
+ * 只在「轮换模式 + 池子非空」时跑 —— 其余时候白算。
+ * 集中在一个函数里，而不是散在改动设置的各处：漏一处的表现是
+ * 「开了轮换但不换」（定时器没起来），很难查。
+ */
+function syncBgTimer() {
+  const want =
+    state.settings?.chatBgMode === ChatBackgroundMode.ROTATE && (state.settings?.chatBgPool ?? []).length > 0
+  if (!want) {
+    if (bgTimer) {
+      window.clearInterval(bgTimer)
+      bgTimer = null
+    }
+    return
+  }
+  if (bgTimer) return
+  /* 半分钟一次足够：换装粒度是分钟级，没必要更密 */
+  bgTimer = window.setInterval(() => (bgClock.value = Date.now()), 30_000)
+}
+
+watch(() => [state.settings?.chatBgMode, (state.settings?.chatBgPool ?? []).length], syncBgTimer, {
+  immediate: true,
 })
 
 watch(liveText, scrollToBottom)
 watch(messages, scrollToBottom, { deep: true })
+
+/*
+ * 我正看着这个窗口时，她说的话**不该算未读**。
+ *
+ * 未读的定义是「她说的、晚于已读位置的消息」，而打点只在
+ * `focus` / `visibilitychange` 时做 —— 回复到达时窗口**早就聚焦了**，
+ * 不会再触发这两个事件，于是未读数一路涨、桌宠上一直亮红点，
+ * 而人就盯着屏幕看那句话。体验很怪。
+ *
+ * 所以每次消息列表变化时补一次：窗口在前台且有焦点 → 立刻标已读。
+ * 主动找话题发来的消息同样走这里（它也只是往 messages 里加一条）。
+ */
+watch(
+  () => messages.value.length,
+  () => {
+    if (document.hidden || !document.hasFocus()) return
+    markChatRead().catch(() => {})
+  },
+)
 </script>
 
 <template>
@@ -558,7 +744,7 @@ watch(messages, scrollToBottom, { deep: true })
             :class="{ active: state.settings.outfitMode === 'auto' }"
             @click="chooseOutfit(null)"
           >
-            <span>🕘</span><span>跟随时间</span>
+            <span>🎲</span><span>自动穿</span>
           </button>
           <button
             v-for="o in outfits"
@@ -615,7 +801,7 @@ watch(messages, scrollToBottom, { deep: true })
     </transition>
 
     <!-- 消息流 -->
-    <div ref="scrollBox" class="msgs">
+    <div ref="scrollBox" class="msgs" :class="{ 'has-bg': !!chatBg }" :style="msgsStyle">
       <p v-if="!messages.length && !liveText" class="empty-hint">
         和 Yuki 打个招呼吧～<br />
         <span class="dim">Enter 发送 · Shift+Enter 换行</span>
@@ -745,6 +931,8 @@ watch(messages, scrollToBottom, { deep: true })
   box-sizing: border-box;
   border-radius: 16px;
   overflow: hidden;
+  /* 聊天背景的遮罩色取这个 —— 与壳层底色一致，压暗后才不会有色差 */
+  --chat-bg: #ffffff;
   background: rgba(255, 255, 255, 0.97);
   border: 1px solid rgba(0, 0, 0, 0.1);
   box-shadow: 0 16px 48px rgba(0, 0, 0, 0.24);
@@ -1111,6 +1299,28 @@ watch(messages, scrollToBottom, { deep: true })
   display: flex;
   flex-direction: column;
   gap: 10px;
+}
+
+/*
+ * 聊天背景（图鉴里点开一张照片 → 「设为背景」）。
+ *
+ * 与手机端同一套做法，**别改回 `background-attachment: local`** ——
+ * 那个值会把「背景定位区」从可见框换成可滚动溢出区，而 `cover`
+ * 按定位区缩放，照片会被放大好几倍（移动端实测 7 倍）。
+ * 详见 docs/DESIGN.md「聊天背景的比例坑」。
+ *
+ * 遮罩并进背景层（一个半透明底色渐变压在照片上），而不是用 ::before：
+ * 滚动容器内的绝对定位元素会跟着内容一起滚，遮罩出了第一屏就没了。
+ * 并进背景层后两层共用同一定位区，比例与遮罩范围天然一致。
+ */
+.msgs.has-bg {
+  --bg-mask: color-mix(in srgb, var(--chat-bg, #fff) calc((1 - var(--bg-opacity, 0.25)) * 100%), transparent);
+  background-image:
+    linear-gradient(var(--bg-mask), var(--bg-mask)),
+    var(--bg-image, none);
+  background-size: cover, cover;
+  background-position: center, center;
+  background-repeat: no-repeat, no-repeat;
 }
 .empty-hint {
   margin: auto;

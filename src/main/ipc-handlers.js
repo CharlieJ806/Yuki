@@ -105,6 +105,14 @@ export function createIpcHandlers(service, hooks = {}) {
     'affinity:add': (delta, opts, sessionId) => service.addAffinity(delta, opts, sessionId),
     'affinity:reset': (sessionId) => service.resetAffinity(sessionId),
 
+    /* 维护 */
+    // 不可恢复操作，单独一个 channel：好在这张表里一眼能搜到全部破坏性入口
+    'data:wipeAll': () => service.wipeAllData(),
+
+    /* 未读 */
+    'chat:unread': () => service.unread(),
+    'chat:markRead': (sessionId) => service.markChatRead(sessionId),
+
     /* 人设 */
     'persona:list': () => service.listPersonas(),
     'persona:create': (payload) => service.createPersona(payload),
@@ -118,6 +126,8 @@ export function createIpcHandlers(service, hooks = {}) {
     'chat:diagnose': () => service.chatDiagnose(),
     'chat:sessions': () => service.listChatSessions(),
     'chat:chatterLine': () => service.generateChatterLine(),
+    /* 主动找话题：生成**并落库**（有未读红点），与上面的「主动说话」是两个独立功能 */
+    'chat:topicLine': () => service.generateTopicLine(),
     'chat:ensure': () => service.ensureChatSession(),
     'chat:create': (title) => service.createChatSession(title),
     'chat:rename': (id, title) => service.renameChatSession(id, title),

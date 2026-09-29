@@ -32,7 +32,7 @@ src/main/chat.js     对话后端    ├─ 三者禁止 import electron（smoke
 src/main/store.js    SQLite 数据层┘
 src/shared/*.js      纯函数，桌面与手机两端共享（mobile 直接 import，零复制）
 src/preload/index.cjs contextBridge，只暴露 window.desk 白名单
-src/renderer/        单份构建产物，main.js 按 ?route=pet|panel|chat 挂三个应用
+src/renderer/        单份构建产物，main.js 按 ?route=pet|panel|chat|chatpet|petmenu 挂五个应用
 ```
 
 - 分层方向：`store ← service ← index.js(IPC)`；新增业务逻辑放 service，别塞进 index.js。
@@ -44,7 +44,7 @@ src/renderer/        单份构建产物，main.js 按 ?route=pet|panel|chat 挂�
 
 - **窗口只用 `hide()` 不销毁**；任何改动不能让用户失去找回入口（托盘单击兜底 `restoreAnyWindow()`）。
 - **`petScale` 唯一真相来源是 `settings.petScale`**，渲染层用 computed 派生；三条修改路径统一走 `applyPetScale()` 并广播。
-- **桌宠窗/菜单窗尺寸 = 内容驱动贴合**：渲染层 ResizeObserver 量内容 → 壳层 `pet_refit`/`pet_menu_resize` 按右下角锚定重设窗口；**禁止在壳层手写尺寸公式**（建窗初值除外：Tauri `scale.rs pet_size` / Electron `petSize` 仅首帧猜测）。右键菜单/面板等常驻 UI 一律独立小窗，禁止塞回桌宠窗；把手在 Tauri 下走 `startDragging`（CSS drag 会吞右键），禁改回纯 CSS。
+- **桌宠窗 / 菜单窗 / 立绘小窗尺寸 = 内容驱动贴合**：渲染层 ResizeObserver 量内容 → 壳层按锚点重设窗口 —— `pet_refit` 与 `pet_menu_resize` 按**右下角**锚定，`chatpet:resize` 按**底边**锚定（立绘站在窗口底部、换装面板在它上方展开，所以内容变高时窗口向上长，改顶边会让她的脚上下跳）；**禁止在壳层手写尺寸公式**（建窗初值除外：Tauri `scale.rs pet_size` / Electron `petSize` 仅首帧猜测）。注意 `chatpet:resize` **目前只有 Electron 侧**（Tauri 缺 `chatpet_resize` 命令，`window.desk.resizeChatPet?.()` 静默 no-op），补齐前别以为两端一致。右键菜单/面板等常驻 UI 一律独立小窗，禁止塞回桌宠窗；把手在 Tauri 下走 `startDragging`（CSS drag 会吞右键），禁改回纯 CSS。
 - **桌宠位置持久化以右下角锚点为真值（`petPosition.v=4`：顶角+当时尺寸，恢复按锚点−建窗尺寸，两壳同式）**——顶角直存会把贴合位移当用户拖拽，位置每次重启漂移；禁改回纯顶角存档。建窗尺寸优先用存档尺寸（首启才用 petSize/pet_size 猜测），且放置后须按锚点补偿系统最小窗宽钳制（实测 96 宽被钳到 131，右缘 +35/次重启）。
 - **桌宠拖拽用 `-webkit-app-region: drag`**，禁止「mousemove + setPosition」——事件会断流拖不动；交互元素须显式 `no-drag`。
 - 节假日 API（timor.tech）**必须带 User-Agent**，否则返回 Cloudflare 页。

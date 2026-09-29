@@ -9,7 +9,7 @@
  * 调用方（ipc-handlers / 总线宿主 / smoke）一律 await。
  */
 import { streamChat, pingChat, validateConfig, ChatError, completeOnce } from './chat.js'
-import { buildContent, validateImageDataUrl, checkImagesForModel } from '../shared/content.js'
+import { buildContent, validateImageDataUrl, checkImagesForModel, splitReplySegments } from '../shared/content.js'
 import { GALLERY_KEYS, createGalleryRunner, galleryTotal, explainCandidates } from '../shared/gallery.js'
 import { OUTFIT_STORIES } from '../shared/outfitStories.js'
 import { buildPhotoMessages, photoPathsOf } from '../shared/photoMessage.js'
@@ -38,6 +38,7 @@ import {
   AFFINITY_DAILY_CAP,
   AFFINITY_DECAY,
   CHATTER_SYSTEM_PROMPT,
+  TOPIC_SYSTEM_PROMPT,
   DEFAULT_OUTFIT,
   OUTFIT_SLUGS,
   affinityGain,
@@ -48,6 +49,19 @@ import {
   recentDialogueMessages,
   sanitizeChatter,
 } from '../shared/interactions.js'
+
+/**
+ * 多段回复的相邻间隔（毫秒）。
+ *
+ * 取值要落在渲染层错峰队列的窗口内（`STAGGER_MAX_MS = 3000`）——
+ * 超过 3000 会被判成「普通对话」立即显示，一条条冒出来的节奏就没了。
+ * 1.2 秒左右最像真人打字发下一条：太快像机器，太慢显得卡。
+ *
+ * 导出是为了让 smoke 能断言 `REPLY_SEGMENT_GAP_MS < STAGGER_MAX_MS`：
+ * 这两个字面量跨模块（主进程 / 渲染层 `stores/app.js`），
+ * 谁单独改都不会报错，只有这条不等式能挡住。
+ */
+export const REPLY_SEGMENT_GAP_MS = 1200
 
 /**
  * @param {object} store 已打开的数据层实例（openStore(...) 或 openStoreBridge()）
@@ -420,13 +434,26 @@ export function createService(store, deps = {}) {
     }
 
     const build = async (kind, table) => {
-      const unlocked = await listUnlocked(kind, sid)
+      const real = await listUnlocked(kind, sid)
       const mem = await listMemories(kind, sid)
+      /*
+       * 上帝模式：图鉴按「全解锁」呈现，但**不写库**。
+       *
+       * 和 affinityView 同一个理由 —— 真的把 slug 灌进 meta 的话，
+       * 关掉开关后用户会发现「这些衣服我明明有，却变回没解锁」，
+       * 还会以为是 bug。读时覆盖让开关真的可逆。
+       *
+       * 只覆盖 `unlocked` / `got`，`mem` 保持真实：记忆是「解锁时她说过的话」，
+       * 凭空造出来会污染图鉴文案，也会让解锁剧情提示词拿到假的当前穿着。
+       */
+      const godMode = !!(await store.getSettings()).godMode
+      const unlocked = godMode ? Object.keys(table) : real
       return {
         kind,
         total: Object.keys(table).length,
         unlockedCount: unlocked.length,
         unlocked,
+        godMode,
         items: Object.entries(table).map(([slug, d]) => ({
           slug,
           title: d.title,
@@ -683,9 +710,74 @@ export function createService(store, deps = {}) {
     return next
   }
 
-  /** 确保某年的表已就绪（启动时调用一次即可） */
+  /** 确保某年的表已就绪（启动时调用一次） */
   async function ensureHolidays(now = new Date()) {
     return refreshHolidays(now.getFullYear())
+  }
+
+  /* ---------- 未读 ---------- */
+
+  /*
+   * 「我读到哪儿了」按会话独立存（`meta` 的 scoped 键），
+   * 与图鉴/亲密度同一套命名空间约定 —— 每个会话是独立的她，
+   * 未读自然也该各算各的。
+   */
+  const CHAT_READ_KEY = 'chatReadAt'
+
+  async function unreadCount(sessionId) {
+    const sid = sessionId === undefined ? await currentSessionId() : sessionId
+    if (!sid) return 0
+    const since = (await readScoped(CHAT_READ_KEY, 0, sid)) || 0
+    return store.countUnread(sid, since)
+  }
+
+  /**
+   * 标记「这个会话读到这里了」。
+   *
+   * 直接取**当前最新消息的时间戳**而不是 `Date.now()`：
+   * 用 now 的话，若消息的时间戳刚好比 now 大一点点
+   * （多段回复是「现在 + i×间隔」提前写好的，未来时间戳），
+   * 那条消息会被判成未读，红点消不掉。
+   */
+  async function markChatRead(sessionId) {
+    const sid = sessionId === undefined ? await currentSessionId() : sessionId
+    if (!sid) return 0
+    const latest = await store.recentMessages(sid, 1)
+    const at = latest[0]?.createdAt ?? Date.now()
+    /* 取 max：反复打点不该把已读位置往回退（多窗口竞争时会出现） */
+    const prev = (await readScoped(CHAT_READ_KEY, 0, sid)) || 0
+    const next = Math.max(prev, at)
+    await writeScoped(CHAT_READ_KEY, next, sid)
+    /* 告诉所有窗口（含桌宠）红点该消了 —— 否则要等下一次轮询 */
+    emit('unread', { sessionId: sid, count: 0 })
+    return next
+  }
+
+  /* ---------- 清空全部本地数据 ---------- */
+
+  /**
+   * 清空所有本地数据并回到「刚装好」的状态。
+   *
+   * 不可恢复，不做软删（`deletedAt`）—— 用户点这个按钮的意图是
+   * 「当它不存在」，留一份回收站等于没删。
+   *
+   * 清完之后必须**重建会话**：service 的 `currentSessionId()` 会去读
+   * `chat_sessions`，全空时若不补一个默认会话，后续所有读路径都会拿到
+   * `undefined` 会话，界面直接空掉（不是报错，是静默空白，更难查）。
+   *
+   * 关机自启不在清理范围内：那是 Windows 启动项，不属于「本地数据」，
+   * 而且它在 settings.autoStart 之外另有注册表状态。设置回落默认后
+   * `autoStart` 变 false，下次启动的对账逻辑会把它摘掉
+   * （见 service-host.js / index.js 的开机自启对账）。
+   *
+   * @returns 重建后的新会话 id
+   */
+  async function wipeAllData() {
+    await store.wipeAll()
+    const s = await createSessionSeeded('新的对话')
+    await store.setMeta('activeSession', s.id)
+    emit('state', await getState(new Date(), s.id))
+    return s.id
   }
 
   function onChange(fn) {
@@ -750,6 +842,14 @@ export function createService(store, deps = {}) {
       },
       /* 亲密度：互动累计，用于解锁不同反应 */
       affinity: await getAffinity(now, sid),
+      /*
+       * 未读数：她说的、且我还没看过的条数。
+       *
+       * 「看过」由 `markChatRead()` 在对话窗获得焦点/可见时打点。
+       * 这样普通回复和主动搭话**共用同一套语义** —— 不需要给主动消息
+       * 单独打标记（那种做法会让「回复」和「主动」两套未读逻辑各自漂移）。
+       */
+      unread: await unreadCount(sid),
     }
   }
 
@@ -903,6 +1003,12 @@ export function createService(store, deps = {}) {
     sessionGallery: (sessionId) => gallerySnapshot(sessionId),
     /** 清空某会话的图鉴进度 */
     clearSessionGallery: (sessionId) => clearGallery(sessionId),
+    /** 清空全部本地数据（不可恢复，见 wipeAllData 的注释） */
+    wipeAllData,
+    /** 未读数（当前会话） */
+    unread: () => unreadCount(),
+    /** 标记当前会话已读（对话窗获得焦点时调用） */
+    markChatRead: (sessionId) => markChatRead(sessionId),
 
     /* 写 */
     checkIn,
@@ -1132,7 +1238,7 @@ export function createService(store, deps = {}) {
      * 失败一律返回 ok:false，由调用方回落到固定台词池 ——
      * 挂机冒泡不该因为接口抖动就整个卡住。
      */
-    generateChatterLine: async () => {
+    generateTopicLine: async () => {
       const settings = await store.getSettings()
       /*
        * 挂机台词不会因为接口没配就整个不冒泡 —— 调用方会回落到台词库。
@@ -1162,10 +1268,75 @@ export function createService(store, deps = {}) {
        */
       const context = recentDialogueMessages(history, 12, 1500)
       /*
-       * 两天内没聊过 → 不编了，交给调用方用台词库。
-       * 让她对着一周前的旧事搭话，比说一句通用台词更奇怪。
+       * 没有近期上下文**不再直接放弃** —— 让她开个新话题。
+       *
+       * 原来这里 `return { ok:false, reason:'最近两天没有聊天内容' }`，
+       * 后果是：隔了两天没聊，主动搭话就永远走不到模型那一步，
+       * 每次都回落到台词库那句通用话 —— 而台词库那句**不入库**，
+       * 于是「她不主动发消息、也没有未读红点」。
        */
-      if (!context.length) return { ok: false, reason: '最近两天没有聊天内容' }
+      const opening = context.length === 0
+
+      try {
+        const raw = await completeOnce({
+          settings,
+          system: TOPIC_SYSTEM_PROMPT,
+          messages: [
+            ...context,
+            {
+              role: 'user',
+              content: opening
+                ? '（我们有一阵没聊了。现在你想主动找我说句话，开个话头，只输出那条消息本身。）'
+                : '（以上是你和我的真实聊天。现在你想主动找我搭句话，只输出那条消息本身。）',
+            },
+          ],
+          /*
+           * 80 太紧：模型若先出推理 token，预算会被吃光、正文为空 ——
+           * 表现是 接口返回了空回复，于是每次都回落到台词库那句（不入库），
+           * 用户看到的就是「主动说话没有红点、也不进消息列表」。
+           * 一次短生成用不掉多少，给宽一点。
+           */
+          maxTokens: 512,
+          runtime: await chatRuntime(),
+        })
+        const line = sanitizeChatter(raw, 60)
+        if (!line) return { ok: false, reason: '生成的台词为空' }
+        /*
+         * 落库 —— 这是「主动找话题」，要成为**聊天记录的一部分**：
+         * 有未读红点、能在消息列表里看到。
+         * （「主动说话」那条路径不入库，见 generateChatterLine。）
+         */
+        const msg = await store.addMessage(latest.id, 'assistant', line)
+        await store.touchSession(latest.id)
+        emit('chat', { type: 'message', sessionId: latest.id, message: msg })
+        /* 未读数变了，推一次让桌宠的红点亮起来（轻量事件，不跑整个 getState） */
+        emit('unread', { sessionId: latest.id, count: await unreadCount(latest.id) })
+        return { ok: true, line, fromHistory: true, messageId: msg.id }
+      } catch (err) {
+        return { ok: false, reason: err?.message ?? String(err) }
+      }
+    },
+
+    /**
+     * 「主动说话」—— 桌宠气泡里冒一句，**不入库、没有未读**。
+     *
+     * 与 `generateTopicLine` 的分工（用户明确要求拆成两个独立功能）：
+     *   generateChatterLine  氛围：她待着时随口一句，说完就没
+     *   generateTopicLine    真消息：有红点、进消息列表
+     *
+     * 两者共用同一份「最近两天对话」上下文与 `sanitizeChatter` 清洗，
+     * 只有提示词和**是否落库**不同。
+     */
+    generateChatterLine: async () => {
+      const settings = await store.getSettings()
+      const check = await validateConfig(settings, await customPersonas(), await chatRuntime())
+      if (!check.ok) return { ok: false, reason: check.reason }
+
+      const sessions = await store.listSessions()
+      if (!sessions.length) return { ok: false, reason: '还没有对话记录' }
+      const latest = sessions[0]
+      const history = await store.messagesSince(latest.id, Date.now() - CHATTER_WINDOW_MS, 200)
+      const context = recentDialogueMessages(history, 12, 1500)
 
       try {
         const raw = await completeOnce({
@@ -1173,14 +1344,26 @@ export function createService(store, deps = {}) {
           system: CHATTER_SYSTEM_PROMPT,
           messages: [
             ...context,
-            { role: 'user', content: '（以上是你和我的真实聊天。现在突然想起一件事，对我说一句相关的话，只输出那句话本身。）' },
+            {
+              role: 'user',
+              content: context.length
+                ? '（以上是你和我的真实聊天。现在突然想起一件事，对我说一句相关的话，只输出那句话本身。）'
+                : '（你现在在忙自己的事，随口说一句话，像自言自语那样。只输出那句话本身。）',
+            },
           ],
-          maxTokens: 80,
+          /*
+           * 80 太紧：模型若先出推理 token，预算会被吃光、正文为空 ——
+           * 表现是 接口返回了空回复，于是每次都回落到台词库那句（不入库），
+           * 用户看到的就是「主动说话没有红点、也不进消息列表」。
+           * 一次短生成用不掉多少，给宽一点。
+           */
+          maxTokens: 512,
           runtime: await chatRuntime(),
         })
         const line = sanitizeChatter(raw)
         if (!line) return { ok: false, reason: '生成的台词为空' }
-        return { ok: true, line, fromHistory: true }
+        /* 注意：**不落库** —— 它只是气泡里的一句，说完就没 */
+        return { ok: true, line, fromHistory: context.length > 0 }
       } catch (err) {
         return { ok: false, reason: err?.message ?? String(err) }
       }
@@ -1274,11 +1457,71 @@ export function createService(store, deps = {}) {
           signal: controller.signal,
           onDelta: (_delta, full) => emit('chat-delta', { sessionId: sid, requestId, full }),
         })
-        const msg = await store.addMessage(sid, 'assistant', result.content, { model: result.model })
+        /*
+         * 她可以一次生成、按多条发出（用 `<<<MSG>>>` 分隔）。
+         *
+         * 每条落成**独立消息**、时间戳按固定间隔递增 —— 渲染层的
+         * 逐条出现队列本来就是按相邻 `createdAt` 差值排队的（照片连发
+         * 用的同一套机制），所以这里只要把时间戳错开，界面就会
+         * 「一条条冒出来」。
+         *
+         * 没有标记时 `splitReplySegments` 返回单条，行为与以前完全一致。
+         */
+        const segments = splitReplySegments(result.content)
+        /*
+         * 分段全空时**回落成原文** —— 否则她的回复会凭空消失。
+         *
+         * `splitReplySegments` 在「只有标记没有内容」或「纯空白」时返回空数组，
+         * 它的文档写明「调用方据此回落到原文」，但两端都没回落：
+         * `msgs` 为空 → 一条 assistant 消息都不落库，还会
+         * `emit('chat-done', { message: undefined })` —— 界面表现就是
+         * 「她的回复莫名其妙没了，且没有任何报错」。
+         *
+         * 回落成原文的代价是标记可能被原样显示，但那远好过静默丢失。
+         * 手机端 mobile/chat.js 是同一处修复。
+         */
+        const parts = segments.length ? segments : [result.content]
+        const baseTs = Date.now()
+        const msgs = []
+        for (const [i, seg] of parts.entries()) {
+          msgs.push(
+            await store.addMessage(sid, 'assistant', seg, {
+              model: result.model,
+              createdAt: baseTs + i * REPLY_SEGMENT_GAP_MS,
+            }),
+          )
+        }
+        const msg = msgs[msgs.length - 1]
         await store.touchSession(sid)
-        emit('chat', { type: 'message', sessionId: sid, message: msg })
-        /* 一轮问答真正聊完，额外记一笔 —— 光发消息不算，得聊完 */
-        emit('affinity', await addAffinity(AFFINITY_GAIN.chatRound, new Date(), { kind: 'chat', silent: true, sessionId: sid }))
+        /*
+         * 逐条发 `chat` 事件：渲染层收到一条就解一次错峰队列，
+         * 一次性全推过去的话队列会按时间戳把后续几条排队 —— 也对，
+         * 但事件顺序更贴近「她一条条发」的真实时序，便于排查。
+         */
+        for (const m of msgs) emit('chat', { type: 'message', sessionId: sid, message: m })
+        /*
+         * 未读数变了要**主动推**一次。
+         *
+         * 不推的话桌宠只能等自己的 15 秒轮询，红点会明显滞后
+         * （实测：已经聊完 3 条，红点还停在上一轮的 7）。
+         * 用轻量的 `unread` 事件而不是整个 `state`：getState 要载
+         * 11 年节假日表 + 算薪资，为改一个数字跑一遍不划算。
+         */
+        emit('unread', { sessionId: sid, count: await unreadCount(sid) })
+        /*
+         * 一轮问答真正聊完，额外记一笔 —— 光发消息不算，得聊完。
+         *
+         * **惹她生气那轮不给这一笔**：上面按 `upsetting` 扣了分、并把
+         * 当次加分清零，若这里再按「聊完」记 +3，就把扣的分加回来了 ——
+         * 实测净变化是 `-2 + 3 = +1`，**骂她反而涨点**。
+         *
+         * `settleAffinity` 里那句「生气当次的加分直接清零」本身没错，
+         * 但一轮被拆成两次调用，抵消就发生在两次调用**之间**了。
+         * 判定必须是同一轮同一个 `upsetting`，所以这里也要看它。
+         */
+        if (!isUpsetting(text)) {
+          emit('affinity', await addAffinity(AFFINITY_GAIN.chatRound, new Date(), { kind: 'chat', silent: true, sessionId: sid }))
+        }
 
         /*
          * 检查对话是否触发了图鉴解锁。

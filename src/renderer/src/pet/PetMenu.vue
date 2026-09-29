@@ -15,7 +15,7 @@ import {
   OUTFITS,
   OUTFIT_SLUGS,
   DEFAULT_OUTFIT,
-  affinityLevel,
+  affinityView,
   outfitForTime,
   outfitInfo,
 } from '@shared/interactions.js'
@@ -36,19 +36,19 @@ const scale = computed(() => {
   const s = Number(state.settings.petScale)
   return Number.isFinite(s) && s > 0 ? s : 1
 })
-const affinity = computed(() => affinityLevel(state.affinity?.points ?? 0))
+const affinity = computed(() => affinityView(state.affinity?.points ?? 0, state.settings?.godMode))
 
 /* ---------- 换装展示 ---------- */
 
 /*
- * 清单**只列已解锁的**。之前直接列 OUTFITS（全部 26 套）等于绕过图鉴：
+ * 清单**只列已解锁的**。之前直接列 OUTFITS 全量等于绕过图鉴：
  * 右键随手穿上还没解锁的衣服，图鉴的进度、条件、故事全失去意义。
- * 「跟随时间」是自动模式，不受解锁限制（它自己会从已解锁池里挑）。
+ * 「自动穿」是自动模式，只从已解锁池里挑（见 currentOutfitSlug）。
  */
 const clockTick = ref(Date.now())
 let clockTimer = null
 onMounted(() => {
-  /* 自动换装要跨过时段边界，每分钟对一次时间 */
+  /* 自动换装按 30 分钟一个时间片哈希，每分钟对一次时间才能跨片切换 */
   clockTimer = window.setInterval(() => (clockTick.value = Date.now()), 60_000)
 })
 onBeforeUnmount(() => window.clearInterval(clockTimer))
@@ -56,7 +56,9 @@ onBeforeUnmount(() => window.clearInterval(clockTimer))
 const unlockedOutfits = computed(() => new Set(state.gallery?.outfit?.unlocked ?? []))
 const outfits = computed(() => OUTFITS.filter((o) => unlockedOutfits.value.has(o.slug)))
 const currentOutfitSlug = computed(() => {
-  if (state.settings.outfitMode !== 'fixed') return outfitForTime(new Date(clockTick.value))
+  /* 必须传已解锁池：不传时 outfitForTime 直接回落默认那套（自动模式恒为 JK） */
+  if (state.settings.outfitMode !== 'fixed')
+    return outfitForTime(new Date(clockTick.value), [...unlockedOutfits.value])
   const s = state.settings.outfitSlug
   if (!OUTFIT_SLUGS.includes(s)) return DEFAULT_OUTFIT
   if (!unlockedOutfits.value.has(s)) return DEFAULT_OUTFIT
@@ -102,10 +104,10 @@ const outfitLabel = computed(() => {
         <button
           class="mo-item"
           :class="{ active: state.settings.outfitMode === 'auto' }"
-          title="按时间自动换（只用已解锁的）"
+          title="自动穿（从已解锁的里随机挑，不看时段）"
           @click="act({ type: 'outfit', slug: null })"
         >
-          🕘
+          🎲
         </button>
         <button
           v-for="o in outfits"

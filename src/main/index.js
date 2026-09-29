@@ -358,6 +358,34 @@ function refitPetWindow({ width, height }) {
   })
 }
 
+/**
+ * 侧边立绘窗按内容高度**向上长**，底边不动。
+ *
+ * 为什么需要它：换装面板在立绘上方展开，而窗口是透明+固定尺寸的 ——
+ * **透明只让背景透明，不代表内容能溢出窗口**，超出的部分一律被裁掉。
+ * 症状极具迷惑性：面板本体被裁没了，但它的 `box-shadow`（向下偏移
+ * 10px + 模糊 26px）有约 36px 落回窗口内，用户看到的只是「一道阴影」。
+ *
+ * 保持**底边**锚定而不是顶边：立绘是站在窗口底部的，
+ * 改顶边会让她的脚在每次开合面板时上下跳。
+ */
+function resizeChatPetWindow({ height } = {}) {
+  if (!chatPetWindow || chatPetWindow.isDestroyed()) return
+  const { workArea } = screen.getPrimaryDisplay()
+  const b = chatPetWindow.getBounds()
+  /* 下限取建窗高度：面板收起时不该比初始还矮 */
+  const h = Math.max(CHAT_PET_SIZE.height, Math.round(Number(height) || 0))
+  let y = Math.round(b.y + b.height - h)
+  let x = b.x
+  /*
+   * 夹回工作区，但**只在真的越界时才动** ——
+   * 无条件夹会把底边锚定破坏掉（屏幕顶部附近的窗口会被推下来）。
+   */
+  x = Math.round(Math.min(Math.max(x, workArea.x + 8), workArea.x + workArea.width - CHAT_PET_SIZE.width - 8))
+  if (y < workArea.y + 8) y = workArea.y + 8
+  chatPetWindow.setBounds({ x, y, width: CHAT_PET_SIZE.width, height: h })
+}
+
 function togglePanel() {
   if (panelWindow && !panelWindow.isDestroyed()) {
     if (panelWindow.isVisible()) panelWindow.hide()
@@ -713,7 +741,18 @@ function registerIpc() {
    * 长操作与 Tauri 总线同口径绕开——它们本就长时间 await 网络，队列挡不住。
    */
   const business = createIpcHandlers(service)
-  const LONG_RUNNING = new Set(['chat:send', 'chat:diagnose', 'chat:test', 'chat:chatterLine'])
+  /*
+   * 长操作绕开串行队列：`chat:topicLine` 与 `chat:chatterLine` 是**同一个
+   * LLM 调用**（可能十几秒）。不豁免的话它被塞进业务串行队列，
+   * 生成期间所有窗口的业务 IPC 全被堵住。
+   */
+  const LONG_RUNNING = new Set([
+    'chat:send',
+    'chat:diagnose',
+    'chat:test',
+    'chat:chatterLine',
+    'chat:topicLine',
+  ])
   let tail = Promise.resolve()
   const enqueue = (fn) => {
     const p = tail.then(fn)
@@ -815,6 +854,11 @@ function registerIpc() {
           height: Math.max(120, Math.round(height)),
         })
       }
+      return true
+    },
+    /* 侧边立绘窗贴合：渲染层量内容高度（换装面板展开时会长高），底边锚定 */
+    'chatpet:resize': (_e, size) => {
+      resizeChatPetWindow(size ?? {})
       return true
     },
     /* 窗口贴合：渲染层量内容尺寸，右下角锚定重设窗口 */

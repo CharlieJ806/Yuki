@@ -14,8 +14,10 @@
  * 所以整份快照由主进程组装后下发，前端只负责渲染 ——
  * 前端自己拼的话，两端会各写一套，而且拿不到那些数据。
  */
-import { computed, onMounted, ref, watch } from 'vue'
-import { state, refreshGallery, clearGallery, win } from '../stores/app.js'
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { state, refreshGallery, clearGallery, saveSettings } from '../stores/app.js'
+import { ChatBackgroundMode } from '@shared/moyu.js'
+import { outfitConditionParts } from '@shared/outfitStories.js'
 
 const tab = ref('outfit')
 const busy = ref(false)
@@ -54,15 +56,15 @@ const thumbOf = (it) => {
   return `yuki-outfit-${it.slug}.png`
 }
 
-/** 条件类的中文描述（与手机端同一套说法） */
-function conditionText(c) {
-  if (!c) return ''
-  const parts = []
-  if (c.minPoints != null) parts.push(c.minPoints === 0 ? '初始就有' : `亲密度 ${c.minPoints}`)
-  if (c.hoursAfter != null) parts.push(`${c.hoursAfter} 点之后`)
-  if (c.hoursBefore != null) parts.push(`${c.hoursBefore} 点之前`)
-  if (c.restDayOnly) parts.push('休息日')
-  return parts.length ? parts.join(' · ') : '无条件'
+/**
+ * 条件类的中文描述（与手机端同一套说法）。
+ *
+ * 文案口径统一在 shared 的 `outfitConditionParts` 里 —— 亲密度门槛
+ * 从 `OUTFIT_MIN_POINTS` 推算，不能读故事对象的 `condition.minPoints`
+ * （那个字段已删除，读它会让「还差 300 点」这种事在界面上消失）。
+ */
+function conditionText(slug, condition) {
+  return outfitConditionParts(slug, condition).join(' · ')
 }
 
 async function load() {
@@ -104,6 +106,73 @@ function stepImage(delta) {
   imageIndex.value = ((imageIndex.value + delta) % n + n) % n
 }
 
+const closeDetail = () => {
+  detail.value = null
+}
+
+/* ---------- 设为聊天背景 / 加入轮换 ---------- */
+
+/*
+ * 与手机端同一套语义：这两件事都作用在「当前正在看的那张」上。
+ * 存在 settings 里的是**路径**而不是 slug —— 同一套装扮可能有多张照片，
+ * 只存 slug 就不知道用户要哪一张。
+ */
+
+/** 当前这张图的路径（多张时取正在看的那张） */
+const currentPath = computed(() => detailImages.value[imageIndex.value] ?? '')
+
+/** 只有真实存在的照片才能当背景；退回立绘的那些不算 */
+const canUseAsBg = computed(() => Boolean(detail.value?.got && detail.value?.photos?.length && currentPath.value))
+
+const bgIsCurrent = computed(
+  () => state.settings?.chatBgMode === ChatBackgroundMode.FIXED && state.settings?.chatBackground === currentPath.value,
+)
+
+const inPool = computed(() => (state.settings?.chatBgPool ?? []).includes(currentPath.value))
+
+async function toggleBackground() {
+  const rel = currentPath.value
+  if (!rel) return
+  const off = bgIsCurrent.value
+  /* 关掉时把 chatBackground 也清空，别留个指不到的值 */
+  await saveSettings({
+    chatBgMode: off ? ChatBackgroundMode.OFF : ChatBackgroundMode.FIXED,
+    chatBackground: off ? '' : rel,
+  })
+}
+
+async function togglePool() {
+  const rel = currentPath.value
+  if (!rel) return
+  const pool = state.settings?.chatBgPool ?? []
+  const next = pool.includes(rel) ? pool.filter((p) => p !== rel) : [...pool, rel]
+  /*
+   * 池子被清空且正在轮换 → 自动退回关闭。
+   * 不自动退的话，界面显示「自动轮换」但永远没有背景，用户会以为功能坏了。
+   */
+  const patch = { chatBgPool: next }
+  if (!next.length && state.settings?.chatBgMode === ChatBackgroundMode.ROTATE) patch.chatBgMode = ChatBackgroundMode.OFF
+  await saveSettings(patch)
+}
+
+/**
+ * 键盘操作。
+ *
+ * 面板窗是桌面应用，用户会自然地按 Esc 想关掉 ——
+ * 之前只能拿鼠标点右上角的 ✕（而且图片放大后要跨半个屏幕去够它）。
+ * 左右方向键同理：多张照片时不该只能点那两个小箭头。
+ *
+ * 挂在 window 上而不是容器上：容器没有焦点，`@keydown` 收不到事件，
+ * 除非再加 tabindex + autofocus —— 那会在打开时抢走焦点，
+ * 反而让输入类快捷键（比如别处的 Esc）行为变怪。
+ */
+function onKey(e) {
+  if (!detail.value) return
+  if (e.key === 'Escape') closeDetail()
+  else if (e.key === 'ArrowLeft') stepImage(-1)
+  else if (e.key === 'ArrowRight') stepImage(1)
+}
+
 async function onClear() {
   if (!confirm('清空**当前会话**的图鉴进度？其它会话不受影响。')) return
   busy.value = true
@@ -115,9 +184,15 @@ async function onClear() {
   }
 }
 
-onMounted(load)
+onMounted(() => {
+  load()
+  window.addEventListener('keydown', onKey)
+})
+onBeforeUnmount(() => window.removeEventListener('keydown', onKey))
 /* 切换会话要重拉 —— 每个会话的进度不同 */
 watch(() => state.chat.sessionId, load)
+/* 换会话时把查看器关掉：那个会话的项在新会话里未必解锁 */
+watch(() => state.chat.sessionId, closeDetail)
 </script>
 
 <template>
@@ -169,43 +244,80 @@ watch(() => state.chat.sessionId, load)
             loading="lazy"
           />
           <span v-if="!it.got" class="lock">?</span>
+          <!-- 已解锁的可点开全屏大图；给个放大角标，否则没人知道能点 -->
+          <span v-else class="zoom" title="点开看大图">⤢</span>
         </div>
         <p class="title">{{ it.got ? it.title : '？？？' }}</p>
         <p class="hint">{{ it.got ? (it.line || it.story) : it.hint }}</p>
       </article>
     </div>
 
-    <!-- 详情：已解锁看大图与触发词，未解锁只说线索 -->
-    <div v-if="detail" class="detail-mask" @click.self="detail = null">
-      <div class="detail">
-        <button class="close" @click="detail = null">✕</button>
+    <!--
+      全屏查看器：点整格直接进来（跳过中间那层窄卡片）。
+      文字与触发规则放在底部 —— 完整保留原来详情卡的信息，
+      但不占图片的地方。
 
-        <!--
-          已解锁的项显示**大图**（照片优先，退回立绘/封面）。
-          多张时左右翻页 —— 一套装扮可能有多张自拍，
-          生活照一组也可能有连拍两张。
-        -->
-        <div v-if="detail.got" class="viewer">
-          <button v-if="detailImages.length > 1" class="nav prev" @click.stop="stepImage(-1)">‹</button>
-          <img
-            v-if="currentImage"
-            class="detail-img"
-            :src="currentImage"
-            :alt="detail.title"
-          />
-          <button v-if="detailImages.length > 1" class="nav next" @click.stop="stepImage(1)">›</button>
+      未解锁的项也走同一层：图位显示问号剪影 + 线索。
+      不用两个组件，是因为「锁着的长什么样」和「解锁的长什么样」
+      只差一个图位，分两套必然慢慢走偏。
+    -->
+    <div v-if="detail" class="viewer" @click.self="closeDetail">
+      <header class="viewer-head">
+        <span class="viewer-title">{{ detail.got ? detail.title : '还没解锁' }}</span>
+        <button class="icon-btn" title="关闭 (Esc)" @click="closeDetail">✕</button>
+      </header>
+
+      <div class="viewer-stage">
+        <button
+          v-if="detailImages.length > 1"
+          class="nav prev"
+          title="上一张 (←)"
+          @click.stop="stepImage(-1)"
+        >
+          ‹
+        </button>
+
+        <img v-if="currentImage" class="viewer-img" :src="currentImage" :alt="detail.title" />
+
+        <!-- 未解锁 / 该项还没有图：给剪影而不是裂图 -->
+        <div v-else class="viewer-empty">
+          <span class="viewer-lock">?</span>
+          <p>{{ detail.hint }}</p>
         </div>
-        <p v-if="detail.got && detailImages.length > 1" class="page">
+
+        <button
+          v-if="detailImages.length > 1"
+          class="nav next"
+          title="下一张 (→)"
+          @click.stop="stepImage(1)"
+        >
+          ›
+        </button>
+      </div>
+
+      <footer class="viewer-foot">
+        <p v-if="detailImages.length > 1" class="viewer-count">
           {{ imageIndex + 1 }} / {{ detailImages.length }}
         </p>
+        <p v-if="detail.got" class="viewer-line">{{ detail.line || detail.story }}</p>
 
-        <h3>{{ detail.got ? detail.title : '还没解锁' }}</h3>
-        <p class="detail-line">{{ detail.got ? (detail.line || detail.story) : detail.hint }}</p>
+        <!-- 只有真照片能当背景（退回立绘的那些不算） -->
+        <div v-if="canUseAsBg" class="viewer-tools">
+          <button class="btn" :class="{ on: bgIsCurrent }" @click="toggleBackground">
+            {{ bgIsCurrent ? '取消背景' : '设为背景' }}
+          </button>
+          <button class="btn" :class="{ on: inPool }" @click="togglePool">
+            {{ inPool ? '移出轮换' : '加入轮换' }}
+          </button>
+        </div>
 
         <div class="rules">
           <p class="rules-title">触发方式</p>
-          <p v-if="detail.unlock === 'condition'" class="rules-body">
-            <em>{{ conditionText(detail.condition) }}</em>
+          <p v-if="!detail.got" class="rules-body">
+            {{ detail.hint }}
+          </p>
+          <p v-else-if="detail.unlock === 'condition'" class="rules-body">
+            <em>{{ conditionText(detail.slug, detail.condition) }}</em>
           </p>
           <p v-else class="rules-body">
             聊到这些话题时可能触发：
@@ -215,7 +327,7 @@ watch(() => state.chat.sessionId, load)
             具体是否触发由模型判断（宁缺毋滥），所以不是命中就一定给。
           </p>
         </div>
-      </div>
+      </footer>
     </div>
   </div>
 </template>
@@ -263,6 +375,15 @@ watch(() => state.chat.sessionId, load)
   position: absolute; inset: 0; display: grid; place-items: center;
   font-size: 22px; color: var(--text-3); font-weight: 700;
 }
+/* 放大角标：平时淡，hover 时明显 —— 一直亮会盖住图片内容 */
+.zoom {
+  position: absolute; right: 5px; bottom: 5px;
+  width: 20px; height: 20px; border-radius: 6px;
+  display: grid; place-items: center; font-size: 11px;
+  background: rgba(0, 0, 0, .5); color: #fff;
+  opacity: 0; transition: opacity .14s;
+}
+.card:hover .zoom { opacity: .85; }
 .title { margin: 7px 8px 2px; font-size: 12px; font-weight: 600; }
 .hint {
   margin: 0 8px 9px; font-size: 10.5px; line-height: 1.5;
@@ -270,53 +391,104 @@ watch(() => state.chat.sessionId, load)
   display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;
 }
 
-.detail-mask {
-  position: fixed; inset: 0; z-index: 60;
-  background: rgba(0,0,0,.45);
-  display: grid; place-items: center; padding: 24px;
-}
-.detail {
-  position: relative; width: 100%; max-width: 380px;
-  max-height: 88vh; overflow-y: auto;
-  background: var(--surface, #fff); border-radius: 14px;
-  padding: 18px 18px 20px; text-align: center;
-}
-.close {
-  position: absolute; right: 10px; top: 10px;
-  border: none; background: transparent; font-size: 15px;
-  color: var(--text-3); cursor: pointer;
-}
 /*
- * 详情里的看图区：图片居中，翻页按钮压在两侧。
+ * 全屏查看器。
  *
- * 卡片宽度只有 380px，所以图不要撑满 —— 留点边距，
- * 翻页按钮才不会盖住图片内容。
+ * 取代原来的「380px 窄卡片 + 最高 300px 的图」—— 那个尺寸下
+ * 立绘和照片都看不清，"查看大图"名不副实。移动端的同款是全屏的，
+ * 两端从此一致。
+ *
+ * 用 flex 纵向三段（头 / 图 / 尾）而不是绝对定位：
+ * 图区 `flex:1` 自动吃掉剩余高度，文字多长都不会把图挤没。
  */
-.viewer { position: relative; display: flex; align-items: center; justify-content: center; }
-.detail-img { max-width: 100%; max-height: 300px; object-fit: contain; border-radius: 8px; }
-.viewer .nav {
+.viewer {
+  position: fixed; inset: 0; z-index: 60;
+  display: flex; flex-direction: column;
+  background: rgba(0, 0, 0, 0.92);
+  color: #fff;
+  padding: 14px 16px 16px;
+}
+
+.viewer-head {
+  flex: none;
+  display: flex; align-items: center; justify-content: space-between; gap: 12px;
+}
+.viewer-title { font-size: 15px; font-weight: 600; }
+.icon-btn {
+  border: none; background: transparent; color: #fff;
+  font-size: 16px; line-height: 1; cursor: pointer; padding: 4px 8px;
+  border-radius: 7px; opacity: .8;
+}
+.icon-btn:hover { opacity: 1; background: rgba(255, 255, 255, .12); }
+
+.viewer-stage {
+  position: relative;
+  flex: 1; min-height: 0;
+  display: flex; align-items: center; justify-content: center;
+  margin: 8px 0;
+}
+.viewer-img {
+  max-width: 100%; max-height: 100%;
+  object-fit: contain;
+  border-radius: 8px;
+}
+/* 未解锁 / 该项还没有图：剪影 + 线索，不给裂图 */
+.viewer-empty {
+  display: grid; place-items: center; gap: 10px;
+  color: rgba(255, 255, 255, .6); text-align: center; padding: 0 24px;
+}
+.viewer-lock { font-size: 46px; font-weight: 700; opacity: .5; }
+.viewer-empty p { margin: 0; font-size: 12.5px; line-height: 1.7; max-width: 420px; }
+
+/*
+ * 翻页按钮压在图片两侧。
+ * 半透明底而不是纯箭头 —— 浅色照片上白箭头会看不见。
+ */
+.nav {
   position: absolute; top: 50%; transform: translateY(-50%);
-  width: 30px; height: 30px; border: 0; border-radius: 50%;
-  background: rgba(0, 0, 0, .45); color: #fff; font-size: 18px; line-height: 1;
-  cursor: pointer; display: grid; place-items: center;
+  width: 34px; height: 34px; border: 0; border-radius: 50%;
+  background: rgba(0, 0, 0, .5); color: #fff;
+  font-size: 20px; line-height: 1; cursor: pointer;
+  display: grid; place-items: center;
 }
-.viewer .nav.prev { left: 0; }
-.viewer .nav.next { right: 0; }
-.viewer .nav:hover { background: rgba(0, 0, 0, .7); }
-.page { margin: 4px 0 0; font-size: 11px; color: var(--text-3); }
-.detail h3 { margin: 10px 0 0; font-size: 15px; }
-.detail-line { margin: 6px 0 0; font-size: 12.5px; line-height: 1.7; color: var(--text-2); }
+.nav.prev { left: 4px; }
+.nav.next { right: 4px; }
+.nav:hover { background: rgba(0, 0, 0, .78); }
+
+.viewer-foot {
+  flex: none; text-align: center;
+  max-height: 38vh; overflow-y: auto;
+}
+.viewer-count { margin: 0 0 2px; font-size: 11.5px; opacity: .7; }
+.viewer-line { margin: 0 0 8px; font-size: 13px; line-height: 1.7; opacity: .92; }
+
+/* 设为背景 / 加入轮换 —— 和手机端同一套语义，压在文字上方 */
+.viewer-tools {
+  display: flex; gap: 8px; justify-content: center; flex-wrap: wrap;
+  margin: 0 0 4px;
+}
+.viewer-tools .btn {
+  border: 1px solid rgba(255, 255, 255, .3);
+  background: rgba(255, 255, 255, .1);
+  color: #fff; border-radius: 9px; padding: 6px 14px;
+  font-size: 12.5px; cursor: pointer;
+}
+.viewer-tools .btn:hover { background: rgba(255, 255, 255, .2); }
+.viewer-tools .btn.on {
+  border-color: #5eead4; background: rgba(94, 234, 212, .18); color: #5eead4; font-weight: 600;
+}
+
 .rules {
-  margin-top: 14px; padding-top: 12px; text-align: left;
-  border-top: 1px solid var(--border);
+  margin-top: 10px; padding-top: 10px; text-align: left;
+  border-top: 1px solid rgba(255, 255, 255, .18);
 }
-.rules-title { margin: 0 0 6px; font-size: 11.5px; font-weight: 700; color: var(--text-3); }
-.rules-body { margin: 0; font-size: 11.5px; line-height: 1.9; color: var(--text-2); }
-.rules-body em { font-style: normal; font-weight: 600; color: var(--accent, #14b8a6); }
+.rules-title { margin: 0 0 6px; font-size: 11.5px; font-weight: 700; opacity: .7; }
+.rules-body { margin: 0; font-size: 11.5px; line-height: 1.9; opacity: .9; }
+.rules-body em { font-style: normal; font-weight: 600; color: #5eead4; }
 .rules-body code {
   display: inline-block; padding: 0 5px; margin: 0 3px 3px 0;
-  border-radius: 4px; background: rgba(0,0,0,.05);
+  border-radius: 4px; background: rgba(255, 255, 255, .14);
   font-size: 10.5px; font-family: ui-monospace, monospace;
 }
-.rules-note { margin: 8px 0 0; font-size: 10.5px; color: var(--text-3); line-height: 1.6; }
+.rules-note { margin: 8px 0 0; font-size: 10.5px; opacity: .6; line-height: 1.6; }
 </style>

@@ -5,6 +5,14 @@
  * 台词刻意写得短——桌宠气泡空间有限，长了会被截断。
  */
 import { textOfContent } from './content.js'
+/*
+ * 服饰门槛表（`OUTFIT_MIN_POINTS`）住在 outfitStories.js。
+ *
+ * 那是唯一一张「哪套装扮要多少亲密度」的表 —— 图鉴的条件解锁、
+ * 关键词预筛、以及这里的档位名推算全从它读。
+ * outfitStories 是**零 import 的纯数据叶子模块**，所以这个方向不会成环。
+ */
+import { outfitMinPoints } from './outfitStories.js'
 
 /**
  * 主动冒泡的间隔抖动幅度（毫秒）。
@@ -152,6 +160,46 @@ export function affinityLevel(points) {
     next,
     toNext: next ? next.min - p : 0,
     progress: next ? Math.max(0, Math.min(100, ((p - cur.min) / (next.min - cur.min)) * 100)) : 100,
+  }
+}
+
+/**
+ * 上帝模式下的**展示档位**。
+ *
+ * `min` 填 0 而不是各档真值：UI 只读 `name` / `note`，
+ * 进度条走的是 affinityView 返回的 `progress`（已置 100），不拿它做除数。
+ */
+export const GOD_MODE_LEVEL = { min: 0, name: '上帝模式', note: '全部内容已解锁' }
+
+/**
+ * 读亲密度时该看到的档位 —— 上帝模式在此**读时覆盖**。
+ *
+ * 为什么是读时覆盖而不是把亲和度写进库：
+ * 一旦写进去，就再也分不清「这一档是我处出来的」还是「模式给的」，
+ * 而且想恢复真实进度只能清空全部数据。覆盖只影响读，
+ * 关掉开关立刻回到真实档位，数据库一个字节都没动。
+ *
+ * 上帝模式要覆盖的是 **voice** —— 关系语气档位。实际还看它的只剩
+ * 台词（`linesFor`）与主动说话频率（`idleIntervalScale`）；
+ * 动作池也收这个参数但**已经不分档**（五档都是 `ALL_IDLE_POSES`），
+ * 服饰门控则完全不看它（「能不能穿」由图鉴的已解锁清单决定，
+ * 亲密度只决定「够不够格去触发」，见 `outfitUnlockTierName` 的注释）。
+ * 顺带把 level 换成「上帝模式」——
+ * 界面上必须看得见，否则用户会困惑于「亲密度没动，怎么全解锁了」。
+ */
+export function affinityView(points, godMode = false) {
+  const base = affinityLevel(points)
+  if (!godMode) return { ...base, godMode: false }
+  return {
+    ...base,
+    level: GOD_MODE_LEVEL,
+    index: AFFINITY_LEVELS.length - 1,
+    voice: VOICE_BY_LEVEL[VOICE_BY_LEVEL.length - 1],
+    isMax: true,
+    next: null,
+    toNext: 0,
+    progress: 100,
+    godMode: true,
   }
 }
 
@@ -427,7 +475,7 @@ export function pickLine(pool, lastLine = null, rand = Math.random) {
  * 所以服饰不能当动作立绘用 —— 那样换装后表情就全失效了。
  * 这里的用法是：
  *   1. 挂机轮换池的候选（`outfit-*` 前缀的图直接参与轮换）
- *   2. 对话窗旁边的小立绘，按时间自动换 + 可手动指定
+ *   2. 对话窗旁边的小立绘，从已解锁池里随机换 + 可手动指定
  *
  * slug 必须与 `resources/pet/manifest.json` 里的 outfit 条目一致
  * （由 `scripts/install-pet-assets.js` 从 resources/raw-cut 生成）。
@@ -501,81 +549,53 @@ export function dayPartOf(now = new Date()) {
 }
 
 /**
- * 每套装扮适合哪个时段。
+ * 「她此刻穿哪套」的时间片长度。
  *
- * 用途：从**已解锁的**衣服里挑一套「此刻合适」的 ——
- * 让自动模式也能穿到各种衣服（包括 JK、旗袍这些），
- * 而不再是全天只有睡衣/居家服/便服三套。
- *
- * 这不只是好看：解锁条件里有「刚好穿着某套」这类判定，
- * 自动模式永远只穿那 3 套的话，这类条件几乎不可能成立。
+ * 比桌宠的立绘轮换（`petRotateMin`，默认 10 分钟）长 ——
+ * 这是「她今天穿什么」，不是「她现在在干嘛」，换太勤反而不像有衣柜的人。
  */
-const OUTFIT_DAY_PARTS = {
-  pajamas: ['sleep', 'home'],
-  'pajamas-black': ['sleep', 'home'],
-  'pajamas-pink': ['sleep', 'home'],
-  'pajamas-bodysuit': ['home', 'sleep'],
-  'pajamas-shorts': ['sleep', 'home'],
-  jk: ['day'],
-  'casual-red': ['day', 'eve'],
-  'casual-lace': ['day', 'eve'],
-  'casual-mono': ['day', 'eve'],
-  'casual-dark': ['day', 'eve'],
-  camisole: ['home', 'day'],
-  longskirt: ['eve', 'day'],
-  qipao: ['eve', 'day'],
-  nun: ['day', 'eve'],
-  swimsuit: ['day'],
-  campus: ['day'],
-  'campus-idol': ['day', 'eve'],
-  idol: ['eve', 'day'],
-  maid: ['day'],
-  xmas: ['eve', 'home'],
-  newyear: ['eve', 'day'],
-  gown: ['eve'],
-  formal: ['day'],
-  raincoat: ['day', 'eve'],
-}
+export const OUTFIT_SLOT_MS = 30 * 60 * 1000
 
 /**
- * 挑一套此刻合适的衣服。
+ * 自动模式下「此刻穿哪套」。
+ *
+ * ## 不看时段，纯随机
+ *
+ * 早先按 `OUTFIT_DAY_PARTS` 的时段适配表挑（深夜睡衣、白天常服…），
+ * 用户后来明确要求去掉：「不要跟随时间那个了，改成池子里随机」。
+ * 于是那张表连同 `dayPartOf` 的适配逻辑一起删了。
+ *
+ * ## 但不能直接用 Math.random()
+ *
+ * 这个函数在 **computed 里被调用**，每次依赖变化都会重算 ——
+ * 直接随机会让立绘/标签在重渲染时乱闪（同一秒内换好几套）。
+ * 所以用**时间片哈希**：同一片内结果恒定，跨片才换。
+ * 与 `chatBackground.js` 的轮换算张法是同一个思路（无状态、可重现）。
+ *
+ * 片长默认 30 分钟：比桌宠的立绘轮换（`petRotateMin`，默认 10 分钟）长，
+ * 因为这是「她今天穿什么」而不是「她现在在干嘛」。
  *
  * @param {Date} now
- * @param {string[]} [unlocked] 已解锁的 slug；不给则回落旧的三套规则
+ * @param {string[]} [unlocked] 已解锁的 slug；为空时回落默认那套
+ * @param {number} [slotMs] 时间片长度
  * @returns {string} outfit slug
  */
-export function outfitForTime(now = new Date(), unlocked = null) {
-  const part = dayPartOf(now)
+export function outfitForTime(now = new Date(), unlocked = null, slotMs = OUTFIT_SLOT_MS) {
+  if (!Array.isArray(unlocked) || !unlocked.length) return DEFAULT_OUTFIT
 
-  /* 没给解锁清单（老调用点）时按类别回落，避免影响既有测试 */
-  if (!Array.isArray(unlocked) || !unlocked.length) {
-    if (part === 'sleep' || part === 'home') return 'pajamas'
-    return DEFAULT_OUTFIT
-  }
-
-  const fit = unlocked.filter((s) => (OUTFIT_DAY_PARTS[s] ?? ['day']).includes(part))
-  const pool = fit.length ? fit : unlocked
+  const slot = Math.floor(now.getTime() / Math.max(60_000, Number(slotMs) || OUTFIT_SLOT_MS))
   /*
-   * 挑哪套：同一天同一时段内**稳定不闪**，换天或换时段才变。
+   * 散列：把片号压成 32 位再取模。
    *
-   * 早先用 `Number(`${h}${date}`) % pool.length` 当种子 —— 那是假的：
-   * 日期固定时 h*100 恒为偶数，加偶数日期仍偶数，模 2 永远是 0。
-   * 结果「解锁了 JK 却永远穿 casual」（实测发现）。
-   *
-   * 改用真正的混合：把「年-月-日-小时」压成一个数再散列，
-   * 相邻小时/日期的结果不再有固定奇偶性。
+   * 最后一步必须 `>>> 0` —— JS 位运算返回**有符号 int32**，
+   * 直接取模会得到负索引 -> `pool[-23]` = undefined -> 换装静默失效
+   * （老实现踩过：h=10 时 idx 为 -17，立绘不显示）。
    */
-  const key = now.getFullYear() * 1e6 + (now.getMonth() + 1) * 1e4 + now.getDate() * 100 + now.getHours()
-  let h32 = (key ^ 0x9e3779b9) >>> 0
+  let h32 = (slot ^ 0x9e3779b9) >>> 0
   h32 = Math.imul(h32 ^ (h32 >>> 15), 0x85ebca6b) >>> 0
   h32 = Math.imul(h32 ^ (h32 >>> 13), 0xc2b2ae35) >>> 0
-  /*
-   * 最后一步必须再 `>>> 0`：JS 的位运算返回**有符号 int32**，
-   * 直接取模会得到负索引 -> `pool[-23]` = undefined -> 换装静默失效
-   * （实测 h=10 时 idx 为 -17，立绘不显示）。
-   */
-  const idx = ((h32 ^ (h32 >>> 16)) >>> 0) % pool.length
-  return pool[idx]
+  const idx = ((h32 ^ (h32 >>> 16)) >>> 0) % unlocked.length
+  return unlocked[idx]
 }
 
 /** 服饰 key -> 展示信息（未知 key 回落默认） */
@@ -609,6 +629,38 @@ export const CHATTER_SYSTEM_PROMPT = [
   '   记录里没提过的细节一律不许自己加。',
   '5. 不要复述原话，要像过了一阵子又想起来那样自然提起。',
   '6. 不要说「刚才」「你之前说」这种机械的指代，直接讲那件事。',
+].join('\n')
+
+/**
+ * 「主动找话题」的提示词 —— **与 CHATTER_SYSTEM_PROMPT 是两件事**。
+ *
+ * 区别很关键：
+ *   CHATTER（主动说话） 是**自言自语式的一句**，冒个泡就完，不需要回应
+ *   TOPIC  （找话题）   是**一条真消息**，目的是让对方接话
+ *
+ * 所以这里不写「想起某件旧事」，而要求她**开个话头**：
+ * 分享自己在干嘛、抛个问题、提一件想聊的事 —— 落点是「你接一下」。
+ * 两者共用 `sanitizeChatter` 清洗（都只允许一句话）。
+ */
+export const TOPIC_SYSTEM_PROMPT = [
+  '你要以第一人称，给「用户」发一条**主动搭话的消息**，目的是让他愿意接话。',
+  '',
+  '【回顾聊天记录时注意】',
+  '- 记录里 role=assistant 的话是**你自己说过的**，role=user 才是用户说的。',
+  '- 绝对不要追问你自己说过的话。',
+  '',
+  '【这条消息该怎么写】',
+  '- 找一个**具体的、好接的**话头：你正在做的事（「刚下课，食堂排队排到门外了」）、',
+  '  想问他的一件事（「你上次说的那个游戏后来玩了吗」）、或者随手分享一个小发现。',
+  '- 让他有得答。可以问一句，但**别像查岗**（不要「你在干嘛」「怎么不理我」）。',
+  '- 就像微信上主动找朋友聊天那样自然，不要客套、不要"在吗"。',
+  '',
+  '【硬性要求】',
+  '1. 只输出那一条消息本身，不要引号、不要解释、不要任何前后缀。',
+  '2. 最多 40 个字，一句话。',
+  '3. 有聊天记录时优先接**用户**讲过的事；没有记录就自然开个新话题。',
+  '4. 不要编造记录里不存在的人名、地点、事件、数字。',
+  '5. 不要说「刚才」「你之前说」这种机械的指代。',
 ].join('\n')
 
 /**
@@ -768,42 +820,84 @@ export const EMOTE_KEYS = [
 ]
 
 /**
- * 挂机轮换的**动作**立绘。
+ * 挂机轮换的**动作**立绘 —— 最早的那 4 张。
  *
  * 原来 18 张动作图里有 9 张只能靠手动互动触发，不点就永远看不到；
- * 挂机只轮换固定 4 张，其他基本是废资源。现在按亲密度分批解锁 ——
- * 既让图用起来，又给关系推进一个看得见的变化：越熟她在你面前越放松。
+ * 挂机只轮换固定 4 张，其他基本是废资源。所以先扩充成这 4 张的池子。
  *
- * 这是最低档的池子（刚认识时只敢有这些动作），完整阶梯见上表。
+ * **这已经不再是「最低档的池子」**：动作不再按亲密度分层，实际用的池子是
+ * 下面的 `ALL_IDLE_POSES`（15 张，五档全给）。这里保留成基名列表，
+ * 只是为了 `ALL_IDLE_POSES` 能接着它写、以及文档留下「最初是哪 4 张」。
+ *
  * 注意每张图都得适配「自己待着」的语义：举手、竖大拇指这类
  * 必须由事件触发（打卡成功），放挂机池里会很突兀，所以不收进来。
  */
 export const IDLE_POSES = ['snack', 'music', 'think', 'read']
 
-/** 挂机动作：按关系档位解锁 */
+/**
+ * 挂机动作池 —— **不再按关系档位分层，一开始就全给**。
+ *
+ * 早先按亲密档位阶梯解锁（stranger 只有 4 个动作，到 intimate 才 14 个），
+ * 理由见下方的历史注释。用户后来明确要求「**动作初始全都可用**」，
+ * 于是 `IDLE_POSES_BY_VOICE` 那张阶梯表退化成「每档都给全集」。
+ *
+ * 保留这个函数与 `voice` 参数是为了不动调用点 —— 它已经不再有筛选作用。
+ * 服饰那一侧才是真正按解锁走的（见 `idleCandidatesFor` / `rotationCandidatesFor`
+ * 的 `unlockedOutfits` 参数与图鉴已解锁清单）。
+ *
+ * 历史理由（已不适用，留档）：动作阶梯本意是「越熟她在你面前越放松」，
+ * 但代价是最低档只有 4 个动作、轮换几乎看不出变化，
+ * 而动作本身没有「私密」语义 —— 打哈欠和比心不该分亲疏。
+ */
+export const ALL_IDLE_POSES = [
+  ...IDLE_POSES,
+  'coffee',
+  'nod',
+  'doze',
+  'shrug',
+  'heart',
+  'stretch',
+  'surprise',
+  'shy',
+  'laugh',
+  'sleep',
+  'yawn',
+]
+
 export const IDLE_POSES_BY_VOICE = {
-  stranger: IDLE_POSES,
-  familiar: [...IDLE_POSES, 'coffee', 'nod', 'doze'],
-  friend: [...IDLE_POSES, 'coffee', 'nod', 'doze', 'shrug', 'heart', 'stretch'],
-  close: [...IDLE_POSES, 'coffee', 'nod', 'doze', 'shrug', 'heart', 'stretch', 'surprise', 'shy', 'laugh'],
-  intimate: [...IDLE_POSES, 'coffee', 'nod', 'doze', 'shrug', 'heart', 'stretch', 'surprise', 'shy', 'laugh', 'sleep', 'yawn'],
+  stranger: ALL_IDLE_POSES,
+  familiar: ALL_IDLE_POSES,
+  friend: ALL_IDLE_POSES,
+  close: ALL_IDLE_POSES,
+  intimate: ALL_IDLE_POSES,
 }
 
+/** 档位顺序 —— 与 `VOICE_BY_LEVEL` / `AFFINITY_LEVELS` 一一对应 */
+const VOICE_ORDER = ['stranger', 'familiar', 'friend', 'close', 'intimate']
+
 /**
- * 挂机轮换的**服饰**。
+ * 某套衣服要到哪一档亲密度才有资格解锁 —— 给 UI 显示「🔒 形影不离后可用」。
  *
- * 服饰和动作是正交维度，但都进同一个轮换池 —— 她待着的时候不只是换动作，
- * 也会换身衣服，看起来更像有自己生活的真人。
+ * ## 这**不是**「已解锁」的判定
  *
- * 刚认识时只穿常服，熟了才慢慢解锁别的：一上来就泳装/修女很奇怪。
- * 用 `outfitsFor` 取；返回的是服饰 slug，前端按 `outfitFile()` 拼文件名。
+ * 它只回答「亲密度够不够格去触发」。「能不能穿」看的是图鉴的已解锁清单
+ * （照片发过了才算）—— 亲密度达标只是**前置条件之一**，
+ * 另一个条件是对话里真的触发了那个场景。
+ *
+ * 之前这里查的是一张手写的 `OUTFITS_BY_VOICE` 档位表，和
+ * `OUTFIT_MIN_POINTS`（真正的门槛表）各说各话，24 套里 18 套对不上。
+ * 现在统一从门槛表推算，档位名只是它的可读化表示。
  */
-export const OUTFITS_BY_VOICE = {
-  stranger: [],
-  familiar: ['jk'],
-  friend: ['jk', 'casual-red', 'casual-lace', 'pajamas'],
-  close: ['jk', 'casual-red', 'casual-lace', 'casual-mono', 'casual-dark', 'pajamas', 'camisole', 'longskirt'],
-  intimate: OUTFIT_SLUGS,
+export function outfitUnlockTierName(slug) {
+  const need = outfitMinPoints(slug)
+  /*
+   * 找**第一个门槛已达标**的档位。
+   * 全部档位都不够（门槛高于最高档）时返回最高档名 —— 那是不可能的配置，
+   * 但含糊返回比抛错好：新加素材时 UI 不该跟着崩。
+   */
+  const idx = AFFINITY_LEVELS.findIndex((l) => need <= l.min)
+  if (idx < 0) return AFFINITY_LEVELS[AFFINITY_LEVELS.length - 1].name
+  return AFFINITY_LEVELS[idx].name
 }
 
 /**
@@ -814,19 +908,185 @@ export function idlePosesFor(voice = 'stranger') {
   return IDLE_POSES_BY_VOICE[voice] ?? IDLE_POSES_BY_VOICE.stranger
 }
 
-/** 取当前关系档位可用的服饰池（可能为空：刚认识时不换装） */
-export function outfitsFor(voice = 'stranger') {
-  return OUTFITS_BY_VOICE[voice] ?? OUTFITS_BY_VOICE.stranger
-}
+/*
+ * 这里原本有一个 `outfitsFor(voice)`，按关系档位返回「能穿的服饰」。
+ * **已删除** —— 它和真正的门槛表（`OUTFIT_MIN_POINTS`）以及图鉴的
+ * 已解锁清单各说各话，24 套里 18 套对不上。
+ *
+ * 「能穿什么」的唯一真相源是**图鉴的已解锁清单**（照片发过了才算），
+ * 由调用方通过参数传进 `idleCandidatesFor` / `rotationCandidatesFor`。
+ * 亲密度只决定「够不够格去触发」，不决定「能不能穿」。
+ */
 
 /**
  * 挂机轮换的完整候选：动作 + 服饰。
  *
  * 服饰项带 `outfit:` 前缀以区分 —— 两者取图逻辑不同
  * （动作走 `expressionFile`，服饰走 `outfitFile`）。
+ *
+ * @param {string} voice 关系档位（只管**动作**池）
+ * @param {string[]} [unlockedOutfits] **实际已解锁**的服饰 slug（图鉴清单）。
+ *   「能穿的必须是照片已经发过的」—— 传空数组就是一套都没有。
+ *
+ *   这个参数**没有默认回落**：曾经在不传时回落到一张手写的档位近似表，
+ *   结果是「清单里能选、照片却没发过」。现在必须显式给，
+ *   漏传的后果是「没有服饰可轮换」（看得见），而不是悄悄放宽解锁（看不见）。
  */
-export function idleCandidatesFor(voice = 'stranger') {
-  return [...idlePosesFor(voice), ...outfitsFor(voice).map((s) => `outfit:${s}`)]
+export function idleCandidatesFor(voice = 'stranger', unlockedOutfits = []) {
+  const outfits = Array.isArray(unlockedOutfits) ? unlockedOutfits : []
+  return [...idlePosesFor(voice), ...outfits.map((s) => `outfit:${s}`)]
+}
+
+/**
+ * 挂机动作的中文名 —— 轮换池选择器用。
+ *
+ * 只有挂机池里出现过的动作才需要条目：互动表情（挥手/竖大拇指那些）
+ * 不参与轮换，列出来会让人以为能勾选。
+ * 少一条就是选择器少一个格子，不会报错，所以发现缺了直接加。
+ */
+export const IDLE_POSE_LABELS = {
+  snack: '吃零食',
+  music: '戴耳机',
+  think: '思考',
+  read: '看书',
+  coffee: '喝咖啡',
+  nod: '点头',
+  doze: '发呆',
+  shrug: '耸肩',
+  heart: '比心',
+  stretch: '伸懒腰',
+  surprise: '吓一跳',
+  shy: '害羞',
+  laugh: '笑',
+  sleep: '睡觉',
+  yawn: '打哈欠',
+}
+
+/**
+ * 轮换池选择器的候选清单（**已解锁范围内**）。
+ *
+ * 只列当前档位解锁得了的 —— 用户能勾的必须是真正会轮到的，
+ * 列一堆勾了也不生效的灰项只会让人困惑。
+ * 随亲密度解锁而变：升档后刷新选择器会多出几项。
+ *
+ * @param {string} voice 已含上帝模式覆盖（传 affinityView().voice）—— **只管动作**
+ * @param {string[]} [unlockedOutfits] 图鉴已解锁的服饰清单（见 idleCandidatesFor 的注释）
+ * @returns {{key:string, kind:'action'|'outfit', label:string, emoji:string}[]}
+ */
+export function rotationCandidatesFor(voice = 'stranger', unlockedOutfits = []) {
+  const outfits = Array.isArray(unlockedOutfits) ? unlockedOutfits : []
+  return [
+    ...idlePosesFor(voice).map((k) => ({
+      key: k,
+      kind: 'action',
+      label: IDLE_POSE_LABELS[k] ?? k,
+      emoji: '🎬',
+    })),
+    ...outfits.map((s) => ({
+      key: `outfit:${s}`,
+      kind: 'outfit',
+      label: outfitInfo(s).label,
+      emoji: outfitInfo(s).emoji,
+    })),
+  ]
+}
+
+/**
+ * 解析实际生效的轮换池 —— **用户自选 ∩ 已解锁**。
+ *
+ * 三条规则：
+ *
+ * 1. **空选 = 全部已解锁**。不是「什么都不换」——
+ *    后者会让 `pickRotation` 无候选可选、立绘回落站姿，看起来像 bug。
+ *    真正的「不轮换」由 `outfitMode = 'fixed'` 表达，两个开关职责不重叠。
+ * 2. **必须按已解锁池二次过滤**。`petRotatePool` 是持久化设置，
+ *    而解锁状态会变（清空数据、上帝模式关掉、换会话）。
+ *    不在这里过滤的话，存过的未解锁项就会穿出去 ——
+ *    用户在设置页只勾得到已解锁的，但直接改数据库/换档位就能穿上没解锁的衣服。
+ * 3. **过滤后为空也要回落全池**。老库里可能存着「亲密度被重置前」选的项，
+ *    全都失效了；此时回落到全池，行为等于「没自选过」。
+ *
+ * @param {string} voice
+ * @param {string[]|null} selection 用户勾选的 key
+ */
+export function resolveRotationPool(voice = 'stranger', selection = null, unlockedOutfits = null) {
+  const all = idleCandidatesFor(voice, unlockedOutfits)
+  if (!Array.isArray(selection) || selection.length === 0) return all
+  const picked = selection.filter((k) => all.includes(k))
+  return picked.length ? picked : all
+}
+
+/* ---------- 挂机轮换的节拍 ---------- */
+
+/**
+ * 轮换间隔（分钟）的取值范围。
+ *
+ * 下限 1 分钟：再短就成了幻灯片，而且每张图都要预热解码
+ * （见 PetApp 的立绘预热队列，换太快会让缓存一直追不上）。
+ * 上限 180 分钟：超过 3 小时基本等于「不换」，那不如直接手动固定。
+ */
+export const ROTATE_MIN_MIN = 1
+export const ROTATE_MIN_MAX = 180
+export const DEFAULT_ROTATE_MIN = 10
+
+/**
+ * 钳制用户填的轮换间隔。
+ *
+ * 钳制放在**读取侧**而不是只靠设置页 input 的 min/max：
+ * 后者挡不住「清空输入框」（空串会被 Number() 变成 0，
+ * 直接钳到下限 1 分钟 = 一秒钟换一套），
+ * 也挡不住老库里存下来的脏值。
+ */
+export function clampRotateMin(v) {
+  /* 空串 / null / undefined 一律回落默认，而不是被当成 0 */
+  if (v === null || v === undefined || v === '') return DEFAULT_ROTATE_MIN
+  const n = Math.floor(Number(v))
+  if (!Number.isFinite(n)) return DEFAULT_ROTATE_MIN
+  return Math.min(ROTATE_MIN_MAX, Math.max(ROTATE_MIN_MIN, n))
+}
+
+/**
+ * 下一次轮换要等多少毫秒。
+ *
+ * 基准间隔上叠 ±25% 抖动，和主动说话是同一个思路：
+ * 固定周期会让「每隔 N 分钟换一套」看着像定时任务，不像她在过日子。
+ * 下限 15 秒 —— 间隔本来就最小 1 分钟，抖动后也不会低于这个值。
+ */
+export function rotateDelayMs(minutes, rand = Math.random) {
+  const base = clampRotateMin(minutes) * 60_000
+  const jitter = base * 0.25 * (rand() * 2 - 1)
+  return Math.max(15_000, Math.round(base + jitter))
+}
+
+/**
+ * 从统一池里抽下一项要展示的内容。
+ *
+ * 动作和服饰进的是**同一个池**（`idleCandidatesFor`），所以「换一套衣服」
+ * 在这里和「换个动作」没有任何区别 —— 桌面端每隔一段时间换一套，
+ * 换到的可能是动作立绘，也可能是某套衣服。两者都带 `outfit:` 前缀的
+ * 服饰项会走 `outfitFile()`，其余走 `expressionFile()`。
+ *
+ * 除了避开上一项，还避开**最近三项**：只避上一项时满级 34 项的池子
+ * 仍会隔一格重复（ABAB），看着像卡带；避三项之后
+ * 「每次换的都不一样」才成立。
+ *
+ * @param {string[]} pool 候选池（动作 + `outfit:` 前缀的服饰）
+ * @param {string[]} [recent] 最近展示过的项，越新的越靠前
+ * @param {() => number} [rand]
+ * @returns {string} 池中一项；池空则返回空串
+ */
+export function pickRotation(pool, recent = [], rand = Math.random) {
+  if (!Array.isArray(pool) || pool.length === 0) return ''
+  /* 池子本来就不大时避让过头会无路可走，退化成只避上一项 */
+  const ban = pool.length > 3 ? recent.slice(0, 3) : recent.slice(0, 1)
+  const filtered = ban.length ? pool.filter((item) => !ban.includes(item)) : pool
+  /*
+   * 避让把池子清空了也得从原池里抽 ——
+   * `pickLine([])` 返回空串，而空串会让 `poseImageFile` 回落到站姿，
+   * 症状是「立绘突然变回站着」，比重复一次难解释得多。
+   * 重复展示的代价远小于不显示。
+   */
+  return pickLine(filtered.length ? filtered : pool, '', rand)
 }
 
 /**

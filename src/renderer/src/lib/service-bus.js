@@ -27,8 +27,20 @@ const CALL_TIMEOUT_MS = 15_000
 /** 就绪探测超时：超时后照样放行正式调用 */
 const READY_PROBE_TIMEOUT_MS = 20_000
 
-/** 长操作通道：绕开宿主串行队列，且客户端不设调用超时 */
-const LONG_RUNNING = new Set(['chat:send', 'chat:diagnose', 'chat:test', 'chat:chatterLine'])
+/**
+ * 长操作通道：绕开宿主串行队列，且客户端不设调用超时。
+ *
+ * `chat:topicLine` 与 `chat:chatterLine` 是同一个 LLM 调用（可能十几秒）——
+ * 漏登记的话：宿主侧被塞进串行队列，生成期间别的窗口的业务调用全被堵住；
+ * 客户端侧套上 15 秒超时，模型慢一点就报「总线调用超时」（消息其实已落库）。
+ */
+const LONG_RUNNING = new Set([
+  'chat:send',
+  'chat:diagnose',
+  'chat:test',
+  'chat:chatterLine',
+  'chat:topicLine',
+])
 
 function tauri() {
   return window.__TAURI__

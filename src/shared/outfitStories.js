@@ -32,11 +32,25 @@
 /**
  * 每套装扮的**亲密度门槛**。
  *
- * ## 为什么单独一张表，不写进各条 story 里
+ * ## 这是全项目**唯一**的门槛表
  *
- * 门槛是「难度设计」，和故事文案是两回事 —— 混在一起的话，
- * 想调平衡得逐条翻 24 个对象。集中成一张表，一眼能看出难度分布，
- * 也方便整体平移（比如觉得都太难就统一降一档）。
+ * 曾经有三张表各说各话（24 套里 18 套对不上），现在只剩这一张：
+ *   - `conditionUnlocks`（条件解锁）       → 读这里
+ *   - `keywordCandidates`（关键词预筛）    → 读这里
+ *   - `outfitUnlockTierName`（UI 档位名）  → 从这里推算
+ *   - `OUTFITS_BY_VOICE` / `outfitsFor`    → **已删除**
+ *
+ * 两条纪律，改动前务必先读：
+ *
+ * 1. **故事对象里不许再写 `condition.minPoints`。** 那份数据已经无人读取，
+ *    留着就是第二个真相源 —— 下次有人改它会以为生效了，实际一点用没有。
+ *    踩过的坑：`pajamas` 的 `condition` 只写了 `{hoursAfter:23}`、
+ *    没有 minPoints，于是**过了 23 点就无条件送睡裙**，哪怕亲密度是 0。
+ *    smoke 里有断言盯着这条（`故事对象里没有第二个门槛来源`）。
+ *
+ * 2. **门槛只回答「够不够格去触发」，不回答「能不能穿」。**
+ *    能穿什么由图鉴的**已解锁清单**决定（照片发过了才算）——
+ *    门槛达标只是两个前置条件之一，另一个是对话里真的触发了那个场景。
  *
  * ## 分档依据
  *
@@ -89,12 +103,53 @@ export const OUTFIT_MIN_POINTS = {
 /** 取某套装扮的门槛（没配 = 0） */
 export const outfitMinPoints = (slug) => OUTFIT_MIN_POINTS[slug] ?? 0
 
+/**
+ * 某套装扮的「解锁条件」中文片段 —— 图鉴详情与手机端「触发规则一览」共用。
+ *
+ * ## 亲密度门槛必须从 `OUTFIT_MIN_POINTS` 取，不能读 `condition.minPoints`
+ *
+ * 那两端原先各自实现了一份 `conditionText`，读的都是故事对象的
+ * `condition.minPoints` —— 而那个字段已在重构里删除（见文件头纪律 1）。
+ * 后果：`pajamas` 只显示「23 点之后」，实际还要求亲密度 ≥ 300，
+ * **用户按界面文案永远猜不到还差 300 点**。
+ *
+ * 放到 shared 是为了让桌面端与手机端说同一句话（同一个数字口径）。
+ *
+ * @param {string} slug 装扮 slug（门槛只认这张表）
+ * @param {object|null} condition 故事对象里的附加条件（时段 / 休息日）
+ * @returns {string[]} 中文片段，至少一项
+ */
+export function outfitConditionParts(slug, condition = null) {
+  const c = condition ?? {}
+  const parts = []
+  const need = outfitMinPoints(slug)
+  if (need > 0) parts.push(`亲密度 ${need}`)
+  if (c.hoursAfter != null) parts.push(`${c.hoursAfter} 点之后`)
+  if (c.hoursBefore != null) parts.push(`${c.hoursBefore} 点之前`)
+  if (c.restDayOnly) parts.push('休息日')
+  /*
+   * 没有任何附加条件时也要说清楚：门槛 0 = 初始就有，
+   * 门槛 > 0 则必须把差多少点写出来（上面已经 push 过了，这里只兜底 0）。
+   */
+  if (!parts.length) parts.push(need > 0 ? `亲密度 ${need}` : '初始就有')
+  return parts
+}
+
+/** `outfitConditionParts` 的字符串版（两端同一套说法） */
+export function outfitConditionText(slug, condition = null) {
+  return outfitConditionParts(slug, condition).join(' · ')
+}
+
 export const OUTFIT_STORIES = {
   jk: {
     title: '最日常的那件',
     hint: '聊到日常琐事时可能会穿',
     unlock: 'condition',
-    condition: { minPoints: 0 }, // 初始就解锁，作为「基准装扮」
+    /*
+     * 不写 minPoints —— 亲密度门槛只认 `OUTFIT_MIN_POINTS`（jk = 0）。
+     * 条件里写一份就成了第二个真相源，正是睡裙那个 bug 的成因。
+     */
+    condition: {},
     story: '这是她最常穿的一套 —— 白衬衫配黑色背心裙，背上书包就能出门。',
   },
   'casual-red': {
@@ -307,11 +362,27 @@ export function keywordCandidates(text, unlocked = [], points = 0) {
  */
 export function conditionUnlocks(ctx, unlocked = []) {
   const done = new Set(unlocked)
+  const p = Number(ctx.points) || 0
   const out = []
   for (const [slug, def] of Object.entries(OUTFIT_STORIES)) {
     if (done.has(slug) || def.unlock !== 'condition') continue
+
+    /*
+     * 亲密度门槛**对所有解锁类型都生效**，且只从 `OUTFIT_MIN_POINTS` 读。
+     *
+     * 踩过的坑：这里原来读的是 `condition.minPoints`（故事对象自己的字段），
+     * 于是 `pajamas` 那条 `condition: { hoursAfter: 23 }` 压根没写 minPoints
+     * —— **过了 23 点就无条件解锁睡裙**，哪怕亲密度是 0，
+     * 而它在表里标的是 300（最私密那一档）。
+     *
+     * 根因不是漏写一个字段，是**门槛有两个来源**：表 A 是后来引入、
+     * 设计明确（「门槛是难度设计，和故事文案是两回事」），
+     * 但那次重构只加了新表，没把这里的读取路径改过来。
+     * 现在统一到表 A，`condition` 里只留时段/休息日这类**非亲密度**条件。
+     */
+    if (p < outfitMinPoints(slug)) continue
+
     const c = def.condition ?? {}
-    if (c.minPoints != null && (ctx.points ?? 0) < c.minPoints) continue
     if (c.hoursAfter != null && (ctx.hour ?? 0) < c.hoursAfter) continue
     /*
      * `hoursBefore` 必须一起实现 —— 曾经踩过：数据里写了

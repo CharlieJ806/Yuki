@@ -239,6 +239,13 @@ await withServer(
           /* 人设在前、时间块在后 —— 刻意如此，见 composeSystemPrompt */
           personaFirst: sys.indexOf('你叫 Yuki') < sys.indexOf('当前时间'),
           sysLen: sys.length,
+          /*
+           * 时间块**自身**的长度。
+           * 时间块在末尾，所以从标记处截到结尾就是它。
+           * 单独量它才有意义：「system 别太长」真正要防的是
+           * 时间块膨胀（它每轮都变、挤掉历史），而不是人设本身。
+           */
+          clockLen: sys.includes('【当前时间') ? sys.length - sys.indexOf('【当前时间') : 0,
         }),
       ),
     )
@@ -260,8 +267,18 @@ await withServer(
     check('9 点禁止提午饭', got.bansLunch, true)
     check('人设仍完整送达', got.keepsPersona, true)
     check('人设在时间块之前（缓存友好）', got.personaFirst, true)
-    /* 时间块不能把 system 撑得离谱，否则会挤掉历史 */
-    check('system 长度可控', got.sysLen < 2000, true)
+    /*
+     * 时间块自己不能膨胀 —— 它每轮都变（不含前缀缓存），
+     * 太长会挤掉历史预算。这才是这条断言真正要防的东西。
+     */
+    check('时间块长度可控', got.clockLen > 0 && got.clockLen < 1200, true)
+    /*
+     * 人设 + 时间块的总量也要有个上限，防止人设被无限追加。
+     * 阈值随功能增长上调过：多段回复指令 + 时间感的详细清单都是
+     * 有意加进去的（用户明确要求），不是意外膨胀。
+     * 真超了应该回头审「这条指令值不值这个 token」，而不是默默放宽。
+     */
+    check('system 总长可控', got.sysLen < 3200, true)
   },
 )
 

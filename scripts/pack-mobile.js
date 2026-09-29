@@ -15,7 +15,7 @@
  *
  * ## 产物
  *
- *   release/mobile-launcher-win32-x64/手机端启动器.exe
+ *   release-mobile/手机端启动器-win32-x64/手机端启动器.exe
  *
  * 首次运行会在 exe 同级目录找 `dist-mobile/`；找不到就提示先构建。
  * 也可以直接把这个目录连同 `dist-mobile/` 一起拷给别人。
@@ -26,7 +26,16 @@ import { join, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..')
-const OUT = join(ROOT, 'release')
+/*
+ * 产物落在项目根的 `release-mobile/`，**不放 `release/`**。
+ *
+ * 理由：`release/` 是**发布交付区**，内容由 CI 固定为
+ * `electron/` + `tauri/` + `README.txt` 三项（见 .github/workflows/release.yml）。
+ * 手机端启动器是本地便利产物（双击起个静态服务器看 PWA），
+ * 不随 Release 上传 —— 混进交付区会让「该发哪些文件」变得含糊，
+ * 而 `scripts/build.js` 现在按白名单清理 `release/`，它会被直接删掉。
+ */
+const OUT = join(ROOT, 'release-mobile')
 const STAGE = join(ROOT, '.tmp-launcher')
 
 /* 启动器只需一个极小的 main 进程，不依赖 Electron 之外的任何包 */
