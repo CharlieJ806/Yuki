@@ -2,8 +2,8 @@
 /** 主页 —— 今日概览 + 实时进账/学习进度 + 语录 */
 import { computed, onMounted, onUnmounted, ref } from 'vue'
 import { state, doCheckIn } from '../stores/app.js'
-import { formatDuration, formatMoney } from '@shared/moyu.js'
-import { surfaceText, formatStudyProgress, studyLevelName } from '@shared/disguise.js'
+import { formatDuration } from '@shared/moyu.js'
+import { surfaceText } from '@shared/disguise.js'
 
 const emit = defineEmits(['navigate'])
 const clock = ref(new Date())
@@ -32,8 +32,8 @@ const stats = computed(() => [
   { label: txt.value.totalLabel, value: `${state.days} 天` },
   { label: '连续打卡', value: `${state.streak} 天` },
   { label: '本月工作日', value: `${state.workDaysThisMonth} 天` },
-  /* 等级名含「摸鱼」字样，伪装下按词汇表学习化 */
-  { label: '当前等级', value: state.settings.studyDisguise ? studyLevelName(state.level.level.name) : state.level.level.name },
+  /* 等级名含「摸鱼」字样：转换在词汇表（txt.levelName），组件不判开关 */
+  { label: '当前等级', value: txt.value.levelName(state.level.level.name) },
 ])
 
 /** 实时逐秒计息：按秒把当前进度折算成钱（伪装下为学习词数），视觉上更有"进账感" */
@@ -45,9 +45,12 @@ function tickFlow() {
 }
 const flowingText = computed(() => {
   const v = state.snapshot.isWorkingNow ? flowing.value : state.snapshot.todayEarned
-  return state.settings.studyDisguise
-    ? formatStudyProgress(v, state.snapshot.dailySalary)
-    : formatMoney(v, state.settings.salaryCurrency)
+  /*
+   * v 是渲染层自己逐秒算出来的活值 —— 出口的 state.todayEarnedText 只是
+   * getState 那一刻的快照，没法覆盖它。所以这里仍然要格式化，但「金额还是
+   * 学习词数」由词汇表（txt.amountText）决定：组件只按开关取表，不判开关。
+   */
+  return txt.value.amountText(v, state.settings.salaryCurrency, state.snapshot.dailySalary)
 })
 
 const statusLabel = computed(() => {
@@ -81,7 +84,7 @@ onUnmounted(() => timer && window.clearInterval(timer))
         <h1 class="hero-amount tabular">{{ flowingText }}</h1>
         <p class="hero-sub">
           {{ txt.earnedTitle }} ·
-          <span :class="{ hl: state.snapshot.isWorkingNow }">{{ state.snapshot.isWorkingNow ? (state.settings.studyDisguise ? '学习中' : '实时进账中') : statusLabel }}</span>
+          <span :class="{ hl: state.snapshot.isWorkingNow }">{{ state.snapshot.isWorkingNow ? txt.liveWorking : statusLabel }}</span>
         </p>
         <div class="hero-bar">
           <div class="hero-fill" :style="{ width: (state.snapshot.progressPercent ?? 0) + '%' }" />
@@ -94,11 +97,11 @@ onUnmounted(() => timer && window.clearInterval(timer))
       <div class="hero-right">
         <div class="level-ring" :style="{ '--lv-color': state.level.level.color }">
           <span class="ring-value">{{ state.days }}</span>
-          <span class="ring-label">摸鱼天数</span>
+          <span class="ring-label">{{ txt.daysLabel }}</span>
         </div>
-        <p class="level-name" :style="{ color: state.level.level.color }">{{ state.level.level.name }}</p>
+        <p class="level-name" :style="{ color: state.level.level.color }">{{ txt.levelName(state.level.level.name) }}</p>
         <p class="level-progress tabular">
-          {{ state.level.isMaxLevel ? '已满级' : `距 ${state.level.nextLevel.name} 还需 ${state.level.daysToNext} 天` }}
+          {{ state.level.isMaxLevel ? '已满级' : `距 ${txt.levelName(state.level.nextLevel.name)} 还需 ${state.level.daysToNext} 天` }}
         </p>
       </div>
     </section>
@@ -118,7 +121,7 @@ onUnmounted(() => timer && window.clearInterval(timer))
     <section class="actions card">
       <div>
         <p class="actions-title">快捷操作</p>
-        <p class="actions-sub">每天只能打卡一次，摸鱼天数按累计打卡天数计算</p>
+        <p class="actions-sub">{{ txt.actionsSub }}</p>
       </div>
       <div class="actions-btns">
         <button class="btn btn-primary" :disabled="state.checkedInToday" @click="doCheckIn()">

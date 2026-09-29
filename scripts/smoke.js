@@ -422,11 +422,49 @@ try {
       study.beforeWork, study.disabled, study.earnedLabel, study.workedLabel,
       study.totalLabel, study.incomeDetail, study.brand, study.tagline,
       ...study.heroQuotes,
+      /* 函数型文案（活值出口）也要进这条断言，否则新登记的函数等于没锁 */
+      study.amountText(518.5, 'CNY', 1037),
+      study.levelName('摸鱼学徒'),
+      study.liveWorking, study.daysLabel, study.actionsSub,
       study.trayEarned('432 词'),
       study.trayTotal(3, '摸鱼学徒'),
     ].join('\n')
     check('伪装词汇表无摸鱼/已赚/货币符号', /摸鱼|已赚|[¥$]/.test(studyVisible), false)
     check('伪装托盘等级名学习化', study.trayTotal(3, '摸鱼学徒').includes('学习学徒'), true)
+    check('伪装等级名学习化', study.levelName('摸鱼学徒'), '学习学徒')
+    check('伪装实时金额为词数', study.amountText(518.5, 'CNY', 1037), '500 词')
+
+    /*
+     * 上面那条断言只覆盖「词汇表里登记过的字符串」——单测不渲染 .vue，
+     * 组件里就地写的 `studyDisguise ? A : B` 完全不在它的检查路径上
+     * （HomeView 残留 3 处就是活例：断言全绿，屏幕上照样露「摸鱼」）。
+     * 所以补一条源码级锁，扫描方式与「换装入口/缺导入」两条静态检查同源。
+     */
+    const rendererRoot = join(dirname(fileURLToPath(import.meta.url)), '..', 'src', 'renderer', 'src')
+    const vueFiles = []
+    const collectVue = (dir) => {
+      for (const entry of readdirSync(dir, { withFileTypes: true })) {
+        if (entry.isDirectory()) collectVue(join(dir, entry.name))
+        else if (entry.name.endsWith('.vue')) vueFiles.push(join(dir, entry.name))
+      }
+    }
+    collectVue(rendererRoot)
+    const inlineDisguise = vueFiles
+      .filter((file) => {
+        /*
+         * **整份 .vue 都要查**：伪装三元既可能写在 <script setup>，也可能
+         * 直接写在模板插值里（HomeView 那处 `studyDisguise ? '学习中'` 就在
+         * 模板中，只看 script 会漏掉它）。去掉三种注释形态，免得说明文字误判。
+         */
+        const code = readFileSync(file, 'utf8')
+          .replace(/\/\*[\s\S]*?\*\//g, '')
+          .replace(/^\s*\/\/.*$/gm, '')
+          .replace(/<!--[\s\S]*?-->/g, '')
+        /* 注释之外，studyDisguise 后面只隔空白就出现 `?` = 组件就地伪装 */
+        return /studyDisguise\s*\?/.test(code)
+      })
+      .map((file) => file.slice(rendererRoot.length + 1))
+    check('组件不写 studyDisguise 三元（伪装只走词汇表）', inlineDisguise, [])
 
     /* state 出口：三个文本字段全部转换 */
     await service.updateSettings({ studyDisguise: true })

@@ -14,6 +14,10 @@
  * 二期随对话提示词单独做。
  */
 
+/* 金额格式化也是伪装的一部分：正常态直接复用 moyu.formatMoney，
+   两个分支共用同一份实现，避免口径在两处漂移（moyu.js 无 import，不成环） */
+import { formatMoney } from './moyu.js'
+
 /** 伪装态的每日学习目标（词）：金额按「今日已赚 ÷ 日薪」线性映射到 0–目标词数 */
 export const STUDY_DAILY_WORDS = 1000
 export const STUDY_DAILY_TARGET = `${STUDY_DAILY_WORDS} 词`
@@ -40,9 +44,13 @@ export function studyLevelName(name) {
 }
 
 /**
- * 可见文案词汇表：组件按 key 取文案，不再就地三元判断。
+ * 可见文案词汇表：组件按 key 取文案（或取格式化函数），不再就地三元判断。
  * 新增可见文案先来这里登记——smoke 锁「伪装态可见文本不得含 摸鱼/已赚/¥」，
  * 漏登记的文案进不了这张表就会被测试抓出来。
+ *
+ * 表里除了字符串也有函数（trayEarned / amountText / levelName）：
+ * 渲染层算出来的活值（逐秒金额、等级名）没法走 state 出口的静态文本字段，
+ * 就把「怎么格式化」也收进词汇表 —— 组件仍然只做「按开关取表」一次判断。
  */
 export const SURFACE_TEXT = {
   normal: {
@@ -71,6 +79,18 @@ export const SURFACE_TEXT = {
       '上班是为了活着，摸鱼是为了像个人。',
       '工资照发，鱼照摸，这是成年人的体面。',
     ],
+    /*
+     * 主页实时金额的格式化。为什么不是一个静态文本字段：逐秒跳动是渲染层
+     * 自己算的值（state.todayEarnedText 只是出口时的快照），组件拿不到
+     * 「已伪装好的活值」，所以把「怎么格式化」交给词汇表，组件不判开关。
+     */
+    amountText: (value, currency) => formatMoney(value, currency),
+    /* 等级名：LEVELS 是 moyu.js 的共享常量（手机端也用），伪装只在出口转换 */
+    levelName: (name) => String(name ?? ''),
+    /* 「正在实时进账」的进行态（与 working 不同：强调逐秒跳动） */
+    liveWorking: '实时进账中',
+    daysLabel: '摸鱼天数',
+    actionsSub: '每天只能打卡一次，摸鱼天数按累计打卡天数计算',
     trayEarned: (earnedText) => `今日已摸鱼赚到 ${earnedText}`,
     trayTotal: (days, levelName) => `累计摸鱼 ${days} 天 · ${levelName}`,
   },
@@ -99,7 +119,13 @@ export const SURFACE_TEXT = {
       '保持节奏，剩下的交给时间。',
       '把难度拆小，把专注拉长。',
     ],
+    /* 实时金额同样折算成词数（与 earnedLabel 同口径，货币符号不出现） */
+    amountText: (value, _currency, dailySalary) => formatStudyProgress(value, dailySalary),
     /* 学习化等级名（studyLevelName），不露「摸鱼」字样 */
+    levelName: (name) => studyLevelName(name),
+    liveWorking: '学习中',
+    daysLabel: '学习天数',
+    actionsSub: '每天只能打卡一次，学习天数按累计打卡天数计算',
     trayEarned: (earnedText) => `今日已学习 ${earnedText}`,
     trayTotal: (days, levelName) => `累计学习 ${days} 天 · ${studyLevelName(levelName)}`,
   },
