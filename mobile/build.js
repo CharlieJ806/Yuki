@@ -25,9 +25,9 @@ const DIST = join(ROOT, 'dist-mobile')
 /*
  * 手机端真正用到的 shared 模块（按依赖顺序）。
  *
- * 刻意**不打包 interactions.js** —— 它装的是桌宠互动、服饰、亲密度那套，
- * 手机端没有桌宠，用不到。少一个文件就少一份首屏下载。
- * （将来手机端要加亲密度之类的功能，再把它加回来即可。）
+ * interactions.js 在清单里：手机端的换装/亲密度/挂机台词都依赖它
+ * （此前的注释称「刻意不打包 interactions.js」是过期描述，与清单相反——
+ * 手机端后来接上了亲密度与换装，模块已加回）。
  */
 const MODULES = ['content.js', 'moyu.js', 'interactions.js', 'outfitStories.js', 'photoStories.js', 'photoMessage.js', 'chatBackground.js', 'tapLines.js', 'chatter.js', 'dayInfo.js', 'holidays.js', 'gallery.js']
 

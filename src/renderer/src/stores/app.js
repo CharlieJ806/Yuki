@@ -130,6 +130,8 @@ function createMockBackend() {
       settings = { ...settings, ...patch }
       return recompute()
     },
+    /* 浏览器预览的 settings 本就是全量（无真实 Key），与桌面 getFullSettings 同形 */
+    getFullSettings: async () => ({ ...settings }),
     resetSettings: async () => {
       settings = { ...DEFAULT_SETTINGS }
       return recompute()
@@ -200,12 +202,15 @@ function createMockBackend() {
     /* 浏览器预览没有工作日判定，预览空结果即可 */
     backfillPreview: async (fromKey) => ({ from: fromKey, to: toDateKey(new Date()), count: 0, days: [], hasHolidayTable: false }),
     backfillApply: async (fromKey) => ({ from: fromKey, to: toDateKey(new Date()), count: 0, days: [], created: [], skipped: [], state: recompute() }),
+    openDataDir: async () => false,
     onEvent: () => () => {},
   }
 }
 
 const backend = typeof window !== 'undefined' && window.desk ? window.desk : createMockBackend()
-store.backend = backend === window?.desk ? 'electron' : 'mock'
+/* 后端标记用 native 而不是 electron：桌面壳有两个（Electron 与 Tauri），
+   渲染层对它们一视同仁，只有浏览器 mock 是另一回事 */
+store.backend = backend === window?.desk ? 'native' : 'mock'
 
 async function call(label, fn, fallback) {
   try {
@@ -357,6 +362,16 @@ export async function wipeAllData() {
   /* 不 await：失败也不该把「已清空」这个事实变成失败 */
   Promise.all([refresh(), refreshCheckins(), refreshChatSessions(), refreshSessionSettings(id)]).catch(() => {})
   return true
+}
+
+/**
+ * 全量设置（含 chatApiKey 原文）。
+ *
+ * state 快照广播到全部窗口，已剥掉 Key 原文（与 chatStatus 脱敏口径一致）；
+ * 只有设置页的表单需要真实值，走这里按需拉取。
+ */
+export async function getFullSettings() {
+  return call('读取完整设置失败', () => backend.getFullSettings?.(), null)
 }
 
 export async function logMoyu(minutes) {
@@ -918,6 +933,8 @@ export const win = {
   setPetAlwaysOnTop: (f) => call('设置失败', () => backend.setPetAlwaysOnTop?.(f), null),
   autostartGet: () => call('读取自启状态失败', () => backend.autostartGet?.(), false),
   autostartSet: (on) => call('自启设置失败', () => backend.autostartSet?.(on), null),
+  /* 备份数据：打开数据所在目录（浏览器无此概念，mock 返回 false） */
+  openDataDir: () => call('打开数据目录失败', () => backend.openDataDir?.(), null),
   quit: () => call('退出失败', () => backend.quit?.(), null),
   hideChat: () => call('关闭失败', () => backend.hideChatWindow?.(), null),
   /* 对话窗旁的立绘小窗显隐；返回切换后的可见状态 */

@@ -6,7 +6,13 @@
 import { computed, onMounted, ref } from 'vue'
 import { state, doCheckIn, win, openChatWindow } from '../stores/app.js'
 import { formatDuration, formatMoney, REST_PATTERNS } from '@shared/moyu.js'
+/* affinityView 是本地口径（比 affinityLevel 多一层 godMode 判定），保留；
+   伪装词汇表用朋友那侧的 surfaceText（组件不再就地三元判断） */
 import { AFFINITY_GAIN, CHAT_AFFINITY_DAILY_CAP, affinityView } from '@shared/interactions.js'
+import { surfaceText } from '@shared/disguise.js'
+
+/* 可见文案走伪装词汇表（shared/disguise.js），组件不再就地三元判断 */
+const txt = computed(() => surfaceText(Boolean(state.settings.studyDisguise)))
 
 const props = defineProps({
   nav: { type: Array, required: true },
@@ -46,16 +52,16 @@ const holidayBadge = computed(() => {
   return ''
 })
 const statusText = computed(() => {
-  if (!state.settings.enabled) return '摸鱼进度未开启'
+  if (!state.settings.enabled) return txt.value.disabled
   switch (snapshot.value.statusKind) {
     case 'rest-day':
-      return '今日休息'
+      return txt.value.restDayShort
     case 'before-work':
-      return '尚未开工'
+      return txt.value.beforeWork
     case 'completed':
-      return '今日已赚满'
+      return txt.value.doneShort
     default:
-      return '摸鱼进行中'
+      return txt.value.working
   }
 })
 
@@ -69,13 +75,14 @@ const restLabel = computed(() => {
 const detailRows = computed(() => [
   { label: '发薪日', value: `每月 ${state.settings.payDay} 日` },
   { label: state.payday.today ? '今天' : '距发薪', value: state.payday.today ? '今日发薪' : `${state.payday.days} 天`, highlight: state.payday.today },
-  { label: '月薪', value: state.settings.studyDisguise ? '***' : state.salaryText },
-  { label: '日薪', value: state.settings.studyDisguise ? '***' : state.dailySalaryText },
+  /* 月薪在伪装下打码（词汇表 monthlySalary）；日薪由 service 转成「今日目标」词数 */
+  { label: '月薪', value: txt.value.monthlySalary ?? state.salaryText },
+  { label: txt.value.dailySalaryLabel, value: state.dailySalaryText },
   { label: '工作时间', value: `${state.settings.workStart} – ${state.settings.workEnd}` },
   { label: '每日休息', value: formatDuration(state.settings.dailyRestHours * 60) },
   { label: '月休方式', value: restLabel.value },
   { label: '本月工作日', value: `${snapshot.value.workDaysInMonth} 天` },
-  { label: '已摸鱼时长', value: formatDuration(snapshot.value.workedPaidMinutes) },
+  { label: txt.value.workedLabel, value: formatDuration(snapshot.value.workedPaidMinutes) },
   /* 「剩余」统一用墙上时钟口径（还有多久下班），与气泡一致 */
   { label: '剩余', value: formatDuration(snapshot.value.remainingWorkMinutes) },
 ])
@@ -141,7 +148,7 @@ function goto(key) {
       <div v-show="!collapsed" class="widget-wrap">
         <button class="widget" @click="progressOpen = !progressOpen">
           <div class="widget-head">
-            <span class="widget-title">{{ state.settings.studyDisguise ? '今日学习进度' : '今日摸鱼收入' }}</span>
+            <span class="widget-title">{{ txt.earnedTitle }}</span>
             <span class="widget-cog">⚙</span>
           </div>
           <p class="widget-amount tabular">{{ state.todayEarnedText }}</p>
@@ -167,7 +174,7 @@ function goto(key) {
 
         <transition name="detail">
           <div v-if="progressOpen" class="detail card">
-            <p class="detail-title">摸鱼收入详情</p>
+            <p class="detail-title">{{ txt.incomeDetail }}</p>
             <ul>
               <li v-for="row in detailRows" :key="row.label">
                 <span class="d-label">{{ row.label }}</span>

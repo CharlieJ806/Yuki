@@ -47,7 +47,12 @@ pub struct HttpPool {
 impl HttpPool {
     pub fn new() -> Self {
         Self {
-            client: reqwest::Client::new(),
+            /* connect_timeout 兜住「连不上又不断开」的挂死；刻意不设总超时——
+               流式对话可达分钟级，总超时会掐断正常生成，运行中取消走 abort 令牌 */
+            client: reqwest::Client::builder()
+                .connect_timeout(std::time::Duration::from_secs(15))
+                .build()
+                .unwrap_or_else(|_| reqwest::Client::new()),
             cancels: Mutex::new(HashMap::new()),
         }
     }
@@ -131,8 +136,12 @@ pub struct OnceReply {
 }
 
 /// 整包请求（非流式对话 / 节假日表 / 测试连接）。响应体按 UTF-8 文本返回。
+/// 单请求总超时 300s 兜底。当前 JS 侧全部走 http_fetch_stream（tauri-transport），
+/// once 暂无调用方——这是为将来接入的非流式调用方预留的兜底，避免挂死；
+/// 真正生效的加固是 client 上的 connect_timeout。
 #[tauri::command]
 pub async fn http_fetch_once(
+    window: tauri::WebviewWindow,
     pool: tauri::State<'_, HttpPool>,
     id: String,
     url: String,
@@ -140,11 +149,12 @@ pub async fn http_fetch_once(
     headers: HashMap<String, String>,
     body: String,
 ) -> Result<OnceReply, String> {
+    crate::ensure_pet_window(&window)?;
     let rx = pool.register(&id);
-    let req = build_request(&pool.client, &url, &method, &headers, &body);
-    let out = match req {
+    let out = match build_request(&pool.client, &url, &method, &headers, &body) {
         Err(e) => Err(e),
         Ok(req) => {
+            let req = req.timeout(std::time::Duration::from_secs(300));
             tokio::select! {
                 _ = wait_cancelled(rx) => Err("已取消".to_string()),
                 r = async {
@@ -171,6 +181,7 @@ pub struct StreamReply {
 
 #[tauri::command]
 pub async fn http_fetch_stream(
+    window: tauri::WebviewWindow,
     pool: tauri::State<'_, HttpPool>,
     id: String,
     url: String,
@@ -179,6 +190,7 @@ pub async fn http_fetch_stream(
     body: String,
     on_frame: Channel<StreamFrame>,
 ) -> Result<StreamReply, String> {
+    crate::ensure_pet_window(&window)?;
     let rx = pool.register(&id);
     let out = do_stream(&pool.client, &url, &method, &headers, &body, &on_frame, rx).await;
     pool.unregister(&id);
@@ -247,9 +259,12 @@ async fn do_stream(
     Ok(StreamReply { ok: true, chunks, bytes: bytes_total })
 }
 
-/// 取消进行中的请求。已结束的 id 返回 false（幂等，重复取消无害）。
+/// 取消进行中的请求。已结束的 id 返回 false（幂等，重复取消无害）。仅 pet 窗可调。
 #[tauri::command]
-pub fn http_abort(pool: tauri::State<'_, HttpPool>, id: String) -> bool {
+pub fn http_abort(window: tauri::WebviewWindow, pool: tauri::State<'_, HttpPool>, id: String) -> bool {
+    if crate::ensure_pet_window(&window).is_err() {
+        return false;
+    }
     pool.abort(&id)
 }
 

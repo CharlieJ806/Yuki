@@ -8,7 +8,7 @@
 
 ## 当前进度
 
-**最后更新：2026-09-23（Phase 7 退役，寄生式为终态；Tauri 侧落地 Phase 0-5。全量 Rust 业务层实验曾实现后归档，未随仓库发布。验证基线：npm smoke 339 + chat-test 138、cargo test 19/19、双构建全绿。）**
+**最后更新：2026-09-23（Phase 7 退役，寄生式为终态；Tauri 侧落地 Phase 0-5。全量 Rust 业务层实验曾实现后归档，未随仓库发布。验证基线：npm smoke 339 + chat-test 138、cargo test 19/19、双构建全绿——为当日快照，断言数随后续提交持续增长，当前规模以 `npm test` 实际输出为准。）**
 
 - **路线决策（终版）**：Electron 与 Tauri **双路线长期并行**，Tauri 以**寄生式为稳态终点**——Rust 只做系统边界（窗口/托盘/缩放/定位、`db.rs` 通用 SQL 桥、`http_proxy.rs` HTTP 代理），业务逻辑（service/chat/store/moyu/interactions/content）**留 JS**，同一份 JS 业务层跑两种壳。
 - **Phase 7 退役理由（勿无故重启）**：
@@ -119,7 +119,7 @@
 │ service.js 业务层          │              │ apply_pet_scale / 定位持久化 │
 │ store.js  node:sqlite      │              │ rusqlite 桥 / http 流代理   │
 │ chat.js + holiday.js       │              └──────────────┬──────────────┘
-└────────┬───────────────────┘                     invoke（限 pet 窗 ACL）
+└────────┬───────────────────┘                     invoke（限 pet 窗调用）
     ipcMain.handle ×55                     ┌──────────────┴──────────────┐
 ┌────────┴───────────────────┐             │ pet 窗（常驻宿主）            │
 │ 4 个渲染窗（window.desk）    │             │  service.js（async 化）      │
@@ -134,7 +134,8 @@
 ### 2.2 五个关键设计决策
 
 1. **业务层宿主 = pet 窗**。桌宠是本应用事实上的常驻单例（hide 不销毁 + 托盘 `restoreAnyWindow` 兜底重建），让 service 随它存活，不引入额外隐藏窗（省 ~30MB），无新增生命周期概念。pet 窗 webview 崩溃时 Rust 重建窗口 → service 重新挂载（现状 Electron 主进程崩溃则整个应用已死，不劣化）。
-2. **Rust 不实现业务，只实现四类系统能力**：窗口/托盘/定位/单实例；`db_exec/db_select/db_txn`（rusqlite，`Mutex<Connection>` 串行化，天然单写者，**ACL 仅开放给 pet 窗**）；`http_stream/http_once/http_abort`（reqwest 流代理，带 User-Agent、绕开 CORS 不确定性）；`apply_pet_scale`。
+2. **Rust 不实现业务，只实现四类系统能力**：窗口/托盘/定位/单实例；`db_exec/db_select/db_txn`（rusqlite，`Mutex<Connection>` 串行化，天然单写者，**db/http 命令仅 pet 窗可调**）；`http_stream/http_once/http_abort`（reqwest 流代理，带 User-Agent、绕开 CORS 不确定性）；`apply_pet_scale`。
+   > 更正（2026-09-28）：本节原写「ACL 仅开放给 pet 窗」与实现不符——Tauri 2 的 capabilities/ACL **不覆盖 app 自定义命令**（只管 plugin 命令），这些命令对全部 webview 无条件开放。「仅 pet 窗」由命令入口的 `ensure_pet_window`（src-tauri/src/lib.rs）按调用窗 label 校验实现，非 ACL。
 3. **跨窗调用走自研轻量总线**（serviceBus，预计 ~120 行）：`bus:req / bus:res` 事件对 + requestId 关联 + 15s 超时。**流式对话不复用总线**——chat chunk 现在就走 `desk:event` 广播，语义不变。启动时序用 `bus:ready` 门控（panel/chat 打开时若宿主未就绪则等待）。
 4. **IPC handlers 表抽成纯 JS 模块**（`ipc-handlers.js`）：现有 index.js 里 55 个 handler 的映射表几乎原样抽出。Electron 兼容期 `index.js` import 它注册到 `ipcMain.handle`；Tauri 期 pet 窗 import 它挂到 serviceBus。**同一张表双端复用**，是 parity 的基石。
 5. **传输/解析解耦**：`chat.js` 与 `holiday.js` 的 `fetch` 换成可注入 transport（默认仍为全局 fetch，Node 测试零改动；Tauri 运行时注入 Rust 流代理的 Response-like 包装）。
@@ -376,7 +377,7 @@ Phase 1 踩出的铁律已汇总至「当前进度」节的迁移铁律清单（
 | **UI 刷新流畅度** | rAF/vsync，3 透明窗合成 | 同引擎，理论持平 ☆ | 唯一变数是 WebView2 透明合成路径的历史怪癖（Phase 0 spike 拦截）；迁移后用同一动画场景对比掉帧 |
 | **3D/WebGL 渲染**（平台能力记录） | 上游已移除 3D 方案（a09a0e7），现役纯 2D 立绘 | spike 已验证 WebView2 下 WebGL alpha 画布 + 硬件加速可用（AMD D3D11，非软件渲染） | 作为平台能力记录保留：未来 2D 可动关节若走 canvas/WebGL 渲染可直接复用该结论；产品层面无 3D 回归面 |
 | **用户交互** | 系统级拖拽、托盘、右键菜单 | 同级 | 拖拽同为系统级（硬规则保持）；中文 IME 在 WebView2（Edge 输入体验）成熟；托盘交互一致；**注意**：notification toast 与 balloon 观感不同 |
-| **安全** | contextIsolation ✓ / nodeIntegration ✗ / IPC 白名单 ✓ / **sandbox: false ⚠** / Chromium 补丁随 Electron 版本滞后 | **能力 ACL 默认拒绝**（db/http 仅授 pet 窗）/ CSP 可显式配置 / WebView2 自动安全更新 / 无 Node 运行时面 | Tauri 安全模型整体更优：权限按窗口粒度授予、命令显式注册；并顺带补上现状 sandbox:false 的短板。API Key 仍明文存 SQLite（两框架同现状，后续可选 DPAPI 加密，不在本期） |
+| **安全** | contextIsolation ✓ / nodeIntegration ✗ / IPC 白名单 ✓ / **sandbox: false ⚠** / Chromium 补丁随 Electron 版本滞后 | app 命令入口校验调用窗（db/http 仅 pet 窗可调）/ CSP 已配置 / WebView2 自动安全更新 / 无 Node 运行时面 | Tauri 安全模型整体更优：权限按窗口粒度授予、命令显式注册（注：app 自定义命令不经 ACL，收权靠命令入口校验，见 §2.2 更正）。API Key 仍明文存 SQLite（两框架同现状，后续可选 DPAPI 加密，不在本期） |
 | **供应链/依赖面** | Node 全量运行时 + 38 版 Chromium 固定捆绑 | Rust 静态链接 + 系统 WebView | 攻击面与补丁义务都显著缩小 |
 
 **结论**：全维度没有一项比现状更差；内存与磁盘显著改善、安全模型显著增强、其余维度持平。内存收益的上限取决于是否叠加「隐藏窗延时销毁」（与框架无关的架构优化，建议在 Phase 4 一并以 Tauri 语义实现：panel/chat/chatpet 隐藏 5 分钟后销毁，重建走既有创建路径，托盘找回矩阵不受影响）。

@@ -2,7 +2,7 @@
  * 主进程 —— 桌宠透明窗 + 侧边栏面板窗 + 托盘。
  * 两个窗口共享同一份 service 状态，通过 IPC 广播保持同步。
  */
-import { app, BrowserWindow, Menu, Tray, ipcMain, nativeImage, screen } from 'electron'
+import { app, BrowserWindow, Menu, Tray, ipcMain, nativeImage, screen, shell } from 'electron'
 import { fileURLToPath } from 'node:url'
 import { dirname, join } from 'node:path'
 import { existsSync, mkdirSync, readFileSync } from 'node:fs'
@@ -10,10 +10,42 @@ import { openStore } from './store.js'
 import { createService } from './service.js'
 import { createIpcHandlers } from './ipc-handlers.js'
 import { SELF_PORTRAIT_SLUG } from '../shared/content.js'
+import { surfaceText } from '../shared/disguise.js'
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..', '..')
 const DEV_URL = process.env.DESK_DEV_URL || null
 const IS_DEV = Boolean(DEV_URL)
+
+/* 常驻托盘应用：未捕获异常不该弹原生错误框把用户吓到，也不能静默死掉。
+   落 console（有 DESK_DEBUG_PORT/终端时可见），进程继续跑。 */
+process.on('uncaughtException', (err) => console.error('[desk-pet] 未捕获异常:', err))
+process.on('unhandledRejection', (reason) => console.warn('[desk-pet] 未处理的 Promise 拒绝:', reason))
+
+/*
+ * 渲染层导航防护：应用只加载本机页面（file:// 或 dev server）。
+ * 指向其他 origin 的导航与 window.open 一律拒绝 —— 一旦渲染层被注入，
+ * 放行的远端页面会带着 preload 拿到 window.desk 的全部 IPC 通道。
+ */
+function isLocalNavigation(url) {
+  try {
+    const u = new URL(url)
+    if (u.protocol === 'file:') return true
+    if (DEV_URL && u.origin === new URL(DEV_URL).origin) return true
+    return false
+  } catch {
+    return false
+  }
+}
+
+app.on('web-contents-created', (_event, contents) => {
+  contents.setWindowOpenHandler(() => ({ action: 'deny' }))
+  contents.on('will-attach-webview', (e) => e.preventDefault())
+  contents.on('will-navigate', (e, url) => {
+    if (isLocalNavigation(url)) return
+    e.preventDefault()
+    console.warn(`[desk-pet] 已拦截渲染层导航: ${url}`)
+  })
+})
 
 /* 开机自启的登录项条目名：必须显式钉死——set 不传 name 时 Electron 用
    AppUserModelID（electron.app.<exe ProductName>），随 exe 元数据漂移，
@@ -162,7 +194,7 @@ async function createPetWindowImpl() {
       preload: join(ROOT, 'src', 'preload', 'index.cjs'),
       contextIsolation: true,
       nodeIntegration: false,
-      sandbox: false,
+      sandbox: true,
     },
   })
   /* 系统最小尺寸钳制补偿（两壳同式）：请求尺寸低于 Windows 最小窗宽/高时，
@@ -232,7 +264,7 @@ function createPetMenuWindow() {
       preload: join(ROOT, 'src', 'preload', 'index.cjs'),
       contextIsolation: true,
       nodeIntegration: false,
-      sandbox: false,
+      sandbox: true,
     },
   })
   win.setAlwaysOnTop(true, 'floating')
@@ -308,7 +340,7 @@ function createPanelWindow() {
       preload: join(ROOT, 'src', 'preload', 'index.cjs'),
       contextIsolation: true,
       nodeIntegration: false,
-      sandbox: false,
+      sandbox: true,
     },
   })
   loadRenderer(panelWindow, 'panel')
@@ -345,8 +377,10 @@ function broadcast(event, payload) {
  */
 /* 窗口贴合：渲染层 ResizeObserver 量内容尺寸，这里按右下角锚定重设窗口。
    （取代旧 applyPetScale 手工公式——尺寸真值源是渲染层布局） */
-function refitPetWindow({ width, height }) {
+function refitPetWindow({ width, height } = {}) {
   if (!petWindow || petWindow.isDestroyed()) return
+  /* 入参来自渲染层：非有限值直接忽略（NaN 会穿透 Math.max，让 setBounds 抛错） */
+  if (!Number.isFinite(Number(width)) || !Number.isFinite(Number(height))) return
   const b = petWindow.getBounds()
   const w = Math.max(80, Math.round(width))
   const h = Math.max(80, Math.round(height))
@@ -471,7 +505,7 @@ function createChatPetWindow(anchorBounds) {
       preload: join(ROOT, 'src', 'preload', 'index.cjs'),
       contextIsolation: true,
       nodeIntegration: false,
-      sandbox: false,
+      sandbox: true,
     },
   })
   chatPetWindow.setAlwaysOnTop(true, 'floating')
@@ -562,7 +596,7 @@ function createChatWindow() {
       preload: join(ROOT, 'src', 'preload', 'index.cjs'),
       contextIsolation: true,
       nodeIntegration: false,
-      sandbox: false,
+      sandbox: true,
     },
   })
   chatWindow.setAlwaysOnTop(true, 'floating')
@@ -680,36 +714,43 @@ async function rebuildTrayMenu() {
   /* 退出中不再刷新：托盘马上就没了，刷新反而会碰到已关闭的数据库 */
   if (quitting) return
   if (!tray || tray.isDestroyed?.()) return
-  const state = await service.getState()
-  /* 等待期间可能已开始退出：state 拿到后不再碰已关闭的数据库 */
-  if (quitting) return
-  const petAlive = petWindow && !petWindow.isDestroyed()
-  const petVisible = petAlive && petWindow.isVisible()
-  const panelOpen = panelWindow && !panelWindow.isDestroyed() && panelWindow.isVisible()
+  try {
+    const state = await service.getState()
+    /* 等待期间可能已开始退出：state 拿到后不再碰已关闭的数据库 */
+    if (quitting) return
+    const petAlive = petWindow && !petWindow.isDestroyed()
+    const petVisible = petAlive && petWindow.isVisible()
+    const panelOpen = panelWindow && !panelWindow.isDestroyed() && panelWindow.isVisible()
 
-  const menu = Menu.buildFromTemplate([
-    { label: `今日已摸鱼赚到 ${state.todayEarnedText}`, enabled: false },
-    { label: `累计摸鱼 ${state.days} 天 · ${state.level.level.name}`, enabled: false },
-    { type: 'separator' },
-    {
-      label: state.checkedInToday ? '今日已打卡' : '打卡',
-      enabled: !state.checkedInToday,
-      click: () => service.checkIn(),
-    },
-    /* 面板/桌宠两个动态开关相邻；「打开摸鱼面板」与「显示面板」在面板未
-       前台时完全同义，已并入这一个动态项 */
-    { label: panelOpen ? '隐藏面板' : '显示面板', click: () => togglePanel() },
-    { type: 'separator' },
-    /* 明确写「找回」而不是「显示」，用户找不到时才会想到点它 */
-    petVisible
-      ? { label: '隐藏桌宠', click: () => togglePet() }
-      : { label: petAlive ? '显示桌宠' : '找回桌宠', click: () => togglePet() },
-    { label: 'AI 对话', click: () => createChatWindow() },
-    { type: 'separator' },
-    { label: '全部显示（找不到界面时点这里）', click: () => showEverything() },
-    { label: '退出', click: () => app.quit() },
-  ])
-  tray.setContextMenu(menu)
+    /* 托盘文案走伪装词汇表：studyDisguise 开启时托盘也是路人可见表面 */
+    const txt = surfaceText(Boolean(state.settings.studyDisguise))
+    const menu = Menu.buildFromTemplate([
+      { label: txt.trayEarned(state.todayEarnedText), enabled: false },
+      { label: txt.trayTotal(state.days, state.level.level.name), enabled: false },
+      { type: 'separator' },
+      {
+        label: state.checkedInToday ? '今日已打卡' : '打卡',
+        enabled: !state.checkedInToday,
+        click: () => service.checkIn(),
+      },
+      /* 面板/桌宠两个动态开关相邻；「打开摸鱼面板」与「显示面板」在面板未
+         前台时完全同义，已并入这一个动态项 */
+      { label: panelOpen ? '隐藏面板' : '显示面板', click: () => togglePanel() },
+      { type: 'separator' },
+      /* 明确写「找回」而不是「显示」，用户找不到时才会想到点它 */
+      petVisible
+        ? { label: '隐藏桌宠', click: () => togglePet() }
+        : { label: petAlive ? '显示桌宠' : '找回桌宠', click: () => togglePet() },
+      { label: 'AI 对话', click: () => createChatWindow() },
+      { type: 'separator' },
+      { label: '全部显示（找不到界面时点这里）', click: () => showEverything() },
+      { label: '退出', click: () => app.quit() },
+    ])
+    tray.setContextMenu(menu)
+  } catch (err) {
+    /* 调用方多处 fire-and-forget，吞掉异常会让「托盘菜单停更」无迹可循 */
+    console.warn('[desk-pet] 托盘菜单刷新失败:', err)
+  }
 }
 
 /** 把桌宠和面板都叫出来 —— 兜底入口 */
@@ -845,13 +886,16 @@ function registerIpc() {
        必须用 setBounds——Windows 下 resizable:false 的窗口 setSize 不生效
        （实测传 533 后 innerHeight 仍 560），桌宠窗贴合的 setBounds 一直有效 */
     'menu:resize': (_e, height) => {
+      /* 非有限值忽略；上限钳到所在显示器工作区高度，防渲染层把菜单窗撑出屏 */
+      if (!Number.isFinite(Number(height))) return true
       if (petMenuWindow && !petMenuWindow.isDestroyed()) {
         const b = petMenuWindow.getBounds()
+        const { workArea } = screen.getDisplayNearestPoint({ x: b.x, y: b.y })
         petMenuWindow.setBounds({
           x: b.x,
           y: b.y,
           width: b.width,
-          height: Math.max(120, Math.round(height)),
+          height: Math.min(Math.max(120, Math.round(height)), workArea.height),
         })
       }
       return true
@@ -871,6 +915,13 @@ function registerIpc() {
     'autostart:get': () => autostartEnabled(),
     'autostart:set': (_e, on) => {
       app.setLoginItemSettings({ openAtLogin: Boolean(on), name: LOGIN_ITEM_NAME })
+      return true
+    },
+    /* 数据目录入口（设置页「备份数据」用）。失败走 reject：与 Tauri 壳
+       同语义，设置页的 lastError 错误条才有反馈（返回字符串会被当成功吞掉） */
+    'system:openDataDir': async () => {
+      const err = await shell.openPath(app.getPath('userData'))
+      if (err !== '') throw new Error(err)
       return true
     },
   }
@@ -947,7 +998,7 @@ if (!gotLock) {
         else console.warn(`[desk-pet] 节假日表获取失败，暂用周末规则：${r.reason}`)
         broadcast('state', await service.getState())
       })
-      .catch(() => {})
+      .catch((err) => console.warn('[desk-pet] 节假日就绪后的状态广播失败:', err))
     registerIpc()
     bindStateBridge()
     createTray()

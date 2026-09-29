@@ -13,7 +13,7 @@ import { mkdirSync } from 'node:fs'
 import { dirname } from 'node:path'
 import { DEFAULT_SETTINGS } from '../shared/moyu.js'
 import { serializeContent } from '../shared/content.js'
-import { SCHEMA, WIPE_TABLES } from '../shared/db-schema.js'
+import { SCHEMA, SCHEMA_VERSION, MIGRATE_CHECKINS_V2, CHECKINS_DDL_DETECT, WIPE_TABLES } from '../shared/db-schema.js'
 import {
   mapCheckin,
   mapMessage,
@@ -27,12 +27,37 @@ import {
 const require = createRequire(import.meta.url)
 const { DatabaseSync } = require('node:sqlite')
 
+/**
+ * schema 版本推进：SCHEMA 只保证「新建库」是最新形态，已存在的旧表要靠
+ * 迁移段追上。检测按 sqlite_master 的实际 DDL 判断，天然幂等；
+ * user_version 记在 PRAGMA 里（与 Tauri 桥版同一套逻辑，改版本时两处同步）。
+ */
+function ensureSchema(db) {
+  db.exec(SCHEMA)
+  const version = Number(db.prepare('PRAGMA user_version').get()?.user_version) || 0
+  if (version >= SCHEMA_VERSION) return
+  if (version < 2) {
+    const checkins = db.prepare(CHECKINS_DDL_DETECT).get()
+    if (checkins && /dateKey[^,]*UNIQUE/i.test(checkins.sql)) {
+      try {
+        db.exec(MIGRATE_CHECKINS_V2)
+      } catch (err) {
+        /* 迁移段是显式事务：语句失败时事务仍开着，先回滚再上抛，别把
+           半个事务留给后续语句 */
+        try { db.exec('ROLLBACK') } catch { /* 事务可能已自行结束 */ }
+        throw err
+      }
+    }
+  }
+  db.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`)
+}
+
 export function openStore(filePath) {
   if (filePath !== ':memory:') mkdirSync(dirname(filePath), { recursive: true })
   const db = new DatabaseSync(filePath)
   db.exec('PRAGMA journal_mode = WAL;')
   db.exec('PRAGMA foreign_keys = ON;')
-  db.exec(SCHEMA)
+  ensureSchema(db)
 
   const now = () => Date.now()
 
@@ -211,23 +236,28 @@ export function openStore(filePath) {
     return value
   }
 
-  /** 待同步变更集 —— 云端同步实现时直接消费 */
+  /** 待同步变更集 —— 云端同步实现时直接消费（personas 也在写 syncState，清单必须同步收） */
   function pendingChanges() {
     return {
       settings: db.prepare("SELECT * FROM settings WHERE syncState != 'synced'").all(),
       checkins: db.prepare("SELECT * FROM checkins WHERE syncState != 'synced'").all(),
       worklogs: db.prepare("SELECT * FROM worklogs WHERE syncState != 'synced'").all(),
+      personas: db.prepare("SELECT * FROM personas WHERE syncState != 'synced'").all(),
       chatSessions: db.prepare("SELECT * FROM chat_sessions WHERE syncState != 'synced'").all(),
       chatMessages: db.prepare("SELECT * FROM chat_messages WHERE syncState != 'synced'").all(),
     }
   }
 
+  /* markSynced 的表名来自调用方对象键，而该通道对渲染层开放（sync:mark）。
+     键名会被拼进 SQL，必须白名单收口，否则任意 UPDATE 可直达数据层 */
+  const SYNC_TABLES = new Set(['settings', 'checkins', 'worklogs', 'personas', 'chat_sessions', 'chat_messages'])
+
   function markSynced(idsByTable) {
-    const ts = now()
     for (const [table, ids] of Object.entries(idsByTable ?? {})) {
+      if (!SYNC_TABLES.has(table)) throw new Error(`markSynced: 未知表 ${table}`)
       if (!Array.isArray(ids) || ids.length === 0) continue
-      const stmt = db.prepare(`UPDATE ${table} SET syncState = 'synced', updatedAt = ? WHERE id = ?`)
-      for (const id of ids) stmt.run(ts, id)
+      const stmt = db.prepare(`UPDATE ${table} SET syncState = 'synced' WHERE id = ?`)
+      for (const id of ids) stmt.run(id)
     }
     return true
   }
@@ -280,9 +310,17 @@ export function openStore(filePath) {
   }
 
   function deleteSession(id) {
+    /* 两条 UPDATE 必须同生共死：中间失败会留孤儿消息行（不可见也不可恢复） */
     const ts = now()
-    db.prepare("UPDATE chat_sessions SET deletedAt = ?, updatedAt = ?, syncState = 'pending' WHERE id = ?").run(ts, ts, id)
-    db.prepare("UPDATE chat_messages SET deletedAt = ?, updatedAt = ?, syncState = 'pending' WHERE sessionId = ?").run(ts, ts, id)
+    db.exec('BEGIN')
+    try {
+      db.prepare("UPDATE chat_sessions SET deletedAt = ?, updatedAt = ?, syncState = 'pending' WHERE id = ?").run(ts, ts, id)
+      db.prepare("UPDATE chat_messages SET deletedAt = ?, updatedAt = ?, syncState = 'pending' WHERE sessionId = ?").run(ts, ts, id)
+      db.exec('COMMIT')
+    } catch (err) {
+      db.exec('ROLLBACK')
+      throw err
+    }
     return true
   }
 

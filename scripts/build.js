@@ -26,6 +26,9 @@ const RELEASE = join(ROOT, 'release')
 const APP_NAME = '摸鱼桌宠'
 /* 分发层统一英文规范名（产品显示层保持中文）：{产品}-{形态}-{版本}-{架构} */
 const VERSION = JSON.parse(readFileSync(join(ROOT, 'package.json'), 'utf8')).version
+/* 运行时版本从实装包读，不硬编码 —— 硬编码过的文件名在依赖声明升级后
+   静默 miss，缓存查找失效回退联网下载（网络不通直接挂） */
+const ELECTRON_VERSION = JSON.parse(readFileSync(join(ROOT, 'node_modules', 'electron', 'package.json'), 'utf8')).version
 /*
  * OUT_DIR 是**打包暂存区**（`.tmp-release/`，gitignored，在 release/ 之外）。
  *
@@ -158,6 +161,18 @@ for (const stale of ['使用说明.txt', '手机端启动器-win32-x64']) {
 }
 
 /*
+ * 清掉旧版本的归集产物（release/electron/）：release.yml 按
+ * release/electron/* 全量上传，旧版 zip/setup 混在里面会被当成
+ * 新版本一起发布。
+ */
+for (const f of readdirSync(DIST_DIR)) {
+  if (f.startsWith('desk-pet-') && !f.includes(`-${VERSION}-`) && !f.includes(`-${VERSION}.`)) {
+    rmSync(join(DIST_DIR, f), { force: true })
+    console.log(`  -> 清理旧版产物: ${f}`)
+  }
+}
+
+/*
  * Electron 打包会在临时目录里 patch 运行时再 rename 一次。
  * 本机 TEMP 指向网络盘（Z:\TEMP），rename 会 EPERM，必须落到本地磁盘。
  */
@@ -177,7 +192,7 @@ console.log('\n[3/5] 打包 Electron 应用...')
 function findElectronCache() {
   const base = process.env.ELECTRON_CACHE || join(process.env.LOCALAPPDATA ?? '', 'electron', 'Cache')
   if (!existsSync(base)) return null
-  const wanted = `electron-v38.8.6-win32-x64.zip`
+  const wanted = `electron-v${ELECTRON_VERSION}-win32-x64.zip`
   for (const entry of readdirSync(base, { withFileTypes: true })) {
     if (!entry.isDirectory()) continue
     const candidate = join(base, entry.name, wanted)
@@ -372,6 +387,25 @@ console.log('\n[4/5] 整理产物...')
 const exeCandidates = [join(appDir, `${APP_NAME}.exe`), join(appDir, 'electron.exe')]
 const exePath = exeCandidates.find(existsSync)
 if (!exePath) throw new Error(`未找到可执行文件，已查找: ${exeCandidates.join(', ')}`)
+
+/*
+ * fuse 加固：关掉 RunAsNode / 命令行 inspect / NODE_OPTIONS。
+ * DESK_DEBUG_PORT 门控只管「应用自己开的调试口」，挡不住外部拿
+ * `--remote-debugging-port` 或 ELECTRON_RUN_AS_NODE=1 直接启动 exe ——
+ * 后者等价于把渲染层交给任意本地进程（CDP 一开即全权控制）。
+ * 打包即加固：这里失败就终止，不允许未加固的产物悄悄出包。
+ */
+console.log('\n[4/5b] 翻转 Electron fuses...')
+{
+  const { flipFuses, FuseV1Options, FuseVersion } = await import('@electron/fuses')
+  await flipFuses(exePath, {
+    version: FuseVersion.V1,
+    [FuseV1Options.RunAsNode]: false,
+    [FuseV1Options.EnableNodeCliInspectArguments]: false,
+    [FuseV1Options.EnableNodeOptionsEnvironmentVariable]: false,
+  })
+  console.log(`  -> fuses 已加固: ${exePath}`)
+}
 
 /* 使用说明放到 release 根（copyFileSync 覆盖旧版；cpSync 在本机会被实时
    防护干扰出假错误，见上方 copyTree 注释） */

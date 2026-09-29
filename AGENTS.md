@@ -49,8 +49,14 @@ src/renderer/        单份构建产物，main.js 按 ?route=pet|panel|chat|chat
 - **桌宠拖拽用 `-webkit-app-region: drag`**，禁止「mousemove + setPosition」——事件会断流拖不动；交互元素须显式 `no-drag`。
 - 节假日 API（timor.tech）**必须带 User-Agent**，否则返回 Cloudflare 页。
 - 提示词顺序必须「稳定在前、易变在后」（token 差 50 倍）；改对话/人设/表情先读 docs/DESIGN.md「AI 对话」整章。
-- `scripts/build.js` 已处理三个 Windows 打包坑（TEMP 网络盘、Defender 锁 exe、旧进程占用 EPERM），动打包前先读它的注释。
-- Electron 必须 ≥ 37（`node:sqlite` 需要 Node 22+）。
+- `scripts/build.js` 已处理三个 Windows 打包坑（TEMP 网络盘、Defender 锁 exe、旧进程占用 EPERM），动打包前先读它的注释；打包后 fuse 加固在 build.js 内翻转（失败即终止），**不许绕过或关闭**。
+- Electron 必须 ≥ 37（`node:sqlite` 需要 Node 22+）；`engines` 锁 `>=22.13`（node:sqlite 免 flag 的实际门槛）。
+- **schema 变更必须走版本迁移**：改 `db-schema.js` 时递增 `SCHEMA_VERSION` 并在 store.js / store-bridge.js 的 ensureSchema 两处同步加迁移段（幂等、显式事务、失败 ROLLBACK）——只改 SCHEMA 不写迁移，存量库必挂。
+- **偷偷摸摸模式（studyDisguise）伪装在数据出口**：金额/文案转换只发生在 service.getState + `shared/disguise.js` 词汇表；**组件禁止新写 `studyDisguise ? A : B`**，新可见文案先登记词汇表（smoke 锁伪装态不得含 摸鱼/已赚/¥）。
+- **`chatApiKey` 脱敏口径**：Key 原文只在 settings 表与 `settings:getFull` 通道存在；state 快照、`session:settings` 及一切广播/新通道必须剥掉 Key。
+- **Tauri 自定义命令不经 ACL**（capabilities 只管 plugin 命令）：新增涉 db/网络/系统状态的 command 必须在入口 `ensure_pet_window` 收权，否则对全部 webview 开放。
+- **新增业务表四处同步**：`pendingChanges()` 与 `markSynced()` 白名单在 store.js / store-bridge.js 各一份，漏收的表接云同步后会静默丢数据。
+- **版本号四处一处不少**（package.json / tauri.conf.json / Cargo.toml / installer.nsi）：`scripts/check-version.js` 挂在 npm test 里，bump 版本用它的输出确认。
 
 ## 工具纪律
 

@@ -4,6 +4,7 @@
  * 用法: node scripts/smoke.js
  */
 import { existsSync, readFileSync, mkdtempSync, readdirSync, rmSync } from 'node:fs'
+import { DatabaseSync } from 'node:sqlite'
 import { tmpdir } from 'node:os'
 import { join, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -228,8 +229,61 @@ try {
   /* ---------- 8. 同步记账 ---------- */
   const pending = await service.pendingChanges()
   check('存在待同步记录', pending.checkins.length > 0 && pending.settings.length > 0, true)
+  check('待同步集含 personas', Array.isArray(pending.personas), true)
+  const pendingCheckinBefore = pending.checkins[0]
   await service.markSynced({ checkins: pending.checkins.map((c) => c.id) })
   check('标记后打卡无待同步', (await await service.pendingChanges()).checkins.length, 0)
+  const markedRow = (await service.listCheckins()).find((c) => c.id === pendingCheckinBefore.id)
+  check('标记同步不改写 updatedAt', markedRow.updatedAt, pendingCheckinBefore.updatedAt)
+  let threwOnUnknownTable = false
+  try {
+    await service.markSynced({ 'settings; DELETE FROM checkins --': ['x'] })
+  } catch {
+    threwOnUnknownTable = true
+  }
+  check('markSynced 表名白名单', threwOnUnknownTable, true)
+
+  /* ---------- 9. schema 迁移（user_version / 软删唯一索引） ---------- */
+  const legacyPath = join(dir, 'legacy.db')
+  {
+    /* 手工造一个 v1 形态的旧库：列级 UNIQUE + 一条已软删的打卡 */
+    const legacy = new DatabaseSync(legacyPath)
+    legacy.exec(`CREATE TABLE checkins (
+      id        TEXT PRIMARY KEY,
+      dateKey   TEXT NOT NULL UNIQUE,
+      createdAt INTEGER NOT NULL,
+      note      TEXT,
+      updatedAt INTEGER NOT NULL,
+      deletedAt INTEGER,
+      syncState TEXT NOT NULL DEFAULT 'local'
+    );`)
+    const legacyTs = Date.parse('2025-06-03T10:00:00')
+    legacy
+      .prepare(
+        "INSERT INTO checkins (id, dateKey, createdAt, note, updatedAt, syncState) VALUES ('legacy-1', '2025-06-03', ?, NULL, ?, 'synced')",
+      )
+      .run(legacyTs, legacyTs)
+    legacy.prepare("UPDATE checkins SET deletedAt = ? WHERE id = 'legacy-1'").run(legacyTs)
+    legacy.close()
+  }
+  const legacyStore = openStore(legacyPath)
+  check('旧库迁移后 user_version=2', legacyStore.db.prepare('PRAGMA user_version').get().user_version, 2)
+  check('迁移保留旧数据行', legacyStore.db.prepare('SELECT COUNT(*) AS n FROM checkins').get().n, 1)
+  check('软删日期可重新打卡（partial unique）', legacyStore.addCheckin('2025-06-03').created, true)
+  let liveDateStillUnique = false
+  try {
+    legacyStore.db
+      .prepare("INSERT INTO checkins (id, dateKey, createdAt, updatedAt, syncState) VALUES ('dup', '2025-06-03', 0, 0, 'pending')")
+      .run()
+  } catch {
+    liveDateStillUnique = true
+  }
+  check('未删除日期仍唯一', liveDateStillUnique, true)
+  legacyStore.close()
+
+  const freshStore = openStore(join(dir, 'fresh.db'))
+  check('新库 user_version=2', freshStore.db.prepare('PRAGMA user_version').get().user_version, 2)
+  freshStore.close()
 
   /* ---------- 10. 未知设置键被忽略 ---------- */
   await service.updateSettings({ hackerKey: 'boom' })
@@ -286,6 +340,9 @@ try {
   check('缺 Key 提示准确', (await await service.chatStatus()).reason.includes('API Key'), true)
   await service.updateSettings({ chatBaseUrl: 'https://api.deepseek.com', chatApiKey: 'sk-test' })
   check('配置完整可用', (await await service.chatStatus()).ready, true)
+  /* state 快照广播到全部窗口，必须脱敏；全量读取仅供设置页按需调用 */
+  check('state 快照不携带 API Key 原文', (await await service.getState()).settings.chatApiKey, undefined)
+  check('getSettings 全量仍含原文', (await service.getSettings()).chatApiKey, 'sk-test')
   await service.updateSettings({ chatBaseUrl: 'http://127.0.0.1:11434/v1', chatApiKey: '' })
   check('本地地址免 Key', (await await service.chatStatus()).ready, true)
   check('本地不需 Key 标记', (await await service.chatStatus()).needsApiKey, false)
@@ -347,6 +404,43 @@ try {
   check('过期缓存判定为不新鲜', isCacheFresh({ fetchedAt: Date.now() - 8 * 24 * 3600 * 1000, table: {} }), false)
   check('空缓存不新鲜', isCacheFresh(null), false)
   check('结构异常不新鲜', isCacheFresh({ table: {} }), false)
+
+  /* ---------- 15. 偷偷摸摸模式（伪装在数据出口统一生效） ---------- */
+  {
+    const { formatStudyProgress, surfaceText, STUDY_DAILY_WORDS } = await import('../src/shared/disguise.js')
+
+    /* 纯函数换算 */
+    check('学习换算：零收入零词', formatStudyProgress(0, 1000), '0 词')
+    check('学习换算：线性对齐进度', formatStudyProgress(518.5, 1037), '500 词')
+    check('学习换算：日薪为零保守封顶', formatStudyProgress(500, 0), '500 词')
+    check('学习换算：超额封顶', formatStudyProgress(99999, 0), `${STUDY_DAILY_WORDS} 词`)
+
+    /* 词汇表本身不得含敏感字样（含语录与托盘函数产物） */
+    const study = surfaceText(true)
+    const studyVisible = [
+      study.earnedTitle, study.working, study.done, study.doneShort, study.restDay,
+      study.beforeWork, study.disabled, study.earnedLabel, study.workedLabel,
+      study.totalLabel, study.incomeDetail, study.brand, study.tagline,
+      ...study.heroQuotes,
+      study.trayEarned('432 词'),
+      study.trayTotal(3, '摸鱼学徒'),
+    ].join('\n')
+    check('伪装词汇表无摸鱼/已赚/货币符号', /摸鱼|已赚|[¥$]/.test(studyVisible), false)
+    check('伪装托盘等级名学习化', study.trayTotal(3, '摸鱼学徒').includes('学习学徒'), true)
+
+    /* state 出口：三个文本字段全部转换 */
+    await service.updateSettings({ studyDisguise: true })
+    const disguised = await await service.getState(afternoon)
+    check('伪装下收入文案为学习词数形态', /^\d+ 词$/.test(disguised.todayEarnedText), true)
+    check('伪装换算与进度线性对齐', disguised.todayEarnedText, `${Math.round(disguised.snapshot.progress * STUDY_DAILY_WORDS)} 词`)
+    check('伪装下日薪转为今日目标', disguised.dailySalaryText, `${STUDY_DAILY_WORDS} 词`)
+    check('伪装下月薪打码', disguised.salaryText, '***')
+
+    await service.updateSettings({ studyDisguise: false })
+    const normal = await await service.getState(afternoon)
+    check('关闭伪装恢复金额显示', /^¥/.test(normal.todayEarnedText), true)
+    check('关闭伪装日薪恢复金额', /^¥/.test(normal.dailySalaryText), true)
+  }
 
   /* ---------- 16. 互动逻辑 ---------- */
   {
@@ -575,8 +669,15 @@ try {
          * 匹配两种写法：对象字面量（saveSettings({ outfitMode: 'fixed' })）
          * 与赋值（form.outfitMode = 'fixed'）——
          * 设置页走表单，用的是后者，只认前者会误报。
+         *
+         * 换装写入逻辑收敛进 lib/outfit-state.js（useOutfitState）之后，
+         * 对话窗/立绘窗组件里不再直接写 outfitMode：入口存在性的充分证据
+         * 是「组件引用了 useOutfitState」（解构出 outfits/chooseOutfit 供
+         * 模板使用），所以两种形态任一命中即算入口在。
          */
-        if (!/outfitMode\s*[:=]\s*'fixed'/.test(src)) entriesMissing.push(label)
+        const hasWrite = /outfitMode\s*[:=]\s*'fixed'/.test(src)
+        const usesShared = /useOutfitState/.test(src)
+        if (!hasWrite && !usesShared) entriesMissing.push(label)
       }
       check('换装入口都在（防再次丢失）', entriesMissing, [])
     }

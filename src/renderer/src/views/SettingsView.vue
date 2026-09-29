@@ -5,6 +5,7 @@ import {
   state,
   saveSettings,
   resetSettings,
+  getFullSettings,
   logMoyu,
   win,
   openChatWindow,
@@ -67,6 +68,21 @@ const PROFILE_SHOTS = [
 const form = reactive({ ...DEFAULT_SETTINGS })
 const saving = ref(false)
 const savedAt = ref(null)
+/*
+ * chatApiKey 不在 state 快照里（广播面脱敏），表单另存「已保存的 Key」：
+ * dirty 判定和 revert 都以它为基准，全量值进设置页时经 getFullSettings 拉取。
+ *
+ * keyLoaded 门控：全量值取回之前 chatApiKey 还是初始空串，此时把表单整体
+ * 保存会把已存的 Key 覆盖成空串 —— 取回前发出去的补丁必须摘掉这个键。
+ */
+const savedApiKey = ref('')
+const keyLoaded = ref(false)
+
+function formPatch() {
+  const patch = { ...form }
+  if (!keyLoaded.value) delete patch.chatApiKey
+  return patch
+}
 
 const isDev = import.meta.env.DEV
 
@@ -254,7 +270,7 @@ async function testChat() {
   chatTestResult.value = null
   try {
     /* 先把当前表单存下去，测试读的是库里的配置 */
-    await saveSettings({ ...form })
+    await saveSettings(formPatch())
     chatTestResult.value = await testChatConnection()
   } finally {
     chatTesting.value = false
@@ -350,17 +366,40 @@ async function runDiagnose() {
   diagnosing.value = true
   diagResult.value = null
   try {
-    await saveSettings({ ...form })
+    await saveSettings(formPatch())
     diagResult.value = await diagnoseChat()
   } finally {
     diagnosing.value = false
   }
 }
-const dirty = computed(() => JSON.stringify(form) !== JSON.stringify(state.settings))
+/*
+ * dirty 判定：除 chatApiKey 外逐键与 state.settings 比（不依赖键序，也
+ * 不会因后端多返回字段产生「假 dirty」）；chatApiKey 与已保存值比。
+ */
+const dirty = computed(() => {
+  for (const k of Object.keys(DEFAULT_SETTINGS)) {
+    if (k === 'chatApiKey') continue
+    if (JSON.stringify(form[k]) !== JSON.stringify(state.settings[k])) return true
+  }
+  return String(form.chatApiKey ?? '') !== savedApiKey.value
+})
 
-/* 进入设置页就把人设列表拉全，下拉框与实际保持一致 */
+/* 进入设置页就把人设列表拉全；同时拉全量设置 —— state 快照不含 API Key
+   原文（广播面脱敏），表单需要真实值 */
 onMounted(() => {
   loadPersonas().catch(() => {})
+  getFullSettings()
+    .then((full) => {
+      if (full) {
+        Object.assign(form, full)
+        savedApiKey.value = String(full.chatApiKey ?? '')
+      }
+    })
+    .catch(() => {})
+    .finally(() => {
+      /* 失败也放行：mock/异常场景下表单值即当前值，继续拦只会让 Key 永远存不上 */
+      keyLoaded.value = true
+    })
 })
 
 watch(
@@ -372,8 +411,9 @@ watch(
 async function save() {
   saving.value = true
   try {
-    const ok = await saveSettings({ ...form })
+    const ok = await saveSettings(formPatch())
     if (ok) {
+      if (keyLoaded.value) savedApiKey.value = String(form.chatApiKey ?? '')
       savedAt.value = new Date()
       window.setTimeout(() => (savedAt.value = null), 2200)
     }
@@ -384,11 +424,16 @@ async function save() {
 
 async function revert() {
   Object.assign(form, state.settings)
+  form.chatApiKey = savedApiKey.value
 }
 
 async function reset() {
   const ok = await resetSettings()
-  if (ok) Object.assign(form, state.settings)
+  if (ok) {
+    Object.assign(form, state.settings)
+    savedApiKey.value = ''
+    form.chatApiKey = ''
+  }
 }
 
 /* ---------- 聊天背景 ---------- */
@@ -463,6 +508,11 @@ async function addMoyu() {
   await logMoyu(quickMinutes.value)
 }
 
+/* 备份数据：打开数据所在目录（浏览器预览无此能力，静默失败） */
+async function onOpenDataDir() {
+  await win.openDataDir()
+}
+
 const previewText = computed(() => {
   const [sh, sm] = form.workStart.split(':').map(Number)
   const [eh, em] = form.workEnd.split(':').map(Number)
@@ -473,7 +523,6 @@ const previewText = computed(() => {
 
 const REST_PATTERN_LABELS = { double: '双休', single: '单休', alternate: '大小周', irregular: '不定休' }
 const syncStatus = computed(() => ({
-  pendingCheckins: state.snapshot ? undefined : undefined,
   backend: state.backend,
   dbHint: '本地 SQLite（userData/desk-pet.db）',
 }))
@@ -590,7 +639,7 @@ const syncStatus = computed(() => ({
           <label>偷偷摸摸模式</label>
           <label class="switch">
             <input v-model="form.studyDisguise" type="checkbox" />
-            <span>开启后界面文案切换为学习风格，降低划水观感</span>
+            <span>开启后金额显示为学习进度（如「已背 432 词」）、文案切换为学习风格，降低划水观感</span>
           </label>
         </div>
         <div class="field">
@@ -1051,7 +1100,7 @@ const syncStatus = computed(() => ({
         <div class="field">
           <label>存储位置</label>
           <span class="value">{{ syncStatus.dbHint }}</span>
-          <span class="hint">运行环境：{{ syncStatus.backend === 'electron' ? 'Electron 桌面版' : '浏览器预览模式（数据不落盘）' }}</span>
+          <span class="hint">运行环境：{{ syncStatus.backend === 'native' ? '桌面版（数据在本机 SQLite）' : '浏览器预览模式（数据不落盘）' }}</span>
         </div>
         <div class="field">
           <label>累计数据</label>
@@ -1069,6 +1118,11 @@ const syncStatus = computed(() => ({
           <label>恢复默认</label>
           <button class="btn" @click="reset">重置全部设置</button>
           <span class="hint">不会删除打卡记录</span>
+        </div>
+        <div class="field">
+          <label>备份数据</label>
+          <button class="btn" @click="onOpenDataDir">打开数据目录</button>
+          <span class="hint">数据库与设置都在这个目录，拷走即备份</span>
         </div>
 
         <!-- 破坏性操作：两步确认，且与「重置全部设置」明确分开 -->

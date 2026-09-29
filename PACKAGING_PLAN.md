@@ -1,6 +1,8 @@
 # PACKAGING_PLAN — 双壳四形态打包方案
 
-> 状态：待实施。目标矩阵：Electron / Tauri 各出 **NSIS 安装版** + **纯绿色版**。
+> 状态：已实施（Electron 侧 scripts/build.js + installer.nsi，Tauri 侧 tauri.conf.json bundle；
+> 四形态产物与校验和经 .github/workflows/release.yml 发布）。残留待办见文末。
+> 目标矩阵：Electron / Tauri 各出 **NSIS 安装版** + **纯绿色版**。
 > 与 AUTOSTART_PLAN.md 衔接：安装版卸载钩子负责清理开机自启注册表条目。
 
 ## 0. 现状盘点（2026-09-25 实测）

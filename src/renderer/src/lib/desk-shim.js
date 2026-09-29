@@ -48,6 +48,8 @@ function installDeskShim() {
 
     /* 设置 */
     updateSettings: (patch, sessionId) => viaBus('settings:update')(patch, sessionId),
+    /* 全量设置（含 chatApiKey 原文）：state 快照已脱敏，仅设置页按需拉取 */
+    getFullSettings: viaBus('settings:getFull'),
     resetSettings: () => viaBus('settings:reset')(),
 
     /* 当前活跃会话：对话窗设置，桌宠跟随 */
@@ -141,6 +143,8 @@ function installDeskShim() {
         if (!on && /os error 2|not found/i.test(String(err))) return null
         throw err
       }),
+    /* 备份数据：打开数据所在目录（Rust command，与 Electron shell.openPath 同义） */
+    openDataDir: () => invoke('system_open_data_dir'),
 
     /*
      * petScale 是「settings 单一真相 + 窗口尺寸」的组合操作：

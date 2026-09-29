@@ -11,7 +11,7 @@
  */
 import { DEFAULT_SETTINGS } from '../moyu.js'
 import { serializeContent } from '../content.js'
-import { SCHEMA, WIPE_TABLES } from '../db-schema.js'
+import { SCHEMA, SCHEMA_VERSION, MIGRATE_CHECKINS_V2, CHECKINS_DDL_DETECT, WIPE_TABLES } from '../db-schema.js'
 import {
   mapCheckin,
   mapMessage,
@@ -31,9 +31,29 @@ function invoke(cmd, args = {}) {
 export function openStoreBridge() {
   const now = () => Date.now()
 
-  /* select/exec 是全部数据访问的收口：先等建表完成，再进 IPC。
-     宿主（service-host）也会 await ready，这里是 store surface 自身的防线 */
-  const ready = invoke('db_exec', { sql: SCHEMA, params: null }).then(() => undefined)
+  /* select/exec 是全部数据访问的收口：先等建表+迁移完成，再进 IPC。
+     宿主（service-host）也会 await ready，这里是 store surface 自身的防线。
+     版本推进逻辑与 store.js 的 ensureSchema 同式（改动需两处同步）。 */
+  const ready = (async () => {
+    await invoke('db_exec', { sql: SCHEMA, params: null })
+    const versionRows = await invoke('db_select', { sql: 'PRAGMA user_version', params: null })
+    const version = Number(versionRows[0]?.user_version) || 0
+    if (version < SCHEMA_VERSION) {
+      if (version < 2) {
+        const checkins = await invoke('db_select', { sql: CHECKINS_DDL_DETECT, params: null })
+        if (checkins[0] && /dateKey[^,]*UNIQUE/i.test(checkins[0].sql)) {
+          try {
+            await invoke('db_exec', { sql: MIGRATE_CHECKINS_V2, params: null })
+          } catch (err) {
+            /* 迁移段是显式事务：语句失败时事务仍开着，先回滚再上抛 */
+            try { await invoke('db_exec', { sql: 'ROLLBACK', params: null }) } catch { /* 事务可能已自行结束 */ }
+            throw err
+          }
+        }
+      }
+      await invoke('db_exec', { sql: `PRAGMA user_version = ${SCHEMA_VERSION}`, params: null })
+    }
+  })()
   const select = async (sql, params) => {
     await ready
     return invoke('db_select', { sql, params: params ?? null })
@@ -220,23 +240,27 @@ export function openStoreBridge() {
     return value
   }
 
-  /** 待同步变更集 —— 云端同步实现时直接消费 */
+  /** 待同步变更集 —— 云端同步实现时直接消费（personas 也在写 syncState，清单必须同步收） */
   async function pendingChanges() {
     return {
       settings: await select("SELECT * FROM settings WHERE syncState != 'synced'"),
       checkins: await select("SELECT * FROM checkins WHERE syncState != 'synced'"),
       worklogs: await select("SELECT * FROM worklogs WHERE syncState != 'synced'"),
+      personas: await select("SELECT * FROM personas WHERE syncState != 'synced'"),
       chatSessions: await select("SELECT * FROM chat_sessions WHERE syncState != 'synced'"),
       chatMessages: await select("SELECT * FROM chat_messages WHERE syncState != 'synced'"),
     }
   }
 
+  /* 表名白名单与 node:sqlite 版一致：sync:mark 通道对渲染层开放，键名直拼 SQL 必须收口 */
+  const SYNC_TABLES = new Set(['settings', 'checkins', 'worklogs', 'personas', 'chat_sessions', 'chat_messages'])
+
   async function markSynced(idsByTable) {
-    const ts = now()
     for (const [table, ids] of Object.entries(idsByTable ?? {})) {
+      if (!SYNC_TABLES.has(table)) throw new Error(`markSynced: 未知表 ${table}`)
       if (!Array.isArray(ids) || ids.length === 0) continue
-      const sql = `UPDATE ${table} SET syncState = 'synced', updatedAt = ? WHERE id = ?`
-      for (const id of ids) await exec(sql, [ts, id])
+      const sql = `UPDATE ${table} SET syncState = 'synced' WHERE id = ?`
+      for (const id of ids) await exec(sql, [id])
     }
     return true
   }
@@ -282,13 +306,21 @@ export function openStoreBridge() {
   }
 
   async function deleteSession(id) {
+    /* 会话与消息软删必须同生共死：db_batch 单事务执行（与 node 版
+       BEGIN/COMMIT 同语义），两条独立 invoke 之间可被并发写插队 */
     const ts = now()
-    await exec("UPDATE chat_sessions SET deletedAt = ?, updatedAt = ?, syncState = 'pending' WHERE id = ?", [ts, ts, id])
-    await exec("UPDATE chat_messages SET deletedAt = ?, updatedAt = ?, syncState = 'pending' WHERE sessionId = ?", [
-      ts,
-      ts,
-      id,
-    ])
+    await invoke('db_batch', {
+      statements: [
+        {
+          sql: "UPDATE chat_sessions SET deletedAt = ?, updatedAt = ?, syncState = 'pending' WHERE id = ?",
+          params: [ts, ts, id],
+        },
+        {
+          sql: "UPDATE chat_messages SET deletedAt = ?, updatedAt = ?, syncState = 'pending' WHERE sessionId = ?",
+          params: [ts, ts, id],
+        },
+      ],
+    })
     return true
   }
 

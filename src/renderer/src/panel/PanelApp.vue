@@ -1,6 +1,7 @@
 <script setup>
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import { state, refresh, loadMeta, initBridge, win } from '../stores/app.js'
+import { surfaceText } from '@shared/disguise.js'
 import Sidebar from '../components/Sidebar.vue'
 import HomeView from '../views/HomeView.vue'
 import LabView from '../views/LabView.vue'
@@ -12,6 +13,10 @@ const route = ref('home')
 const collapsed = ref(false)
 let stopBridge = null
 let timer = null
+const onVisibilityChange = () => {
+  /* 隐藏期跳过了轮询，回到前台立刻补一次，别让用户看到最长 30s 的陈旧数据 */
+  if (!document.hidden) refresh()
+}
 
 const NAV = [
   { key: 'home', name: '主页', icon: '🏠' },
@@ -31,8 +36,9 @@ const VIEWS = {
 const currentView = computed(() => VIEWS[route.value] ?? HomeView)
 const currentTitle = computed(() => NAV.find((n) => n.key === route.value)?.name ?? '主页')
 
-const brand = computed(() => (state.settings.studyDisguise ? 'Study Desk' : '摸鱼桌宠'))
-const tagline = computed(() => (state.settings.studyDisguise ? '专注当下，持续精进' : '只要胆子大，一周七天假'))
+/* 品牌/标语走伪装词汇表（shared/disguise.js） */
+const brand = computed(() => surfaceText(Boolean(state.settings.studyDisguise)).brand)
+const tagline = computed(() => surfaceText(Boolean(state.settings.studyDisguise)).tagline)
 
 function toggleCollapse() {
   collapsed.value = !collapsed.value
@@ -62,12 +68,19 @@ onMounted(async () => {
   stopBridge = initBridge()
   await loadMeta()
   await refresh()
-  timer = window.setInterval(refresh, 30_000)
+  /* 隐藏期间跳过刷新：隐藏窗的轮询每次都是一趟总线往返 + 宿主全量
+     getState（DB 读 + 重算），隐藏时做全是无用功 */
+  timer = window.setInterval(() => {
+    if (document.hidden) return
+    refresh()
+  }, 30_000)
+  document.addEventListener('visibilitychange', onVisibilityChange)
 })
 
 onBeforeUnmount(() => {
   stopBridge?.()
   if (timer) window.clearInterval(timer)
+  document.removeEventListener('visibilitychange', onVisibilityChange)
 })
 </script>
 
@@ -87,7 +100,7 @@ onBeforeUnmount(() => {
       <header class="topbar">
         <div class="topbar-left">
           <h2>{{ currentTitle }}</h2>
-          <span class="crumb">{{ brand }} · {{ state.backend === 'electron' ? '桌面版' : '预览模式' }}</span>
+          <span class="crumb">{{ brand }} · {{ state.backend === 'native' ? '桌面版' : '预览模式' }}</span>
         </div>
         <div class="topbar-right">
           <span class="chip tabular">今日 {{ state.todayEarnedText }}</span>

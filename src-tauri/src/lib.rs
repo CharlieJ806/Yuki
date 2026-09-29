@@ -27,6 +27,36 @@ fn pet_quit(app: tauri::AppHandle) -> bool {
     true
 }
 
+/// 业务敏感命令的收权门：只允许 pet 窗调用。
+///
+/// Tauri 2 的 ACL（capabilities）**不覆盖 app 自定义命令**——
+/// generate_handler 注册的命令对全部 webview 无条件开放（capabilities 只管
+/// plugin 命令）。db/http/tray 快照若不设防，任一窗被注入即可任意读写
+/// 用户库、经代理出网。业务宿主（service-host）只跑在 pet 窗，其他窗的
+/// 业务调用本就经总线转发到 pet 窗，这里按调用窗 label 收权后语义不变。
+pub fn ensure_pet_window(window: &tauri::WebviewWindow) -> Result<(), String> {
+    if window.label() == windows::PET {
+        Ok(())
+    } else {
+        Err(format!("该命令仅限 pet 窗调用（当前窗口: {}）", window.label()))
+    }
+}
+
+/// `system:openDataDir` —— 打开数据目录（设置页「备份数据」；
+/// Electron 侧等价物是 shell.openPath(userData)）。
+#[tauri::command]
+fn system_open_data_dir() -> Result<(), String> {
+    let dir = db::default_db_path()
+        .parent()
+        .ok_or("数据目录不可得")?
+        .to_path_buf();
+    std::process::Command::new("explorer")
+        .arg(dir)
+        .spawn()
+        .map(|_| ())
+        .map_err(|e| format!("打开目录失败: {e}"))
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -35,7 +65,9 @@ pub fn run() {
         .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
             let app = app.clone();
             let _ = tauri::async_runtime::spawn(async move {
-                let _ = windows::create_panel(&app);
+                if let Err(e) = windows::create_panel(&app) {
+                    eprintln!("[desk-pet] 建面板窗失败: {e}");
+                }
             });
         }))
         .plugin(tauri_plugin_notification::init())
@@ -77,13 +109,16 @@ pub fn run() {
             windows::pet_menu_show,
             windows::pet_menu_hide,
             pet_quit,
-            /* rusqlite 桥（仅业务总线宿主使用） */
+            /* 数据目录入口（设置页「备份数据」） */
+            system_open_data_dir,
+            /* rusqlite 桥（仅业务总线宿主使用；收权到 pet 窗，见 ensure_pet_window） */
             db::db_exec,
             db::db_select,
+            db::db_batch,
             tray::tray_update_snapshot,
             /* 照片存在性全表（service 的 deps.photoExists 用） */
             photos::photo_list,
-            /* HTTP 流代理（webview fetch 的 CORS/UA 缺口） */
+            /* HTTP 流代理（webview fetch 的 CORS/UA 缺口；收权到 pet 窗） */
             http_proxy::http_fetch_stream,
             http_proxy::http_fetch_once,
             http_proxy::http_abort,

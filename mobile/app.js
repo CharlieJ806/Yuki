@@ -1025,7 +1025,9 @@ function nearHoliday(now) {
   /* 今天/明天就是节日 —— 无条件显示 */
   if (info?.isHoliday) return true
   const next = holidayCountdownText(now)
-  const m = /(\d+) 天\$/.exec(next)
+  /* 文案形如「离国庆节 7 天」；此前的 /\$ 写成匹配字面 $，永远失配，
+     导致 7 天门槛失效、临近节日常驻信息栏 */
+  const m = /(\d+) 天/.exec(next)
   return m ? Number(m[1]) <= HOLIDAY_SHOW_WITHIN_DAYS : true
 }
 

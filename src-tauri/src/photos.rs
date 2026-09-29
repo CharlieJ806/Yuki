@@ -11,8 +11,15 @@
 
 use tauri::AppHandle;
 
+/// `photo:list` —— 照片存在性全表（service 的 deps.photoExists 用）。
+/// 仅 pet 窗可调（业务宿主所在窗，与 db/http 命令同一收权口径）。
 #[tauri::command]
-pub fn photo_list(app: AppHandle) -> Vec<String> {
+pub fn photo_list(window: tauri::WebviewWindow, app: AppHandle) -> Result<Vec<String>, String> {
+    crate::ensure_pet_window(&window)?;
+    Ok(photo_list_impl(&app))
+}
+
+fn photo_list_impl(app: &AppHandle) -> Vec<String> {
     /* 正式包：dist 内嵌进二进制，资产解析器直接给全表 */
     let embedded: Vec<String> = app
         .asset_resolver()

@@ -17,7 +17,6 @@ import {
   sendChat,
   abortChat,
   win,
-  saveSettings,
   refreshGallery,
   refreshSessionAffinity,
   consumeUnlock,
@@ -25,19 +24,13 @@ import {
   refreshSessionSettings,
   markChatRead,
 } from '../stores/app.js'
-import {
-  affinityView,
-  outfitForTime,
-  outfitInfo,
-  OUTFITS,
-  OUTFIT_SLUGS,
-  DEFAULT_OUTFIT,
-} from '@shared/interactions.js'
+/* affinityView 是本地口径（比 affinityLevel 多一层 godMode 判定），保留 */
+import { affinityView } from '@shared/interactions.js'
 import { checkImagesForModel, livePreviewOf } from '@shared/content.js'
 import { photoPathsOf } from '@shared/photoMessage.js'
-import { PHOTO_SLUGS } from '@shared/photoStories.js'
 import { pickChatBackground } from '@shared/chatBackground.js'
 import { ChatBackgroundMode } from '@shared/moyu.js'
+import { useOutfitState } from '../lib/outfit-state.js'
 
 const input = ref('')
 /*
@@ -53,46 +46,37 @@ const unlock = computed(() => state.lastUnlock ?? null)
  * 解锁装扮时优先显示**自拍照片**（「她发来的照片」的观感），
  * 没生成过照片的 slug 退回立绘。
  *
- * 探测方式：预加载一次，成功才记进 availablePhotos。
- * 不写死清单是因为照片会分批补，清单要跟着改；而 404 会被浏览器
- * 缓存住，探测成本极低。
+ * 照片**按需探测**：解锁到来时只探该 slug 的候选路径（每套最多几张），
+ * 取最先加载成功的一张。此前是挂载时全量探测 24 套服饰候选 + 23 组
+ * 生活照（最多 ~142 个请求，多数 404），且要等全部探测结束弹窗才可用。
  */
-const availablePhotos = ref(new Set())
-function probePhotos() {
-  /*
-   * 探两类照片：服饰照片 + 生活照。
-   * 存路径而不是 slug —— 一套装扮可能有多张，生活照也是每组多张。
-   */
-  const paths = [
-    ...OUTFITS.flatMap((o) => photoPathsOf('outfit', o.slug)),
-    ...PHOTO_SLUGS.flatMap((g) => photoPathsOf('photo', g)),
-  ]
-  const found = new Set()
-  let pending = paths.length
-  if (!pending) return
-  for (const rel of paths) {
-    const img = new Image()
-    const done = () => {
-      if (--pending === 0) availablePhotos.value = found
-    }
-    img.onload = () => {
-      found.add(rel)
-      done()
-    }
-    img.onerror = done
-    img.src = rel
-  }
-}
-onMounted(probePhotos)
+const unlockImgSrc = ref('')
 
-/** 解锁弹窗该显示哪张图：有照片用第 1 张，没有退立绘 */
-const unlockImgSrc = computed(() => {
-  const u = unlock.value
-  if (!u) return ''
-  /* 按类目分派路径 —— 生活照没有立绘可退，取不到就留空 */
-  const first = photoPathsOf(u.kind, u.slug).find((rel) => availablePhotos.value.has(rel))
-  if (first) return first
-  return u.kind === 'photo' ? '' : `yuki-outfit-${u.slug}.png`
+function probeImage(rel) {
+  return new Promise((resolve) => {
+    const img = new Image()
+    img.onload = () => resolve(true)
+    img.onerror = () => resolve(false)
+    img.src = rel
+  })
+}
+
+/* 弹窗只有 outfit 分支显示 unlockImgSrc（photo/video 走各自的媒体分支），
+   非 outfit 解锁不做任何探测；seq 令牌防快速连续解锁时旧探测结果回写 */
+let probeSeq = 0
+watch(unlock, async (u) => {
+  const seq = ++probeSeq
+  unlockImgSrc.value = ''
+  if (!u || u.kind !== 'outfit') return
+  for (const rel of photoPathsOf(u.kind, u.slug)) {
+    const ok = await probeImage(rel)
+    if (seq !== probeSeq) return
+    if (ok) {
+      unlockImgSrc.value = rel
+      return
+    }
+  }
+  if (seq === probeSeq) unlockImgSrc.value = `yuki-outfit-${u.slug}.png`
 })
 function closeUnlock() {
   consumeUnlock()
@@ -319,31 +303,11 @@ function removeImage(i) {
  * 立绘已经移到独立的 `ChatPetApp` 窗口，这里只显示当前穿着名 +
  * 提供一个直达开关。这样做是因为对话框宽只有 420，
  * 立绘浮在消息流右侧会压到文字。
+ *
+ * 换装状态收敛在 useOutfitState（与桌宠/立绘窗/右键菜单同一套，
+ * 守卫规则单源）—— 此前这里复制的版本漏了「未解锁回落」守卫。
  */
-const clockTick = ref(Date.now())
-let clockTimer = null
-
-/** 已解锁的服饰集合（图鉴未就绪时保守为「只有初始那套」，宁可少显示也不放宽解锁） */
-const unlockedOutfits = computed(() => {
-  const list = state.gallery?.outfit?.unlocked
-  return new Set(Array.isArray(list) ? list : [DEFAULT_OUTFIT])
-})
-
-const currentOutfitSlug = computed(() => {
-  /* 必须传已解锁池：不传时 outfitForTime 直接回落默认那套（自动模式恒为 JK） */
-  if (state.settings.outfitMode !== 'fixed')
-    return outfitForTime(new Date(clockTick.value), [...unlockedOutfits.value])
-  const s = state.settings.outfitSlug
-  if (!OUTFIT_SLUGS.includes(s)) return DEFAULT_OUTFIT
-  /*
-   * 未解锁的一律回落 —— 与 PetApp / PetMenu / ChatPetApp 同一道守卫。
-   * settings 的写入口不止换装菜单（设置页、IPC、重置都会写），
-   * 守卫放在**展示求值点**才绕不过去。
-   */
-  if (!unlockedOutfits.value.has(s)) return DEFAULT_OUTFIT
-  return s
-})
-const currentOutfitLabel = computed(() => outfitInfo(currentOutfitSlug.value).label)
+const { currentOutfitLabel, outfits, chooseOutfit: pickOutfit } = useOutfitState()
 
 /*
  * 换装面板：和独立立绘窗里点立绘打开的是同一份设置，改哪边都同步。
@@ -354,24 +318,9 @@ const currentOutfitLabel = computed(() => outfitInfo(currentOutfitSlug.value).la
  */
 const outfitPickerOpen = ref(false)
 
-/** 可换的服饰清单（和设置页、右键菜单同一份数据） */
-/*
- * 换装清单**只列已解锁的**。
- *
- * 之前直接列 OUTFITS 全量 —— 和 PC 桌宠右键菜单同一个问题：
- * 等于绕过图鉴，随手就能穿上没解锁的衣服。
- */
-const outfits = computed(() => OUTFITS.filter((o) => unlockedOutfits.value.has(o.slug)))
-
 async function chooseOutfit(slug) {
   outfitPickerOpen.value = false
-  if (slug === null) {
-    await saveSettings({ outfitMode: 'auto' })
-    return
-  }
-  /* 再挡一道：菜单没列出来的也不能选（settings 的写入口不止这一处） */
-  if (!unlockedOutfits.value.has(slug)) return
-  await saveSettings({ outfitMode: 'fixed', outfitSlug: slug })
+  await pickOutfit(slug)
 }
 
 const outfitFlash = ref('')
@@ -430,11 +379,8 @@ async function onSend() {
   imageError.value = ''
   await scrollToBottom()
   const res = await sendChat(text, images)
-  await scrollToBottom()
-  if (res && res.ok === false && res.reason && !res.aborted) {
-    /* 错误已作为一条 assistant 消息落库，滚动到底即可 */
-    await scrollToBottom()
-  }
+  /* 落库消息（含作为 assistant 消息落库的错误）由 messages watch 滚到底 */
+  return res
 }
 
 function onKeydown(e) {
@@ -519,16 +465,12 @@ onMounted(async () => {
   await initSession()
   await scrollToBottom()
   textarea.value?.focus()
-  /*
-   * 每分钟对一次时间，让「自动换装」能跨过**时间片边界**。
-   * 一分钟一次足够：换装粒度是 30 分钟一个时间片，不需要秒级精度。
-   */
-  clockTimer = window.setInterval(() => (clockTick.value = Date.now()), 60_000)
+  /* 自动换装的时钟由 useOutfitState 自管（此处不再重复建定时器） */
 })
 
 onBeforeUnmount(() => {
   stopBridge?.()
-  if (clockTimer) window.clearInterval(clockTimer)
+  /* 自动换装的时钟由 useOutfitState 自管；这里只管背景轮换与未读监听 */
   if (bgTimer) window.clearInterval(bgTimer)
   document.removeEventListener('visibilitychange', onVisibilityChange)
   window.removeEventListener('focus', onWindowFocus)
@@ -591,9 +533,23 @@ window.addEventListener('focus', onWindowFocus)
  * 与手机端同一套逻辑（`shared/chatBackground.js`）——
  * 两端读同一份 settings，选图算法不一致的话同一时刻会显示不同的图。
  *
- * 「这张图还在不在」直接复用上面 `probePhotos()` 探好的 `availablePhotos`：
- * 那已经是一个覆盖全部照片路径的存在性集合，再算一份必然走偏。
+ * 「这张图还在不在」以**图鉴快照**为准：`gallery[kind].items[].photos` 是
+ * 业务层用 `existsFor()` 核过的实际存在路径（见 service 的 build()），
+ * 设置页的 `allPhotoPaths` 用的就是同一份口径。
+ *
+ * 合并前这里复用的是挂载时全量预探测得到的 `availablePhotos` —— 那张表
+ * 在朋友的重构里被换掉了（全量探测最多 ~142 个请求、多数 404，改成解锁时
+ * 按需探测）。改读图鉴既不用再扫一遍网络，也不会出现第二份「哪张图存在」
+ * 的答案与设置页打架。
  */
+const bgAvailable = computed(() => {
+  const g = state.gallery
+  const out = new Set()
+  for (const kind of ['outfit', 'photo']) {
+    for (const it of g?.[kind]?.items ?? []) for (const p of it.photos ?? []) out.add(p)
+  }
+  return out
+})
 
 /*
  * 轮换是「按时间片取模」算的，不是存「轮到第几张」——
@@ -607,7 +563,7 @@ const chatBg = computed(() =>
     mode: state.settings?.chatBgMode,
     fixed: state.settings?.chatBackground,
     pool: state.settings?.chatBgPool ?? [],
-    available: (p) => availablePhotos.value.has(p),
+    available: (p) => bgAvailable.value.has(p),
     rotateMin: state.settings?.chatBgRotateMin,
     now: bgClock.value,
   }),
@@ -666,7 +622,9 @@ watch(() => [state.settings?.chatBgMode, (state.settings?.chatBgPool ?? []).leng
 })
 
 watch(liveText, scrollToBottom)
-watch(messages, scrollToBottom, { deep: true })
+/* 深监听整条消息数组的代价随会话长度线性涨（含 base64 图块）；
+   流式文本已由 liveText watch 覆盖，这里只跟条数变化 */
+watch(() => messages.value.length, scrollToBottom)
 
 /*
  * 我正看着这个窗口时，她说的话**不该算未读**。

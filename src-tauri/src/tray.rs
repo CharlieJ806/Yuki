@@ -148,18 +148,22 @@ pub fn rebuild(app: &AppHandle) {
         Ok(menu) => {
             let _ = tray.set_menu(Some(menu));
         }
-        Err(e) => log::warn!("[tray] 菜单重建失败：{e}"),
+        /* 本壳无 logger 实现，log::warn 输出进黑洞（Cargo.toml 已移除 log 依赖） */
+        Err(e) => eprintln!("[tray] 菜单重建失败：{e}"),
     }
 }
 
 /// `tray:updateSnapshot` —— service 宿主在 state 广播后推入托盘文案并重建菜单。
+/// 仅 pet 窗可调：伪造托盘文案等于伪造系统通知（见 lib.rs ensure_pet_window）。
 #[tauri::command]
 pub async fn tray_update_snapshot(
+    window: tauri::WebviewWindow,
     app: AppHandle,
     earned_line: String,
     days_line: String,
     checked_in: bool,
 ) -> Result<(), String> {
+    crate::ensure_pet_window(&window)?;
     if let Some(s) = app.try_state::<std::sync::Mutex<TraySnapshot>>() {
         if let Ok(mut g) = s.lock() {
             *g = TraySnapshot { earned_line, days_line, checked_in };

@@ -22,7 +22,7 @@ import {
   AFFINITY_GAIN,
   OUTFIT_SLUGS,
   PET_EXPRESSIONS,
-  DEFAULT_OUTFIT,
+  /* affinityView 是本地口径（比 affinityLevel 多一层 godMode 判定），保留 */
   affinityView,
   contextualScene,
   hoverLinesFor,
@@ -30,7 +30,6 @@ import {
   isTiredHour,
   linesFor,
   outfitFile,
-  outfitForTime,
   pickLine,
   pickRotation,
   poseImageFile,
@@ -41,6 +40,8 @@ import {
   IDLE_JITTER_MAX,
   SEDENTARY_INTERVAL_MS,
 } from '@shared/interactions.js'
+import { surfaceText } from '@shared/disguise.js'
+import { useOutfitState } from '../lib/outfit-state.js'
 
 /*
  * 立绘映射统一收在 @shared/interactions.js 的 PET_EXPRESSIONS，
@@ -66,22 +67,24 @@ const dragging = ref(false)
 let timer = null
 let stopBridge = null
 let snackTimer = null
-let outfitClockTimer = null
 /** 拖拽结束也会触发 click，用它区分「拖」和「点」 */
 let movedByDrag = false
 
+/* 可见文案走伪装词汇表（shared/disguise.js），组件不再就地三元判断 */
+const txt = computed(() => surfaceText(Boolean(state.settings.studyDisguise)))
+
 const statusText = computed(() => {
-  const s = state.settings
-  if (!s.enabled) return '摸鱼进度未开启'
+  if (!state.settings.enabled) return txt.value.disabled
   switch (state.snapshot.statusKind) {
     case 'rest-day':
-      return '今日休息，安心躺平'
+      return txt.value.restDay
     case 'before-work':
-      return '尚未开工'
+      return txt.value.beforeWork
     case 'completed':
-      return '今日已赚满 💰'
+      return txt.value.done
     default:
-      return `摸鱼进行中 · 已赚 ${state.todayEarnedText}`
+      /* 纯状态：金额只在上方 bubble-amount 出现一次，不再复述「已赚 ¥」 */
+      return txt.value.working
   }
 })
 
@@ -123,42 +126,13 @@ const currentExpression = computed(() => emote.value || idlePose.value || mood.v
  * 之前只在对话窗侧边立绘生效，桌宠压根不看这个设置，
  * 于是「右键换装没反应」（用户实测反馈）。
  *
- * clockTick 每分钟推进一次：直接 new Date() 不会触发重渲染，
- * 跨过**时间片边界**（自动换装是 30 分钟一换的时间片哈希）就不会自动切换。
+ * 换装状态收敛在 useOutfitState：时钟、解锁集合、守卫规则四窗单源
+ * （clockTick 每分钟推进一次，跨过时段边界才会自动切换）。
+ *
+ * 注意 `unlockedOutfits` 必须一并取出 —— 立绘轮换池（resolveRotationPool）
+ * 要用它过滤未解锁服饰。
  */
-const clockTick = ref(Date.now())
-
-/** 已解锁的服饰集合（未拉到图鉴时保守处理为「只有初始那套」） */
-const unlockedOutfits = computed(() => {
-  const list = state.gallery?.outfit?.unlocked
-  /* 图鉴还没拉回来时不能当成「全解锁」—— 宁可少显示也不要漏 */
-  return new Set(Array.isArray(list) ? list : [DEFAULT_OUTFIT])
-})
-
-const currentOutfitSlug = computed(() => {
-  /*
-   * 自动模式必须把**已解锁池**传进去。
-   *
-   * `outfitForTime` 在 `unlocked` 为空/未传时直接返回 `DEFAULT_OUTFIT`
-   * （重构时把旧的「按类别回落」兜底删掉了，这里没跟着改）——
-   * 漏传的后果是自动模式**恒等于 JK**，用户永远看不到换装。
-   * 手机端传了、桌面端没传，正是典型的两端漂移。
-   */
-  if (state.settings.outfitMode !== 'fixed')
-    return outfitForTime(new Date(clockTick.value), [...unlockedOutfits.value])
-  const s = state.settings.outfitSlug
-  if (!OUTFIT_SLUGS.includes(s)) return DEFAULT_OUTFIT
-  /*
-   * 未解锁的一律回落到默认。
-   *
-   * 守卫放这里而不是只放在菜单窗的换装入口里：换装写的是 settings，
-   * 而 settings 的写入口不止一个（设置页、IPC、将来的重置）。
-   * 在**展示用的求值点**挡一道，才是真正绕不过去的。
-   * 实测过：只在换装入口挡时，直接调 updateSettings 就能穿上未解锁的。
-   */
-  if (!unlockedOutfits.value.has(s)) return DEFAULT_OUTFIT
-  return s
-})
+const { currentOutfitSlug, unlockedOutfits } = useOutfitState()
 
 /**
  * 立绘展示的是动作还是服饰？
@@ -731,8 +705,7 @@ onMounted(async () => {
     fitObserver.observe(stageEl.value)
     reportFit()
   }
-  /* 自动换装按 30 分钟一个时间片哈希，每分钟对一次时间才能跨片切换 */
-  outfitClockTimer = window.setInterval(() => (clockTick.value = Date.now()), 60_000)
+  /* 自动换装的时钟由 useOutfitState 自管（此处不再重复建定时器） */
   /* 消费跨窗口的表情指令（例如面板里点了补卡） */
   watch(() => state.emoteRequest?.seq, playRequestedEmote, { immediate: true })
   /* 消费菜单窗转来的桌宠本地行为指令（气泡开关/退出挥手） */
@@ -777,7 +750,8 @@ onBeforeUnmount(() => {
   if (longPressTimer) window.clearTimeout(longPressTimer)
   if (idlePoseTimer) window.clearTimeout(idlePoseTimer)
   if (snackTimer) window.clearTimeout(snackTimer)
-  if (outfitClockTimer) window.clearInterval(outfitClockTimer)
+  if (emoteTimer) window.clearTimeout(emoteTimer)
+  if (petStreakTimer) window.clearTimeout(petStreakTimer)
   fitObserver?.disconnect()
 })
 </script>
@@ -795,7 +769,7 @@ onBeforeUnmount(() => {
         <div v-if="bubbleOpen" class="bubble" :class="{ speaking: Boolean(speech) }" @dblclick="refresh">
           <div class="bubble-head">
             <span class="bubble-title">
-              {{ speech ? 'Yuki' : state.settings.studyDisguise ? '今日学习进度' : '今日摸鱼收入' }}
+              {{ speech ? 'Yuki' : txt.earnedTitle }}
             </span>
             <span class="bubble-dot" :class="state.snapshot.statusKind" />
           </div>

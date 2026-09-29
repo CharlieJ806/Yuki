@@ -119,11 +119,32 @@ impl Db {
         Ok(out)
     }
 
+    /// 多条写语句在单个事务里执行，任一失败整体回滚。
+    /// 供「两条 UPDATE 必须同生共死」的路径用（如 deleteSession 的
+    /// 会话+消息软删：桥上两条独立 invoke 之间可被并发写插队）。
+    pub fn batch_raw(&self, statements: &[(String, Vec<SqlValue>)]) -> Result<(), String> {
+        let mut st = self.0.lock().map_err(|_| "数据库连接锁中毒".to_string())?;
+        let tx = st.conn.transaction().map_err(|e| e.to_string())?;
+        for (sql, params) in statements {
+            let mut stmt = tx.prepare_cached(sql).map_err(|e| e.to_string())?;
+            stmt.execute(rusqlite::params_from_iter(params))
+                .map_err(|e| e.to_string())?;
+        }
+        tx.commit().map_err(|e| e.to_string())
+    }
 }
 
 /// `db:exec` —— 写语句（INSERT/UPDATE/DELETE/DDL/PRAGMA）。
+/// 仅 pet 窗可调（业务宿主所在窗）：Tauri 的 ACL 管不到 app 自定义命令，
+/// 不收权的话任意 webview 都能发任意 SQL（见 lib.rs ensure_pet_window）。
 #[tauri::command]
-pub async fn db_exec(db: tauri::State<'_, Db>, sql: String, params: Option<Vec<Json>>) -> Result<(), String> {
+pub async fn db_exec(
+    window: tauri::WebviewWindow,
+    db: tauri::State<'_, Db>,
+    sql: String,
+    params: Option<Vec<Json>>,
+) -> Result<(), String> {
+    crate::ensure_pet_window(&window)?;
     let db = db.inner().clone();
     let p = params_to_sql(params)?;
     tauri::async_runtime::spawn_blocking(move || db.exec_raw(&sql, p))
@@ -131,12 +152,43 @@ pub async fn db_exec(db: tauri::State<'_, Db>, sql: String, params: Option<Vec<J
         .map_err(|e| format!("执行任务失败: {e}"))?
 }
 
-/// `db:select` —— 查询，行以对象数组返回。
+/// `db:select` —— 查询，行以对象数组返回。仅 pet 窗可调（同 db_exec）。
 #[tauri::command]
-pub async fn db_select(db: tauri::State<'_, Db>, sql: String, params: Option<Vec<Json>>) -> Result<Vec<Json>, String> {
+pub async fn db_select(
+    window: tauri::WebviewWindow,
+    db: tauri::State<'_, Db>,
+    sql: String,
+    params: Option<Vec<Json>>,
+) -> Result<Vec<Json>, String> {
+    crate::ensure_pet_window(&window)?;
     let db = db.inner().clone();
     let p = params_to_sql(params)?;
     tauri::async_runtime::spawn_blocking(move || db.select_raw(&sql, p))
+        .await
+        .map_err(|e| format!("执行任务失败: {e}"))?
+}
+
+/// `db:batch` 的一条语句（SQL + 标量参数）。
+#[derive(serde::Deserialize)]
+pub struct Statement {
+    pub sql: String,
+    pub params: Option<Vec<Json>>,
+}
+
+/// `db:batch` —— 多条写语句单事务执行（任一失败整体回滚）。仅 pet 窗可调。
+#[tauri::command]
+pub async fn db_batch(
+    window: tauri::WebviewWindow,
+    db: tauri::State<'_, Db>,
+    statements: Vec<Statement>,
+) -> Result<(), String> {
+    crate::ensure_pet_window(&window)?;
+    let db = db.inner().clone();
+    let mut stmts = Vec::with_capacity(statements.len());
+    for s in statements {
+        stmts.push((s.sql, params_to_sql(s.params)?));
+    }
+    tauri::async_runtime::spawn_blocking(move || db.batch_raw(&stmts))
         .await
         .map_err(|e| format!("执行任务失败: {e}"))?
 }
@@ -228,5 +280,20 @@ mod tests {
         assert_eq!(meta_get(&db, "petPosition"), Some(json!({"x": 10.0, "y": -3})));
         meta_set(&db, "petPosition", &json!({"x": 99.0, "y": 1}));
         assert_eq!(meta_get(&db, "petPosition"), Some(json!({"x": 99.0, "y": 1})));
+    }
+
+    #[test]
+    fn batch_is_atomic_on_failure() {
+        let db = temp_db();
+        db.exec_raw("CREATE TABLE t (k TEXT PRIMARY KEY)", vec![]).unwrap();
+        let insert = |v: &str| ("INSERT INTO t (k) VALUES (?1)".to_string(), vec![json_to_sql(&json!(v)).unwrap()]);
+        /* 第二条主键冲突（'a' 已存在）→ 整体回滚，第一条不得落库 */
+        let stmts = vec![insert("a"), insert("a")];
+        assert!(db.batch_raw(&stmts).is_err());
+        let rows = db.select_raw("SELECT COUNT(*) AS n FROM t", vec![]).unwrap();
+        assert_eq!(rows[0]["n"], json!(0));
+        assert!(db.batch_raw(&[insert("a")]).is_ok());
+        let rows = db.select_raw("SELECT COUNT(*) AS n FROM t", vec![]).unwrap();
+        assert_eq!(rows[0]["n"], json!(1));
     }
 }

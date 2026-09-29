@@ -9,7 +9,7 @@
  * 归集 = 改名拷贝成英文规范名。重命名是必须的：Tauri 打包器产物名跟随
  * productName（中文「摸鱼桌宠」），分发层统一英文 desk-pet-*。
  */
-import { copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync } from 'node:fs'
+import { copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
@@ -31,6 +31,14 @@ mustExist(join(TAURI_TARGET, 'app.exe'), '先跑 npx tauri build')
 
 const DIST = join(RELEASE, 'tauri')
 mkdirSync(DIST, { recursive: true })
+/* 旧版本产物一并清掉：release.yml 按 release/tauri/* 全量上传，
+   混入旧版会照发（bundle/nsis 不清理，这里必须兜一道） */
+for (const f of readdirSync(DIST)) {
+  if (f.startsWith('desk-pet-') && !f.includes(`-${VERSION}-`) && !f.includes(`-${VERSION}.`)) {
+    rmSync(join(DIST, f), { force: true })
+    console.log(`✓ 清理旧版产物: ${f}`)
+  }
+}
 const portable = join(DIST, `desk-pet-tauri-${VERSION}-x64-portable.exe`)
 const setup = join(DIST, `desk-pet-tauri-setup-${VERSION}.exe`)
 
@@ -38,13 +46,14 @@ const setup = join(DIST, `desk-pet-tauri-setup-${VERSION}.exe`)
 copyFileSync(join(TAURI_TARGET, 'app.exe'), portable)
 console.log(`✓ ${portable}`)
 
-/* 安装包：打包器按 productName 产出中文名，归集成规范英文名 */
-const setupSource = readdirSync(NSIS_DIR)
-  .filter((f) => f.endsWith('-setup.exe'))
-  .map((f) => join(NSIS_DIR, f))
-  .sort((a, b) => a.localeCompare(b))
-  .pop()
-mustExist(setupSource, '先跑 npx tauri build（NSIS bundle）')
+/* 安装包：打包器按 productName 产出中文名，归集成规范英文名。
+   Tauri NSIS 实际命名是 {productName}_{version}_x64-setup.exe（下划线分隔、
+   架构段在 -setup.exe 之前），按 `_版本_` 精确挑选——此前按字典序取末位，
+   不识别数字（0.2.10 < 0.2.9）且旧版产物混在 bundle 里会被误挑。 */
+const wanted = `_${VERSION}_`
+const setupFile = readdirSync(NSIS_DIR).find((f) => f.endsWith('-setup.exe') && f.includes(wanted))
+const setupSource = setupFile ? join(NSIS_DIR, setupFile) : null
+mustExist(setupSource, `先跑 npx tauri build（NSIS bundle，需含 *${wanted}*-setup.exe，旧版产物请清理）`)
 copyFileSync(setupSource, setup)
 console.log(`✓ ${setup}（源：${setupSource}）`)
 

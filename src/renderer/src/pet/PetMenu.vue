@@ -9,16 +9,11 @@
  * 「打卡/换装/缩放」等业务走 store 总线，「气泡开关/退出挥手」是桌宠窗
  * 本地行为，两个宿主的收尾方式不同（Electron 关 v-if，Tauri 藏窗口）。
  */
-import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
+import { computed } from 'vue'
 import { state } from '../stores/app.js'
-import {
-  OUTFITS,
-  OUTFIT_SLUGS,
-  DEFAULT_OUTFIT,
-  affinityView,
-  outfitForTime,
-  outfitInfo,
-} from '@shared/interactions.js'
+/* affinityView 是本地口径（比 affinityLevel 多一层 godMode 判定），保留 */
+import { affinityView, outfitInfo } from '@shared/interactions.js'
+import { useOutfitState } from '../lib/outfit-state.js'
 
 const emit = defineEmits(['action', 'close'])
 
@@ -43,27 +38,12 @@ const affinity = computed(() => affinityView(state.affinity?.points ?? 0, state.
 /*
  * 清单**只列已解锁的**。之前直接列 OUTFITS 全量等于绕过图鉴：
  * 右键随手穿上还没解锁的衣服，图鉴的进度、条件、故事全失去意义。
- * 「自动穿」是自动模式，只从已解锁池里挑（见 currentOutfitSlug）。
+ * 「跟随时间」是自动模式，不受解锁限制（它自己会从已解锁池里挑）。
+ *
+ * 状态收敛在 useOutfitState（与桌宠/立绘窗/对话窗同一套，守卫规则单源）；
+ * 选择动作经 act 上报宿主执行，菜单只管展示。
  */
-const clockTick = ref(Date.now())
-let clockTimer = null
-onMounted(() => {
-  /* 自动换装按 30 分钟一个时间片哈希，每分钟对一次时间才能跨片切换 */
-  clockTimer = window.setInterval(() => (clockTick.value = Date.now()), 60_000)
-})
-onBeforeUnmount(() => window.clearInterval(clockTimer))
-
-const unlockedOutfits = computed(() => new Set(state.gallery?.outfit?.unlocked ?? []))
-const outfits = computed(() => OUTFITS.filter((o) => unlockedOutfits.value.has(o.slug)))
-const currentOutfitSlug = computed(() => {
-  /* 必须传已解锁池：不传时 outfitForTime 直接回落默认那套（自动模式恒为 JK） */
-  if (state.settings.outfitMode !== 'fixed')
-    return outfitForTime(new Date(clockTick.value), [...unlockedOutfits.value])
-  const s = state.settings.outfitSlug
-  if (!OUTFIT_SLUGS.includes(s)) return DEFAULT_OUTFIT
-  if (!unlockedOutfits.value.has(s)) return DEFAULT_OUTFIT
-  return s
-})
+const { currentOutfitSlug, outfits } = useOutfitState()
 const outfitLabel = computed(() => {
   if (state.settings.outfitMode !== 'fixed') return `${outfitInfo(currentOutfitSlug.value).label}·自动`
   return outfitInfo(currentOutfitSlug.value).label

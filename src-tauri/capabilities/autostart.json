@@ -1,0 +1,14 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "autostart",
+  "description": "开机自启开关：仅实际有开关入口的 pet（菜单）与 panel（设置页）",
+  "windows": [
+    "pet",
+    "panel"
+  ],
+  "permissions": [
+    "autostart:allow-enable",
+    "autostart:allow-disable",
+    "autostart:allow-is-enabled"
+  ]
+}

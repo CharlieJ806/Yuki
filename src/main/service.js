@@ -15,6 +15,7 @@ import { OUTFIT_STORIES } from '../shared/outfitStories.js'
 import { buildPhotoMessages, photoPathsOf } from '../shared/photoMessage.js'
 import { PHOTO_STORIES } from '../shared/photoStories.js'
 import { fetchHolidayYear, isCacheFresh, HOLIDAY_CACHE_TTL_MS } from './holiday.js'
+import { formatStudyProgress, STUDY_SALARY_MASK, STUDY_DAILY_TARGET } from '../shared/disguise.js'
 import {
   CHAT_PERSONAS,
   CHAT_PROVIDERS,
@@ -112,23 +113,27 @@ export function createService(store, deps = {}) {
   }
 
   async function refreshHolidays(year, { force = false } = {}) {
-    const cached = await store.getMeta(`holiday-${year}`, null)
+    /* year 可能来自渲染层（holiday:refresh），收敛成合法年份再进 meta 键与 URL，
+       防畸形值拼出意外的请求路径 */
+    const n = Number(year)
+    const y = Number.isInteger(n) && n >= 2000 && n <= 2100 ? n : new Date().getFullYear()
+    const cached = await store.getMeta(`holiday-${y}`, null)
     if (!force && isCacheFresh(cached)) {
-      holidayMemory.set(year, cached.table)
+      holidayMemory.set(y, cached.table)
       return { ok: true, cached: true, count: Object.keys(cached.table ?? {}).length }
     }
     try {
-      const table = await fetchHolidayYear(year)
-      await store.setMeta(`holiday-${year}`, { fetchedAt: Date.now(), table })
-      holidayMemory.set(year, table)
+      const table = await fetchHolidayYear(y)
+      await store.setMeta(`holiday-${y}`, { fetchedAt: Date.now(), table })
+      holidayMemory.set(y, table)
       return { ok: true, cached: false, count: Object.keys(table).length }
     } catch (err) {
       /* 有旧缓存就继续用，没有也不阻塞 */
       if (cached?.table) {
-        holidayMemory.set(year, cached.table)
+        holidayMemory.set(y, cached.table)
         return { ok: false, cached: true, stale: true, reason: err?.message ?? String(err) }
       }
-      holidayMemory.set(year, null)
+      holidayMemory.set(y, null)
       return { ok: false, cached: false, reason: err?.message ?? String(err) }
     }
   }
@@ -184,6 +189,10 @@ export function createService(store, deps = {}) {
    * 每个会话是**独立的她**：亲密度、图鉴解锁、人设选择、当前穿着都各存一份。
    * 键名形如 `affinity:<sessionId>`；老的全局键（`affinity`）在首次读取时
    * 迁移给最早的那个会话，之后的会话从零开始。
+   *
+   * **与手机端的命名空间差异**：手机端亲密度仍是全局键 `affinity`（无会话
+   * 概念），与这里的 `affinity:<sid>` 语义已分叉——两端备份互通时需要一层
+   * 映射；图鉴/解锁键则是两端真的一致，无需映射。
    *
    * 之所以不做成「一张表 + sessionId 列」：这些值都是小 JSON，
    * meta 表本来就是键值对，加前缀比新建一张表省事，也不会和同步字段打架。
@@ -795,6 +804,18 @@ export function createService(store, deps = {}) {
    * 表现成「对话窗换装点了，立绘窗没反应」。
    * 这是那个 bug 的最后一环。
    */
+  /**
+   * 广播/下发用设置快照：剥掉 API Key 原文。
+   *
+   * state 快照会广播到全部窗口（含渲染模型返回内容的对话窗），带原文等于
+   * 每个窗的内存里常驻一份 Key —— 与 chatStatus「不下发 apiKey 原文」的
+   * 脱敏口径一致。设置页经 settings:getFull 按需拉全量。
+   */
+  function publicSettings(settings) {
+    const { chatApiKey, ...rest } = settings ?? {}
+    return rest
+  }
+
   async function getState(now = new Date(), sessionId) {
     const sid = sessionId === undefined ? await currentSessionId() : sessionId
     const settings = await settingsForSession(sid)
@@ -812,7 +833,7 @@ export function createService(store, deps = {}) {
      */
     for (let y = 1; y <= 10; y++) await holidayTableFor(now.getFullYear() - y)
     return {
-      settings,
+      settings: publicSettings(settings),
       snapshot,
       days,
       /*
@@ -828,10 +849,18 @@ export function createService(store, deps = {}) {
       checkedInToday: Boolean(checkin),
       checkin,
       workDaysThisMonth: workDaysInMonth(settings, now.getFullYear(), now.getMonth() + 1, table),
-      todayEarnedText: formatMoney(snapshot.todayEarned, settings.salaryCurrency),
-      dailySalaryText: formatMoney(snapshot.dailySalary, settings.salaryCurrency),
-      salaryText: formatMoney(settings.salary, settings.salaryCurrency),
-      pendingSync: await store.pendingChanges(),
+      /*
+       * 伪装（studyDisguise）在数据出口统一转换：所有窗口、托盘（两壳）
+       * 都消费这三个字段，一处转换全表面生效，组件不再各自三元判断。
+       * 见 shared/disguise.js 的模块注释。
+       */
+      todayEarnedText: settings.studyDisguise
+        ? formatStudyProgress(snapshot.todayEarned, snapshot.dailySalary)
+        : formatMoney(snapshot.todayEarned, settings.salaryCurrency),
+      dailySalaryText: settings.studyDisguise
+        ? STUDY_DAILY_TARGET
+        : formatMoney(snapshot.dailySalary, settings.salaryCurrency),
+      salaryText: settings.studyDisguise ? STUDY_SALARY_MASK : formatMoney(settings.salary, settings.salaryCurrency),
       loggedMinutesToday: await store.worklogTotal(snapshot.dateKey),
       /* 节假日状态：界面用来显示「春节」「补班」标签 */
       holiday: {
@@ -1158,7 +1187,7 @@ export function createService(store, deps = {}) {
       if (!check.ok) return { ok: false, steps }
 
       const key = String(settings.chatApiKey || '').trim()
-      push('API Key', key.length > 0 || !check.cfg.apiKey, key ? `已填，长度 ${key.length}，前缀 ${key.slice(0, 5)}…` : '为空（本地地址可接受）')
+      push('API Key', key.length > 0 || !check.cfg.apiKey, key ? `已填，长度 ${key.length}` : '为空（本地地址可接受）')
 
       /* 1) 非流式：等价于「测试连接」 */
       const ping = await pingChat({ settings, customPersonas: await customPersonas() })

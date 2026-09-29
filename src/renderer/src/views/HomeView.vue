@@ -1,26 +1,21 @@
 <script setup>
-/** 主页 —— 今日概览 + 实时摸鱼收入 + 摸鱼语录 */
+/** 主页 —— 今日概览 + 实时进账/学习进度 + 语录 */
 import { computed, onMounted, onUnmounted, ref } from 'vue'
 import { state, doCheckIn } from '../stores/app.js'
 import { formatDuration, formatMoney } from '@shared/moyu.js'
+import { surfaceText, formatStudyProgress, studyLevelName } from '@shared/disguise.js'
 
 const emit = defineEmits(['navigate'])
 const clock = ref(new Date())
 let timer = null
 
-const QUOTES = [
-  '为工资摸鱼，为自由争命。',
-  '人在职场，摸鱼第一。老板是虚无的，工作是浮云，只有摸鱼才是实实在在的快乐。',
-  '偷闲，是对生活的润滑剂。',
-  '今天的努力，是为了明天更好地摸鱼。',
-  '摸鱼不是偷懒，是在给生产力做保养。',
-  '上班是为了活着，摸鱼是为了像个人。',
-  '工资照发，鱼照摸，这是成年人的体面。',
-]
+/* 可见文案走伪装词汇表（shared/disguise.js），组件不再就地三元判断 */
+const txt = computed(() => surfaceText(Boolean(state.settings.studyDisguise)))
 
 const quote = computed(() => {
-  const idx = (clock.value.getDate() + clock.value.getMonth()) % QUOTES.length
-  return QUOTES[idx]
+  const quotes = txt.value.heroQuotes
+  const idx = (clock.value.getDate() + clock.value.getMonth()) % quotes.length
+  return quotes[idx]
 })
 
 const weekday = computed(() => '日一二三四五六'[clock.value.getDay()])
@@ -29,36 +24,42 @@ const dateText = computed(
 )
 
 const stats = computed(() => [
-  { label: '今日摸鱼收入', value: state.todayEarnedText, accent: true },
-  { label: '日薪', value: state.dailySalaryText },
-  { label: '已摸鱼时长', value: formatDuration(state.snapshot.workedPaidMinutes) },
+  { label: txt.value.earnedLabel, value: state.todayEarnedText, accent: true },
+  { label: txt.value.dailySalaryLabel, value: state.dailySalaryText },
+  { label: txt.value.workedLabel, value: formatDuration(state.snapshot.workedPaidMinutes) },
   /* 统一墙上时钟口径：这里回答的是「还有多久下班」 */
   { label: '剩余工时', value: formatDuration(state.snapshot.remainingWorkMinutes) },
-  { label: '累计摸鱼', value: `${state.days} 天` },
+  { label: txt.value.totalLabel, value: `${state.days} 天` },
   { label: '连续打卡', value: `${state.streak} 天` },
   { label: '本月工作日', value: `${state.workDaysThisMonth} 天` },
-  { label: '当前等级', value: state.level.level.name },
+  /* 等级名含「摸鱼」字样，伪装下按词汇表学习化 */
+  { label: '当前等级', value: state.settings.studyDisguise ? studyLevelName(state.level.level.name) : state.level.level.name },
 ])
 
-/** 实时逐秒计息：按秒把当前进度折算成钱，视觉上更有"进账感" */
+/** 实时逐秒计息：按秒把当前进度折算成钱（伪装下为学习词数），视觉上更有"进账感" */
 const flowing = ref(0)
 function tickFlow() {
   const s = state.snapshot
   const perMinute = s.paidSpanMinutes > 0 ? s.dailySalary / s.paidSpanMinutes : 0
   flowing.value = s.todayEarned + (perMinute * (Date.now() % 60000)) / 60000
 }
-const flowingText = computed(() => formatMoney(state.snapshot.isWorkingNow ? flowing.value : state.snapshot.todayEarned, state.settings.salaryCurrency))
+const flowingText = computed(() => {
+  const v = state.snapshot.isWorkingNow ? flowing.value : state.snapshot.todayEarned
+  return state.settings.studyDisguise
+    ? formatStudyProgress(v, state.snapshot.dailySalary)
+    : formatMoney(v, state.settings.salaryCurrency)
+})
 
 const statusLabel = computed(() => {
   switch (state.snapshot.statusKind) {
     case 'rest-day':
-      return '今日休息，安心躺平'
+      return txt.value.restDay
     case 'before-work':
-      return '尚未开工'
+      return txt.value.beforeWork
     case 'completed':
-      return '今日已赚满'
+      return txt.value.doneShort
     default:
-      return '摸鱼进行中'
+      return txt.value.working
   }
 })
 
@@ -79,8 +80,8 @@ onUnmounted(() => timer && window.clearInterval(timer))
         <p class="hero-date">{{ dateText }}</p>
         <h1 class="hero-amount tabular">{{ flowingText }}</h1>
         <p class="hero-sub">
-          {{ state.settings.studyDisguise ? '今日学习进度' : '今日摸鱼收入' }} ·
-          <span :class="{ hl: state.snapshot.isWorkingNow }">{{ state.snapshot.isWorkingNow ? '实时进账中' : statusLabel }}</span>
+          {{ txt.earnedTitle }} ·
+          <span :class="{ hl: state.snapshot.isWorkingNow }">{{ state.snapshot.isWorkingNow ? (state.settings.studyDisguise ? '学习中' : '实时进账中') : statusLabel }}</span>
         </p>
         <div class="hero-bar">
           <div class="hero-fill" :style="{ width: (state.snapshot.progressPercent ?? 0) + '%' }" />
