@@ -37,7 +37,7 @@ import { OUTFIT_LOOKS, ORIENTATIONS, PER_SHEET, PHOTO_SHOTS, buildSheetBody, sho
 import { normalizeForRequest, textOfContent, splitReplySegments, livePreviewOf, MSG_SPLIT_TOKEN } from '../src/shared/content.js'
 import { SCHEMA, WIPE_TABLES } from '../src/shared/db-schema.js'
 import { resolveChatConfig } from '../src/main/chat.js'
-import { CHAT_PERSONAS, DEFAULT_SETTINGS } from '../src/shared/moyu.js'
+import { CHAT_PERSONAS, DEFAULT_SETTINGS, affinityContextFor } from '../src/shared/moyu.js'
 import {
   LINES,
   pickLine,
@@ -70,6 +70,7 @@ import {
   rotationCandidatesFor,
   outfitUnlockTierName,
   affinityView,
+  GOD_MODE_LEVEL,
   rotateDelayMs,
   clampRotateMin,
   ROTATE_MIN_MIN,
@@ -2986,7 +2987,14 @@ try {
       const iPersona = cfgOrder.systemPrompt.indexOf('你叫 Yuki')
       const iClock = cfgOrder.systemPrompt.indexOf('当前时间')
       check('人设在时间块之前（缓存友好）', iPersona >= 0 && iPersona < iClock, true)
-      check('时间块在末尾附近', iClock > cfgOrder.systemPrompt.length * 0.5, true)
+      /*
+       * 早先这条写的是「时间块落在 system 后半段」（iClock > 全长 * 0.5）。
+       * 加了**关系块**之后它不再成立：关系块排在时间块后面，
+       * 时间块被挤到中点之前 —— 但顺序本身仍然是「人设（稳定）在前、
+       * 易变块（时间块 → 关系块）在后」，前缀缓存没被破坏。
+       * 所以改成按**块的位置关系**断言，而不是按字符比例猜。
+       */
+      check('时间块排在关系块之前', iClock < cfgOrder.systemPrompt.indexOf('【此刻的关系'), true)
     }
 
     /* 12 小时制歧义：23:40 不能说成「11:40」而不带深夜语境 */
@@ -3053,14 +3061,18 @@ try {
     check('9 点的 system 禁午饭', cfg.systemPrompt.includes('不要提吃午饭'), true)
 
     /* withClock:false 用于自检等场景，必须能关掉 */
-    const noClock = resolveChatConfig(chatSettings, [], { withClock: false })
+    const noClock = resolveChatConfig(chatSettings, [], { withClock: false, withAffinity: false })
     /*
      * 注意不能断言「不含『当前时间』」：人设正文里就写着
      * 「系统会在对话开头给你『当前时间』」这句说明，会误命中。
      * 用严格相等比对才是准确的口径。
+     *
+     * 两个开关都要关：现在易变块是**时间块 + 关系块**两块，
+     * 只关时间块的话末尾还会留着「【此刻的关系】」。
      */
     check('可关闭时间块', noClock.systemPrompt, CHAT_PERSONAS[0].prompt)
     check('关掉后不带时间块标题', noClock.systemPrompt.startsWith('【当前时间'), false)
+    check('关掉后不带关系块', noClock.systemPrompt.includes('【此刻的关系'), false)
 
     /* 自定义人设也要带时间上下文（chatPersona 必须指向它才会被选中） */
     const custom = resolveChatConfig({ ...chatSettings, chatPersona: 'c1' }, [{ id: 'c1', prompt: '我是自定义人设' }], {
@@ -3071,6 +3083,170 @@ try {
     check('自定义人设也带时间', custom.systemPrompt.includes('当前时间'), true)
     check('自定义人设保留', custom.systemPrompt.includes('我是自定义人设'), true)
   }
+  /*
+   * ---------- 19b. 段位真的注入了（人设里的档位表不能是死的） ----------
+   *
+   * 这一节守的是一个**很容易再次发生**的设计事故：
+   * 人设正文里写着「第 X 档你会怎样怎样」，但模型根本不知道自己在第几档 ——
+   * 静态档位表 = 没有档位表，它会按最高档（或随机一档）演。
+   * 所以档位必须由运行时注入（易变块），这里从两个方向锁住：
+   *   ① 生成层：`affinityContextFor` 在每档边界都报出**正确**的档位名；
+   *   ② 接线层：`resolveChatConfig` 真的把它拼进 system 末尾
+   *      （只测 ① 不够 —— 上一版就是「函数写好了但没人调用」）。
+   */
+  {
+    const p0 = 0
+    const pFriend = AFFINITY_LEVELS[2].min + 5 // 45 → 「好朋友」
+
+    /* ① 生成层：档位名必须来自 AFFINITY_LEVELS，不能另起一套 */
+    const rel = affinityContextFor(pFriend, {
+      name: AFFINITY_LEVELS[2].name,
+      next: AFFINITY_LEVELS[3],
+      isMax: false,
+    })
+    check('关系块报出当前档位名', rel.includes(`你们现在是「${AFFINITY_LEVELS[2].name}」`), true)
+    check('关系块带亲密度数字', rel.includes(`亲密度 ${pFriend}`), true)
+    check('关系块提示还差多少到下一档', rel.includes(`${AFFINITY_LEVELS[3].min - pFriend} 点`), true)
+    check('关系块自带标题', rel.includes('【此刻的关系'), true)
+    check('关系块要求只按当前档演', rel.includes('只按你当前这一档演'), true)
+    /* 没有档位名就不该生成（宁可什么都不注入，也不要注入半截文本） */
+    check('缺档位名时不生成关系块', affinityContextFor(pFriend, {}), '')
+
+    /* 上帝模式：档位按最高档报，且要说清「别演成陌生人」 */
+    const relGod = affinityContextFor(pFriend, { name: GOD_MODE_LEVEL.name, godMode: true })
+    check('上帝模式报上帝模式档', relGod.includes(GOD_MODE_LEVEL.name), true)
+    check('上帝模式仍按最高档说话', relGod.includes('别演成陌生人'), true)
+
+    /* ② 接线层：resolveChatConfig 必须真的把它拼进去 */
+    const cfgP0 = resolveChatConfig({ ...DEFAULT_SETTINGS, chatPersona: 'yuki' }, [], {
+      now: new Date(2026, 8, 21, 9, 10),
+      affinityPoints: p0,
+    })
+    check('system 带关系块', cfgP0.systemPrompt.includes('【此刻的关系'), true)
+    check('system 带最低档名字', cfgP0.systemPrompt.includes(AFFINITY_LEVELS[0].name), true)
+    check(
+      '关系块排在末尾（人设之后）',
+      cfgP0.systemPrompt.lastIndexOf('【此刻的关系') > cfgP0.systemPrompt.indexOf('你叫 Yuki'),
+      true,
+    )
+    /* 人设正文必须逐字不变 —— 档位进了人设就会击穿前缀缓存 */
+    check('关系块没写进人设正文', CHAT_PERSONAS[0].prompt.includes('【此刻的关系'), false)
+    check('人设正文不含运行时档位数字', CHAT_PERSONAS[0].prompt.includes('亲密度 45'), false)
+
+    /*
+     * 五档行为表要跟 AFFINITY_LEVELS 对齐。
+     *
+     * 报错信息里列出差异，是为了让人一眼看出「是哪一档漂了」——
+     * 这条最常见的坏法是档位表被静默改名/改阈值，两端各说一套。
+     */
+    const personaText = CHAT_PERSONAS[0].prompt
+    const missingTier = AFFINITY_LEVELS.filter((l) => !personaText.includes(l.name))
+    check('人设五档名与 AFFINITY_LEVELS 一致', missingTier.map((l) => l.name), [])
+    /* 阈值也照抄一遍：档位名对但数字漂了同样会让行为错位 */
+    for (const l of AFFINITY_LEVELS) {
+      check(`人设档位表带阈值 ${l.min}`, personaText.includes(`${l.name}（亲密度 ${l.min}）`), true)
+    }
+    /* 出现顺序也要跟 AFFINITY_LEVELS 一致，否则表是乱的 */
+    const tierPos = AFFINITY_LEVELS.map((l) => personaText.indexOf(l.name))
+    check('人设档位表按亲密度递进', tierPos.every((v, i) => v >= 0 && (i === 0 || v > tierPos[i - 1])), true)
+
+    /*
+     * 每一档都要覆盖四个维度（主动 / 分享 / 语气 / 会不会主动找他）。
+     * 少一个维度，那一档就会退回成形容词堆砌 —— 模型读不出行为差异。
+     */
+    for (const l of AFFINITY_LEVELS) {
+      const start = personaText.indexOf(l.name)
+      const seg = personaText.slice(start, start + 400)
+      check(`第「${l.name}」档写了主动程度`, seg.includes('主动程度'), true)
+      check(`第「${l.name}」档写了分享程度`, seg.includes('分享程度'), true)
+      check(`第「${l.name}」档写了语气亲疏`, seg.includes('语气亲疏'), true)
+      check(`第「${l.name}」档写了会不会主动找他`, seg.includes('会不会主动找他'), true)
+    }
+
+    /*
+     * 手机端那条链也要真的接上。
+     *
+     * mobile/ 不在 node 里跑（IndexedDB），所以这里读源码做静态检查：
+     * 手机端有自己的 resolveConfig / 调用链，最容易的坏法就是
+     * 「桌面改了、手机漏了」—— 表现为同一份人设两端两个性格，
+     * 而手机上看起来一切正常（她只是永远演最低档）。
+     */
+    const mobileChat = readFileSync(join(ROOT, 'mobile', 'chat.js'), 'utf8')
+    check('手机端 import 了 affinityContextFor', mobileChat.includes('affinityContextFor'), true)
+    check('手机端真的调用了它', /affinityContextFor\(/.test(mobileChat), true)
+    check('手机端读了亲密度', /await db\.getAffinity\(\)/.test(mobileChat), true)
+    check('手机端用 affinityView 取档位', /affinityView\(/.test(mobileChat), true)
+    check('手机端也把关系块拼在末尾', /\[clock, relation\]/.test(mobileChat), true)
+  }
+
+  /*
+   * ---------- 19c. 档位按**会话**取，不许串 ----------
+   *
+   * 亲密度是按会话隔离的（每个会话是独立的她），但 `chatRuntime` 的
+   * 缺省口径是「最近更新的会话」。这条钉住的是：**发出去的那条 system
+   * 里写的档位，必须属于正在聊的那个会话**。
+   *
+   * 写这条的直接原因：我写验证脚本时把 A 会话的亲密度记到了全局键上，
+   * 结果 A 的档位一直是「有点眼熟」——错的记账被这条口径当场照出来了。
+   * 同类错法还有「只读全局 affinity」「读到别的会话」等等，症状都一样：
+   * 她在一段刚起步的关系里开口就是老夫老妻，而且下次发言就自愈，
+   * 用户根本复现不出来。
+   *
+   * 注意这条**不能**证明 `chatRuntime` 的显式 sessionId 参数是必需的：
+   * 单线程下 `sendChat` 总是先落库用户消息再取档位，回落口径恰好指对。
+   * 显式传 sid 是给「两个会话的 sendChat 并发交错」兜底的（B 的落库
+   * 可能插在 A 取档位之前），那种交错在 smoke 里没法稳定构造 ——
+   * 所以这里只锁可观察的结果，不假装锁住了并发。
+   *
+   * 用 `setHttpTransport` 注入假 transport 而不是起本地 HTTP 服务器：
+   *   - smoke 不该依赖网络端口（CI/受限环境可能起不来）；
+   *   - 起真服务器会留下 keep-alive socket，和 smoke 末尾的 process.exit()
+   *     撞出 libuv 断言（`!(handle->flags & UV_HANDLE_CLOSING)`），
+   *     表现为「全绿但退出码非 0」—— 实测踩过。
+   */
+  {
+    const { setHttpTransport } = await import('../src/shared/bridge/transport.js')
+    const abSystems = []
+    const sseBody = (text) =>
+      new ReadableStream({
+        start(c) {
+          c.enqueue(new TextEncoder().encode(`data: ${JSON.stringify({ choices: [{ delta: { content: text } }] })}\n\n`))
+          c.enqueue(new TextEncoder().encode('data: [DONE]\n\n'))
+          c.close()
+        },
+      })
+    setHttpTransport(async (_url, init) => {
+      abSystems.push(JSON.parse(init.body).messages[0].content)
+      return { ok: true, status: 200, body: sseBody('嗯'), json: async () => ({}), text: async () => '' }
+    })
+
+    const abSvc = createService(openStore(join(mkdtempSync(join(tmpdir(), 'desk-aff-sess-')), 'a.db')))
+    await abSvc.updateSettings({ chatBaseUrl: 'http://127.0.0.1:9/v1', chatApiKey: 'sk-x', chatModel: 'deepseek-chat' })
+
+    const tierOf = (sys) => /你们现在是「([^」]+)」/.exec(sys)?.[1] ?? ''
+    const sA = await abSvc.createChatSession('A')
+    const sB = await abSvc.createChatSession('B')
+    /* A 刷到「好朋友」档（跨天加，绕开每日额度） */
+    for (let d = 0; d < 3; d++) await abSvc.addAffinity(30, {}, sA.id, new Date(2026, 8, 21 + d, 10, 0))
+    check('A 会话亲密度已到好朋友档', (await abSvc.sessionAffinity(sA.id)).points >= 40, true)
+    check('B 会话仍是全新', (await abSvc.sessionAffinity(sB.id)).points, 0)
+
+    /* 先把 B 变成「最近更新的会话」，再聊 A —— 回落口径会在这里指错人 */
+    await abSvc.addChatMessage(sB.id, 'user', '占位')
+    abSystems.length = 0
+    await abSvc.sendChat({ sessionId: sA.id, text: '在吗' })
+    check('聊 A 注入的是 A 的档位', tierOf(abSystems.at(-1)), AFFINITY_LEVELS[2].name)
+
+    await abSvc.addChatMessage(sA.id, 'user', '占位')
+    abSystems.length = 0
+    await abSvc.sendChat({ sessionId: sB.id, text: '在吗' })
+    check('聊 B 注入的是 B 的档位', tierOf(abSystems.at(-1)), AFFINITY_LEVELS[0].name)
+
+    await abSvc.close()
+    /* 还原默认 transport，别污染后面的用例 */
+    setHttpTransport(null)
+  }
+
   /* ---------- 20. 解锁条件不能被随口一句触发 ---------- */
   {
     /*

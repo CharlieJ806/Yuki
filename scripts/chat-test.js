@@ -223,6 +223,10 @@ await withServer(
  * 单测里 resolveChatConfig 生成了时间块不算数，必须验证它真的上了网络，
  * 因为中间还夹着 trimByChars（按字符预算裁剪历史），
  * 万一预算算错把时间块挤掉，模型照样收不到。
+ *
+ * 同一趟里顺带验证**关系块**（亲密度档位）也真的上了网络 ——
+ * 人设里写着五档各自的行为，但「现在在哪一档」是运行时才知道的：
+ * 这条断了，人设里那张档位表就永远是死的（见 moyu.js 的 affinityContextFor）。
  */
 await withServer(
   (req, res, body) => {
@@ -241,11 +245,19 @@ await withServer(
           sysLen: sys.length,
           /*
            * 时间块**自身**的长度。
-           * 时间块在末尾，所以从标记处截到结尾就是它。
-           * 单独量它才有意义：「system 别太长」真正要防的是
-           * 时间块膨胀（它每轮都变、挤掉历史），而不是人设本身。
+           *
+           * 时间块在末尾，从它的标记截到**关系块**开头就是它。
+           * 早先这里截到字符串结尾 —— 关系块接到时间块后面之后，
+           * 那样量出来的是「时间块 + 关系块」，阈值就不再是
+           * 「时间块别膨胀」的意思了。所以上界要显式减掉关系块的位置。
            */
-          clockLen: sys.includes('【当前时间') ? sys.length - sys.indexOf('【当前时间') : 0,
+          clockLen: sys.includes('【当前时间')
+            ? (sys.includes('【此刻的关系') ? sys.indexOf('【此刻的关系') : sys.length) - sys.indexOf('【当前时间')
+            : 0,
+          /* 关系块：必须在，且排在时间块之后（都在人设之后） */
+          hasRelation: sys.includes('【此刻的关系'),
+          relationAtEnd: sys.includes('【此刻的关系') && sys.lastIndexOf('【此刻的关系') > sys.indexOf('【当前时间'),
+          relationTier: /你们现在是「([^」]+)」，亲密度 (\d+)/.exec(sys)?.[1] ?? '',
         }),
       ),
     )
@@ -255,8 +267,14 @@ await withServer(
   async (baseUrl) => {
     const r = await streamChat({
       settings: { ...settings, chatBaseUrl: baseUrl },
-      /* 固定成 9:10，正是用户报问题的时间点 */
-      runtime: { now: new Date(2026, 8, 21, 9, 10), workStart: '09:00', workEnd: '18:00', isRestDay: false },
+      /* 固定成 9:10，正是用户报问题的时间点；亲密度固定 45 → 落在「好朋友」档 */
+      runtime: {
+        now: new Date(2026, 8, 21, 9, 10),
+        workStart: '09:00',
+        workEnd: '18:00',
+        isRestDay: false,
+        affinityPoints: 45,
+      },
       messages: [
         { role: 'user', content: '在干嘛' },
         { role: 'assistant', content: '在改作业' },
@@ -273,12 +291,18 @@ await withServer(
      */
     check('时间块长度可控', got.clockLen > 0 && got.clockLen < 1200, true)
     /*
-     * 人设 + 时间块的总量也要有个上限，防止人设被无限追加。
-     * 阈值随功能增长上调过：多段回复指令 + 时间感的详细清单都是
-     * 有意加进去的（用户明确要求），不是意外膨胀。
-     * 真超了应该回头审「这条指令值不值这个 token」，而不是默默放宽。
+     * 人设 + 易变块的总量也要有上限，防止人设被无限追加。
+     * 阈值随功能增长上调过两次：一次是多段回复指令 + 时间感的详细清单，
+     * 一次是**三部分人设 + 五档行为表**（用户明确要求「每档她会做什么」写细）。
+     * 都是有意的，不是意外膨胀；真超了应该回头审「这条指令值不值这个 token」，
+     * 而不是默默放宽。
      */
-    check('system 总长可控', got.sysLen < 3200, true)
+    check('system 总长可控', got.sysLen < 5200, true)
+
+    /* 关系块：必须在末尾、必须带上当前档位 */
+    check('发出去的 system 带关系块', got.hasRelation, true)
+    check('关系块在时间块之后（都在人设后）', got.relationAtEnd, true)
+    check('关系块档位取自亲密度 45', got.relationTier, '好朋友')
   },
 )
 
@@ -450,7 +474,7 @@ console.log('\n--- 认识自己 ---')
 
 /* 人设里必须有外貌描述，否则她没有「自己长什么样」的概念 */
 const yukiPrompt = resolveChatConfig({ ...settings, chatPersona: 'yuki' }, [], { withClock: false }).systemPrompt
-check('人设含外貌段落', yukiPrompt.includes('【你的样子】'), true)
+check('人设含外貌段落', yukiPrompt.includes('你的样子'), true)
 checkIncludes('含发色描述', yukiPrompt, '棕色长卷发')
 checkIncludes('含瞳色描述', yukiPrompt, '红棕色')
 checkIncludes('要求认出自己', yukiPrompt, '要能认出来那是你自己')
@@ -682,7 +706,7 @@ check('reserveChars 默认 0（兼容旧调用）', trimByChars([{ role: 'user',
 
 /* 端到端：预算要覆盖「人设 + 历史」的总量 */
 {
-  const cfg = resolveChatConfig({ ...settings, chatPersona: 'yuki', chatMaxChars: 3000 })
+  const cfg = resolveChatConfig({ ...settings, chatPersona: 'yuki', chatMaxChars: 12000 })
   const history = Array.from({ length: 200 }, (_, i) => ({
     role: i % 2 ? 'assistant' : 'user',
     content: '这是一条比较长的历史消息'.repeat(3),
@@ -690,7 +714,23 @@ check('reserveChars 默认 0（兼容旧调用）', trimByChars([{ role: 'user',
   const trimmed = trimByChars(history, cfg.maxChars, cfg.systemPrompt.length)
   const total = trimmed.reduce((n, m) => n + m.content.length, 0) + cfg.systemPrompt.length
   check('人设+历史总量不超预算', total <= cfg.maxChars, true)
-  check('长历史被显著裁剪', trimmed.length < history.length, true)
+  /*
+   * 只断言「确实裁掉了一些」而不写死条数：这条测的是**预算算法**，
+   * 不该随 system 长度变化而翻红（system 短了自然会多留几条历史）。
+   */
+  check('长历史被裁剪', trimmed.length < history.length, true)
+
+  /*
+   * 边界：预算**小到装不下 system 本身**时，`trimByChars` 的契约是
+   * 「至少留最后一条」，所以总量会超预算 —— 这是设计好的取舍
+   * （宁可超预算也不能给她一个空输入），但值得钉住，
+   * 因为人设从 2305 字扩到 4000+ 之后，「system 比预算还大」变成了
+   * 更常见的状态：用户把字符预算调小就会走到这一支。
+   */
+  const tight = resolveChatConfig({ ...settings, chatPersona: 'yuki', chatMaxChars: 2000 })
+  const tightKept = trimByChars(history, tight.maxChars, tight.systemPrompt.length)
+  check('system 超预算时仍留最后一条', tightKept.length, 1)
+  check('system 确实超过最小预算（说明这条断言有意义）', tight.systemPrompt.length > tight.maxChars, true)
 }
 
 console.log('\n--- 角色设定 ---')

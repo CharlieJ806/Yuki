@@ -949,7 +949,9 @@ export async function updatePersona(id, patch) {
 export async function deletePersona(id) {
   await call('删除人设失败', () => backend.personaDelete?.(id), null)
   await refreshMeta()
-  return true
+  /* 与 saveSettings/wipeAllData 同一口径：调用方要能知道这一步成没成，
+     否则「删除失败」在界面上和「删除成功」长得一模一样 */
+  return !store.lastError
 }
 
 /** meta 里含人设列表，刷新后下拉框才会更新 */

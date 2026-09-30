@@ -13,6 +13,7 @@ import {
   CHAT_PERSONAS,
   DEFAULT_SETTINGS,
   timeContextFor,
+  affinityContextFor,
   toDateKey,
   isRestDay,
 } from '../src/shared/moyu.js'
@@ -28,7 +29,7 @@ import {
   splitReplySegments,
 } from '../src/shared/content.js'
 import { createGalleryRunner } from '../src/shared/gallery.js'
-import { AFFINITY_GAIN, affinityLevel, settleAffinity, isUpsetting, outfitForTime } from '../src/shared/interactions.js'
+import { AFFINITY_GAIN, affinityLevel, affinityView, settleAffinity, isUpsetting, outfitForTime } from '../src/shared/interactions.js'
 import * as db from './storage.js'
 
 /* ---------- 配置 ---------- */
@@ -89,11 +90,32 @@ export async function resolveConfig(settings, now = new Date()) {
   })
 
   /*
-   * 顺序：人设在前、时间块在后 —— 为了命中前缀缓存（见桌面端 composeSystemPrompt）。
+   * 关系块 —— 与桌面端**同一份实现**（`affinityContextFor` + `affinityView`）。
+   *
+   * 手机端的亲密度是全局键 `affinity`（没有会话概念，见 desktop 端
+   * service.js 的命名空间注释），所以直接读库里的 points 就行。
+   *
+   * 这里必须真的读一遍库、不能省：漏了的话手机上的她会永远演最低档，
+   * 而桌面上已经是「默契搭档」—— 同一份人设、两端两个性格，最难查的那种不一致。
+   */
+  const affinity = await db.getAffinity()
+  const points = Math.max(0, Number(affinity?.points) || 0)
+  const view = affinityView(points, settings.godMode === true)
+  const relation = affinityContextFor(points, {
+    name: view.level?.name,
+    next: view.next,
+    isMax: view.isMax,
+    godMode: view.godMode === true,
+  })
+
+  /*
+   * 顺序：人设在前、易变块在后 —— 为了命中前缀缓存（见桌面端 composeSystemPrompt）。
    * 时间块每分钟变，放在末尾才不会把前面 1500+ 字的人设缓存击穿。
+   * 关系块同理，且必须跟在人设之后（写进人设正文里会每轮击穿缓存）。
    */
   const baseUrl = String(settings.chatBaseUrl || '').trim().replace(/\/+$/, '')
   const apiKey = String(settings.chatApiKey || '').trim()
+  const volatile = [clock, relation].filter(Boolean).join('\n\n')
 
   return {
     baseUrl,
@@ -104,7 +126,7 @@ export async function resolveConfig(settings, now = new Date()) {
     temperature: Number(settings.chatTemperature) || 1,
     maxHistory: Number(settings.chatMaxHistory) || 100,
     maxChars: Number(settings.chatMaxChars) || 48000,
-    systemPrompt: clock ? `${persona.prompt}\n\n${clock}` : persona.prompt,
+    systemPrompt: volatile ? `${persona.prompt}\n\n${volatile}` : persona.prompt,
     personaId: persona.id,
     needsApiKey: !/^https?:\/\/(127\.0\.0\.1|localhost|\[::1\])/i.test(baseUrl),
   }

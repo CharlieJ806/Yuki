@@ -4,8 +4,9 @@
  * 用 Node 内置 fetch，不引第三方 SDK；AbortController 支持中途停止。
  * 不依赖 electron，可被脚本直接调用做测试。
  */
-import { CHAT_PERSONAS, timeContextFor } from '../shared/moyu.js'
+import { CHAT_PERSONAS, timeContextFor, affinityContextFor } from '../shared/moyu.js'
 import { normalizeForRequest, contentCost, modelSupportsImages, withSelfPortrait, buildRouteOptions } from '../shared/content.js'
+import { affinityView } from '../shared/interactions.js'
 import { httpTransport } from '../shared/bridge/transport.js'
 
 /**
@@ -15,14 +16,19 @@ import { httpTransport } from '../shared/bridge/transport.js'
  * 前缀缓存是「从头逐字匹配」的 —— 开头一变，后面全部重算。
  *
  * 所以顺序必须是：
- *   [人设 / 固定提示词][时间块]
- *                     ↑ 这里每分钟变，但它在最后，不影响前面命中缓存
+ *   [人设 / 固定提示词][易变块：时间块 + 关系块]
+ *                     ↑ 时间块每分钟变、关系块每轮可能变，
+ *                       但它们都在最后，不影响前面命中缓存
  *
  * 之前是反过来（时间块在最前），后果是 1560 字的人设**每轮都按未命中价重算**，
  * 实测这部分的费用是命中价的 50 倍。
  *
+ * 易变块之间**顺序无所谓**（都在人设之后，前缀命中只看到人设结束为止），
+ * 这里固定成「时间块 → 关系块」：时间块是每轮都变的，关系块只在档位
+ * 变化时才变，把变得最勤的放最后，命中区间能多覆盖一点。
+ *
  * @param {string} stable   稳定部分（人设 / 专用提示词）
- * @param {string} volatile 易变部分（时间块）；为空时只返回 stable
+ * @param {string} volatile 易变部分（时间块、关系块）；为空时只返回 stable
  */
 export function composeSystemPrompt(stable, volatile = '') {
   const a = String(stable ?? '')
@@ -30,6 +36,58 @@ export function composeSystemPrompt(stable, volatile = '') {
   if (!b) return a
   if (!a) return b
   return `${a}\n\n${b}`
+}
+
+/**
+ * 拼出本次请求的**易变块**（人设之后那一段）。
+ *
+ * 时间块 + 关系块都在这里，两端（桌面 / 手机）共用同一个函数，
+ * 免得「两端各写一遍、改一处漏一处」——手机端 mobile/chat.js 直接调它。
+ *
+ * @param {object} runtime  运行时上下文
+ * @param {number} [runtime.affinityPoints] 当前会话的亲密度点数
+ * @param {boolean}[runtime.godMode]        上帝模式（读时覆盖成最高档）
+ * @param {Date}   [runtime.now]
+ * @param {boolean}[runtime.isRestDay]
+ * @param {boolean}[runtime.withClock]       false = 不注入时间块（自检/测试用）
+ * @param {boolean}[runtime.withAffinity]    false = 不注入关系块（自检/测试用）
+ */
+export function volatileContextFor(settings, runtime = {}) {
+  const blocks = []
+
+  const clock =
+    runtime.withClock === false
+      ? ''
+      : timeContextFor(runtime.now ?? new Date(), {
+          workStart: settings.workStart,
+          workEnd: settings.workEnd,
+          isRestDay: runtime.isRestDay,
+        })
+  if (clock) blocks.push(clock)
+
+  /*
+   * 关系块：把「她现在处在哪一档」告诉模型。
+   *
+   * 人设里那张档位表是**静态**的 —— 不注入当前档位，模型不知道自己在哪一格，
+   * 只会按最高档（或随机一档）演。所以这一行是档位表生效的前提。
+   *
+   * `runtime.affinityPoints` 未传时按 0 算（等价于最低档）。
+   * 不这么做的话，「忘了传 points」会静默变成「没有任何档位提示」，
+   * 人设里的档位表又变成摆设 —— 宁可默认成最低档这种可观察的错。
+   */
+  if (runtime.withAffinity !== false) {
+    const points = Math.max(0, Number(runtime.affinityPoints) || 0)
+    const view = affinityView(points, runtime.godMode === true)
+    const affinity = affinityContextFor(points, {
+      name: view.level?.name,
+      next: view.next,
+      isMax: view.isMax,
+      godMode: view.godMode === true,
+    })
+    if (affinity) blocks.push(affinity)
+  }
+
+  return blocks.join('\n\n')
 }
 
 /** 把设置解析成一次请求所需的参数。
@@ -40,6 +98,9 @@ export function composeSystemPrompt(stable, volatile = '') {
  * @param {Date}   [runtime.now]        用于生成「当前时间」块；测试可注入固定时间
  * @param {boolean}[runtime.isRestDay]  今天是否休息日
  * @param {boolean}[runtime.withClock]  是否注入时间块（自检/测试可关掉）
+ * @param {number} [runtime.affinityPoints] 当前亲密度点数（决定注入哪一档）
+ * @param {boolean}[runtime.godMode]     上帝模式：档位读时覆盖成最高档
+ * @param {boolean}[runtime.withAffinity] 是否注入关系块（自检/测试可关掉）
  */
 export function resolveChatConfig(settings, customPersonas = [], runtime = {}) {
   const baseUrl = String(settings.chatBaseUrl || '').trim().replace(/\/+$/, '')
@@ -52,19 +113,16 @@ export function resolveChatConfig(settings, customPersonas = [], runtime = {}) {
     CHAT_PERSONAS[0]
 
   /*
-   * 顺序：人设在前、时间块在后 —— 为了前缀缓存（见 composeSystemPrompt）。
+   * 顺序：人设在前、易变块在后 —— 为了前缀缓存（见 composeSystemPrompt）。
    *
    * 代价与补偿：时间块不再占据开头，注意力相对弱一些。
    * 补偿办法是在时间块自己内部重申「这是真实的此刻」，
    * 且明确要求「被问到就照上面直接回答」——实测这样仍然准确。
+   *
+   * 关系块同理：它和人设里的档位表是一对，必须**在人设之后**注入
+   * （每轮都可能变，混进人设会击穿缓存）。
    */
-  const clock = runtime.withClock === false
-    ? ''
-    : timeContextFor(runtime.now ?? new Date(), {
-        workStart: settings.workStart,
-        workEnd: settings.workEnd,
-        isRestDay: runtime.isRestDay,
-      })
+  const volatile = volatileContextFor(settings, runtime)
 
   return {
     baseUrl,
@@ -78,7 +136,7 @@ export function resolveChatConfig(settings, customPersonas = [], runtime = {}) {
     temperature: clampNumber(settings.chatTemperature, 0, 2, 1.3),
     maxHistory: clampNumber(settings.chatMaxHistory, 2, 400, 100),
     maxChars: clampNumber(settings.chatMaxChars, 2000, 400000, 48000),
-    systemPrompt: composeSystemPrompt(persona.prompt, clock),
+    systemPrompt: composeSystemPrompt(persona.prompt, volatile),
     personaId: persona.id,
   }
 }
@@ -250,6 +308,8 @@ export async function streamChat({
  * @param {Array}  opts.messages 对话上下文
  * @param {number} [opts.maxTokens]
  * @param {AbortSignal} [opts.signal]
+ * @param {object} [opts.runtime] 运行时上下文（now / isRestDay / withClock /
+ *                                affinityPoints / godMode / withAffinity）
  * @returns {Promise<string>} 生成的文本（已 trim）
  */
 export async function completeOnce({ settings, system, messages, maxTokens = 64, signal, runtime = {} }) {
@@ -264,17 +324,15 @@ export async function completeOnce({ settings, system, messages, maxTokens = 64,
    * 挂机台词同样要带当前时间，否则她会在清晨冒一句「吃午饭了吗」。
    * 这里 system 是调用方给的专用提示词（CHATTER_SYSTEM_PROMPT）。
    *
-   * 顺序同样是「固定提示词在前、时间块在后」，理由见 composeSystemPrompt ——
+   * 顺序同样是「固定提示词在前、易变块在后」，理由见 composeSystemPrompt ——
    * 挂机台词每次都是新的短请求，命中前缀缓存对它同样有效。
+   *
+   * 关系块也一起注入：挂机台词是她**主动开口**，而「主动程度」正是
+   * 档位差异最明显的地方（最低档几乎不主动找他）。不给她档位，
+   * 一个刚认识的人也会冒出「今天也想和你多待一会儿」。
+   * 走的是同一个 volatileContextFor，不是另写一份。
    */
-  const clock = runtime.withClock === false
-    ? ''
-    : timeContextFor(runtime.now ?? new Date(), {
-        workStart: settings.workStart,
-        workEnd: settings.workEnd,
-        isRestDay: runtime.isRestDay,
-      })
-  const systemPrompt = composeSystemPrompt(system, clock)
+  const systemPrompt = composeSystemPrompt(system, volatileContextFor(settings, runtime))
 
   const payload = [{ role: 'system', content: systemPrompt }, ...trimByChars(messages, cfg.maxChars, systemPrompt.length)]
 

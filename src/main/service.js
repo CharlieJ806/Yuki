@@ -146,15 +146,31 @@ export function createService(store, deps = {}) {
    *
    * 把「现在几点、今天休不休息、他的作息」一起交给对话层，
    * 让它拼进 system 提示词 —— 不喂这些，模型就会在早上九点说去吃午饭。
+   *
+   * `affinityPoints` / `godMode` 也在这里带上：人设里写着五档各自的行为，
+   * 但**模型不知道自己在哪一档**，得由这一层把当前档位喂进去
+   * （见 moyu.js 的 affinityContextFor）。缺了它，人设里的档位表就是死的。
+   *
+   * 取的是**当前会话**的亲密度：每个会话是独立的她，喂错会话的档位
+   * 会让新会话里的她开口就是老夫老妻。
+   *
+   * `sessionId` 要**显式传**：不传就回落到「最近更新的会话」
+   * （`currentSessionId()`）。多窗口同时开着时那就是别人的会话 ——
+   * 表现为「B 会话里她按 A 的亲密度说话」，而且要等到下次有人发言
+   * 才自愈，极难复现。sendChat 这条路径手上就有 sessionId，必须传。
+   * 其余调用点（挂机台词、图鉴判定）本来就没有会话语境，回落是对的。
    */
-  async function chatRuntime(now = new Date()) {
+  async function chatRuntime(now = new Date(), sessionId) {
     const settings = await store.getSettings()
     const table = await holidayTableFor(now.getFullYear())
+    const affinity = await readAffinity(sessionId)
     return {
       now,
       workStart: settings.workStart,
       workEnd: settings.workEnd,
       isRestDay: isRestDay(settings, now, table),
+      affinityPoints: affinity.points,
+      godMode: settings.godMode === true,
     }
   }
 
@@ -1145,9 +1161,20 @@ export function createService(store, deps = {}) {
 
     deletePersona: async (id) => {
       await store.deletePersona(id)
-      /* 删掉的正好是当前使用的人设时，回落到默认 */
+      /*
+       * 删掉的正好是当前使用的人设时，回落到默认。
+       *
+       * chatPersona 是**逐会话**的（见 PER_SESSION_SETTINGS）：只重置全局
+       * 那份会漏掉用过它的会话 —— 那些会话的逐会话设置里还留着这个已软删
+       * 的 id，设置页下拉框因此变空白，点「复制」也因为查不到源人设而静默
+       * 失灵。所以全局与逐会话两份都要清。
+       */
       const settings = await store.getSettings()
       if (settings.chatPersona === id) await store.saveSettings({ chatPersona: CHAT_PERSONAS[0].id })
+      for (const s of await store.listSessions()) {
+        const key = scopedKey('set:chatPersona', s.id)
+        if ((await store.getMeta(key, null)) === id) await store.setMeta(key, CHAT_PERSONAS[0].id)
+      }
       emit('personas', { type: 'changed' })
       return { ok: true, personas: await store.listPersonas() }
     },
@@ -1461,7 +1488,7 @@ export function createService(store, deps = {}) {
       )
       emit('affinity', affinityAfterMessage)
 
-      const cfg = await validateConfig(settings, await customPersonas(), await chatRuntime())
+      const cfg = await validateConfig(settings, await customPersonas(), await chatRuntime(new Date(), sid))
       if (!cfg.ok) {
         const errMsg = await store.addMessage(sid, 'assistant', cfg.reason, { error: true })
         emit('chat', { type: 'message', sessionId: sid, message: errMsg })
@@ -1480,7 +1507,8 @@ export function createService(store, deps = {}) {
         const result = await streamChat({
           settings,
           customPersonas: await customPersonas(),
-          runtime: await chatRuntime(),
+          /* 带上 sid：档位必须取**这个会话**的亲密度，别拿最近那个会话的 */
+          runtime: await chatRuntime(new Date(), sid),
           selfPortrait: selfPortrait(),
           messages: history,
           signal: controller.signal,

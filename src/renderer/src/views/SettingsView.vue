@@ -6,6 +6,10 @@ import {
   saveSettings,
   resetSettings,
   getFullSettings,
+  /* 删人设后要重拉一次全局状态：删除会顺手把「正在用这份人设」的会话
+     回落成默认人设，不刷新的话设置页还拿着那个已删的 id —— 下拉框空白、
+     复制按钮提示「找不到源人设」（见 removePersona） */
+  refresh,
   logMoyu,
   win,
   openChatWindow,
@@ -287,33 +291,91 @@ const personaList = ref([])
 const personaBusy = ref(false)
 const editingPersona = ref(null) // { id, label, prompt, custom }
 const personaMsg = ref('')
+const personaErr = ref(false)
 
 async function loadPersonas() {
   personaList.value = await listPersonas()
+  await ensurePersonaSelection()
   return personaList.value
+}
+
+/**
+ * 把 form.chatPersona 修回一个**列表里真实存在**的 id。
+ *
+ * 为什么非修不可：复制是拿「当前选中的人设」当源的
+ * （`duplicatePersonaAction(form.chatPersona)`），选中值一旦指向一条已删的
+ * 记录，服务层 `all.find(...)` 找不到源就返回 null，按钮表现成「点了没反应」。
+ * 删掉自己正在用的那份人设之后，界面正是这个状态（下拉框还会显示空白）。
+ */
+async function ensurePersonaSelection() {
+  const list = personaList.value
+  if (!list.length) return
+  if (list.some((p) => p.id === form.chatPersona)) return
+  /* 全量设置还没取回来时 form.chatPersona 只是占位值，别急着反写库 */
+  if (!keyLoaded.value) return
+  form.chatPersona = list[0].id
+  await saveSettings({ chatPersona: list[0].id })
 }
 
 function currentPersona() {
   return personaList.value.find((p) => p.id === form.chatPersona) ?? null
 }
 
+/**
+ * 人设操作失败时的**可见**反馈。
+ *
+ * 以前这些分支要么没有 else（`if (created)` 不成立就静默什么都不做），
+ * 要么异常直接冒出去 —— 用户看到的只有「点了没反应」，这正是这个 bug
+ * 最难查的地方。失败一律落一句人话到 personaMsg，并渲染在按钮旁边。
+ *
+ * 优先用 state.lastError（IPC 真报错时它最准确），没有才用 hint 兜底 ——
+ * 「服务层返回 null」这类静默失败不会写 lastError。
+ */
+function personaFail(action, hint) {
+  personaErr.value = true
+  personaMsg.value = `${action}失败：${state.lastError ?? hint ?? '未知原因'}`
+}
+
 function startEditPersona(p) {
   editingPersona.value = { id: p.id, label: p.label, prompt: p.prompt, custom: Boolean(p.custom) }
   personaMsg.value = ''
+  personaErr.value = false
+}
+
+/** 成功提示闪现一下就走；失败提示走 personaFail，不自动清除 */
+function flashPersonaMsg(msg) {
+  personaErr.value = false
+  personaMsg.value = msg
+  /* 只在文案没被下一条消息替换掉时才清 —— 否则失败提示会被定时器误清 */
+  window.setTimeout(() => {
+    if (personaMsg.value === msg) personaMsg.value = ''
+  }, 2200)
 }
 
 async function duplicatePersona(srcId) {
   personaBusy.value = true
+  personaErr.value = false
   try {
-    const created = await duplicatePersonaAction(srcId)
-    if (created) {
+    /* 选中的可能是已删的人设：先校正，再退回列表首项兜底 */
+    await ensurePersonaSelection()
+    const source = personaList.value.some((p) => p.id === form.chatPersona)
+      ? form.chatPersona
+      : (personaList.value[0]?.id ?? srcId)
+    const created = await duplicatePersonaAction(source)
+    if (!created) {
+      /* 服务层查不到源人设（多半是刚在别处被删掉）：重拉列表把选中项修回来，
+         再明确告诉用户发生了什么 */
       await loadPersonas()
-      /* 复制完直接切到副本并打开编辑器，否则用户还得手动在下拉里找 */
-      form.chatPersona = created.id
-      await saveSettings({ chatPersona: created.id })
-      startEditPersona({ ...created, custom: true })
-      personaMsg.value = '已复制一份，可自由修改'
+      return personaFail('复制', '选中的那份人设已不存在，已切回列表第一份，请再点一次')
     }
+    await loadPersonas()
+    /* 复制完直接切到副本并打开编辑器，否则用户还得手动在下拉里找 */
+    form.chatPersona = created.id
+    await saveSettings({ chatPersona: created.id })
+    startEditPersona({ ...created, custom: true })
+    personaMsg.value = '已复制一份，可自由修改'
+  } catch (err) {
+    personaFail('复制', err?.message ?? err)
   } finally {
     personaBusy.value = false
   }
@@ -321,15 +383,17 @@ async function duplicatePersona(srcId) {
 
 async function newPersona() {
   personaBusy.value = true
+  personaErr.value = false
   try {
     const created = await createPersona({ label: '新人设', prompt: '' })
-    if (created) {
-      await loadPersonas()
-      form.chatPersona = created.id
-      await saveSettings({ chatPersona: created.id })
-      startEditPersona({ ...created, custom: true })
-      personaMsg.value = '已新建，改完记得点保存'
-    }
+    if (!created) return personaFail('新建', '没能创建新人设，请重试')
+    await loadPersonas()
+    form.chatPersona = created.id
+    await saveSettings({ chatPersona: created.id })
+    startEditPersona({ ...created, custom: true })
+    personaMsg.value = '已新建，改完记得点保存'
+  } catch (err) {
+    personaFail('新建', err?.message ?? err)
   } finally {
     personaBusy.value = false
   }
@@ -339,11 +403,14 @@ async function savePersona() {
   const p = editingPersona.value
   if (!p) return
   personaBusy.value = true
+  personaErr.value = false
   try {
-    await updatePersona(p.id, { label: p.label, prompt: p.prompt })
+    const updated = await updatePersona(p.id, { label: p.label, prompt: p.prompt })
+    if (!updated) return personaFail('保存', '人设没能存进库，请重试')
     await loadPersonas()
-    personaMsg.value = '已保存'
-    window.setTimeout(() => (personaMsg.value = ''), 2000)
+    flashPersonaMsg('已保存')
+  } catch (err) {
+    personaFail('保存', err?.message ?? err)
   } finally {
     personaBusy.value = false
   }
@@ -352,11 +419,16 @@ async function savePersona() {
 async function removePersona(p) {
   if (!confirm(`删除人设「${p.label}」？`)) return
   personaBusy.value = true
+  personaErr.value = false
   try {
-    await deletePersona(p.id)
+    const ok = await deletePersona(p.id)
+    if (!ok) return personaFail('删除', '没能删掉这份人设，请重试')
     if (editingPersona.value?.id === p.id) editingPersona.value = null
     await loadPersonas()
     await refresh()
+    flashPersonaMsg('已删除')
+  } catch (err) {
+    personaFail('删除', err?.message ?? err)
   } finally {
     personaBusy.value = false
   }
@@ -926,6 +998,11 @@ const syncStatus = computed(() => ({
           </div>
           <span class="hint">
             内置人设不可改；点「复制」会另存一份可编辑的副本，随便改里面的提示词
+            <!-- 编辑器关着的时候（复制/新建/删除 失败就是这种情形），提示必须
+                 落在按钮旁边 —— 只在编辑器里显示的话，失败就是「点了没反应」 -->
+            <b v-if="personaMsg && !editingPersona" class="persona-msg" :class="{ err: personaErr }">
+              · {{ personaMsg }}
+            </b>
           </span>
         </div>
 
@@ -1569,6 +1646,9 @@ html.dark .tab.active {
 .persona-row select {
   flex: 1;
   min-width: 150px;
+}
+.persona-msg {
+  font-weight: 600;
 }
 .btn.small {
   height: 30px;
