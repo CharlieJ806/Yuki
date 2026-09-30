@@ -1033,10 +1033,97 @@ try {
       check('全是标记则返回空', splitReplySegments(`${MSG_SPLIT_TOKEN}${MSG_SPLIT_TOKEN}`), [])
       /* 每段 trim —— 模型常在标记两侧留换行 */
       check('分段后 trim', splitReplySegments(`甲  \n${MSG_SPLIT_TOKEN}\n  乙`), ['甲', '乙'])
-      /* 上限：超过 4 段只取前 4，防止刷屏 */
+      /* 上限：气泡数最多 4（防止刷屏），超出的内容并进最后一条而不是丢 */
       const many = ['1', '2', '3', '4', '5', '6'].join(MSG_SPLIT_TOKEN)
-      check('超过上限只取前 4 段', splitReplySegments(many).length, 4)
+      check('超过上限气泡数仍为 4', splitReplySegments(many).length, 4)
       check('上限可覆盖', splitReplySegments(many, 2).length, 2)
+
+      /*
+       * ---------- 无标记时退而用**空行**分段（隐式分段） ----------
+       *
+       * `<<<MSG>>>` 是自造 token，实测模型更爱用空行分段 —— 抓到过的原文是
+       * `就坐着刷手机啊，课本摊在桌上装样子\n\n刚顺手看了个猫`，
+       * 旧实现只认标记 → 一个气泡里塞两句，用户抱怨「不会分段回复了」。
+       * 于是没有标记时退而按空行切。
+       *
+       * 但空行在正常文本里常见得多，所以这里每一条断言都对应一个**收紧**条件：
+       * 任一不满足就整条不切（宁可少切一个气泡，不可切错）。
+       */
+      const stripWs = (s) => String(s).replace(/\s+/g, '')
+      const REAL_SAMPLE = '就坐着刷手机啊，课本摊在桌上装样子\n\n刚顺手看了个猫'
+      check('实测原文：无标记 + 空行 → 切成两条', splitReplySegments(REAL_SAMPLE), [
+        '就坐着刷手机啊，课本摊在桌上装样子',
+        '刚顺手看了个猫',
+      ])
+      /* 单换行 **不算**分段：模型常在句内换行，切了会把一句话劈开 */
+      check(
+        '单换行不分段',
+        splitReplySegments('第一句话在这里\n第二句话也在这里'),
+        ['第一句话在这里\n第二句话也在这里'],
+      )
+      /* 段太短 → 整条不切（否则 `嗯 / 啊这` 会变成两个碎片气泡） */
+      check('空行两侧太短则不切', splitReplySegments('嗯\n\n啊这'), ['嗯\n\n啊这'])
+      /* 一段够长、一段太短：也整条不切（切了会把短的那段切碎或丢掉） */
+      check('有一段太短则整条不切', splitReplySegments('第一段文案内容\n\n嗯'), ['第一段文案内容\n\n嗯'])
+      /* 代码围栏里空行是常态 → 保守整条不切 */
+      const fenced = '先看这段文字\n\n```\nconst a = 1\n\nconst b = 2\n```\n\n后面这段文字'
+      check('含代码围栏不切', splitReplySegments(fenced), [fenced])
+      /* 空行可以夹空白（半角/全角/CRLF），仍算空行 */
+      check('空行夹空格仍分段', splitReplySegments('第一段文案内容\n \n第二段文案内容'), [
+        '第一段文案内容',
+        '第二段文案内容',
+      ])
+      check('CRLF 空行仍分段', splitReplySegments('第一段文案内容\r\n\r\n第二段文案内容'), [
+        '第一段文案内容',
+        '第二段文案内容',
+      ])
+      check('全角空格空行仍分段', splitReplySegments('第一段文案内容\n\u3000\n第二段文案内容'), [
+        '第一段文案内容',
+        '第二段文案内容',
+      ])
+      /* 只切出 1 段 → 原样返回整条（等于没切就别多一次 trim 风险） */
+      check('空行只切出一段时原样返回', splitReplySegments('第一段文案内容\n\n'), ['第一段文案内容'])
+      /* 有标记时**只认标记**，两种规则不混用：这批空行不该被切 */
+      check(
+        '有标记时不混用空行规则',
+        splitReplySegments(`甲段文案内容${MSG_SPLIT_TOKEN}乙段文案内容\n\n丙段文案内容`),
+        ['甲段文案内容', '乙段文案内容\n\n丙段文案内容'],
+      )
+
+      /*
+       * ---------- 上限是「最多几个气泡」，不是「最多几条内容」 ----------
+       *
+       * 旧实现是 `parts.slice(0, max)`：模型发 5 段以上时，第 5 段起
+       * **既不在气泡里、也不落库**（service 落的库就是这个数组），
+       * 往上翻也找不回 —— 静默丢内容。改成把尾巴并进最后一条。
+       */
+      const six = [
+        '第一段文案内容',
+        '第二段文案内容',
+        '第三段文案内容',
+        '第四段文案内容',
+        '第五段文案内容',
+        '第六段文案内容',
+      ]
+      const mergedMark = splitReplySegments(six.join(MSG_SPLIT_TOKEN))
+      check('标记超上限：气泡数仍为 4', mergedMark.length, 4)
+      check('标记超上限：尾巴并进最后一条', mergedMark, [
+        six[0],
+        six[1],
+        six[2],
+        `${six[3]}\n${six[4]}\n${six[5]}`,
+      ])
+      check('标记超上限：内容一个字不丢', stripWs(mergedMark.join('')), stripWs(six.join('')))
+      const mergedImplicit = splitReplySegments(six.join('\n\n'))
+      check('空行超上限：气泡数仍为 4', mergedImplicit.length, 4)
+      check('空行超上限：内容一个字不丢', stripWs(mergedImplicit.join('')), stripWs(six.join('')))
+      check('max=2 时尾巴并进最后一条', splitReplySegments(six.slice(0, 4).join(MSG_SPLIT_TOKEN), 2), [
+        six[0],
+        `${six[1]}\n${six[2]}\n${six[3]}`,
+      ])
+      check('max=1 时全部并成一条（不丢）', splitReplySegments(six.slice(0, 3).join(MSG_SPLIT_TOKEN), 1), [
+        `${six[0]}\n${six[1]}\n${six[2]}`,
+      ])
 
       /*
        * 拆条**落库**：一次生成产出 N 条，且相邻 `createdAt` 差值正好 = 分段间隔。

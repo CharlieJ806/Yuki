@@ -248,30 +248,98 @@ export function parseStoredContent(raw) {
 export const MSG_SPLIT_TOKEN = '<<<MSG>>>'
 
 /**
+ * 隐式分段（空行）时每一段的最短长度。
+ *
+ * 为什么要卡长度：空行是**模型的自发行为**，不像标记那样是我们教的，
+ * 所以「两个换行」后面可能只是一个语气词（`嗯\n\n啊这`），
+ * 切了反而把一句话劈成两个碎片气泡。
+ *
+ * 为什么是 6 而不是 8：实测抓到的真实样本
+ * `就坐着刷手机啊，课本摊在桌上装样子\n\n刚顺手看了个猫`
+ * 第二段恰好 7 个字，阈值取 8 会漏掉这条最典型的 case（等于没修）。
+ * 6 仍能挡住「嗯/啊这/在吗」这类 1～5 字碎片。
+ */
+export const MIN_IMPLICIT_SEGMENT_CHARS = 6
+
+/** 超出上限时，多出来的尾巴并进最后一条用的连接符（换行，避免把两个词粘成一个） */
+const TAIL_JOIN = '\n'
+
+/**
+ * 把超上限的尾巴**并进最后一条**，而不是丢掉。
+ *
+ * 旧实现是 `parts.slice(0, max)` —— 第 5 段起既不在气泡里、也不落库
+ * （service 落的库就是这个数组），往上翻也找不回，属于**静默丢内容**。
+ * 现在 `max` 的语义是「最多几个气泡」，多出的内容归到最后一条。
+ */
+function collapseTail(parts, max) {
+  const limit = Math.max(1, Math.floor(Number(max)) || 1)
+  if (parts.length <= limit) return parts
+  if (limit === 1) return [parts.join(TAIL_JOIN)]
+  return [...parts.slice(0, limit - 1), parts.slice(limit - 1).join(TAIL_JOIN)]
+}
+
+/**
+ * 退而求其次的隐式分段：用**空行**切。
+ *
+ * 为什么不信任模型记得住 `<<<MSG>>>`：那是自造 token，实测模型更爱用空行
+ * 分段（`A\n\nB`），只认标记的结果是「一次回复变成一个有俩句的气泡」。
+ * 但空行在正常文本里更常见，所以这里每一条约束都是**收紧**方向的，
+ * 任一不满足就整条不切（宁可少切一个气泡，不可切错）：
+ *
+ *   - 含 ``` 围栏 → 不切（代码块里空行是常态，且本就不该被拆开）
+ *   - 单换行 `\n` 不算分段（模型常在句内换行），只有空行（`\n\n` 及以上）才算
+ *   - 空白段丢弃；**每段都得 ≥ MIN_IMPLICIT_SEGMENT_CHARS**，有一段太短就整体不切
+ *   - 只切出 1 段 → 返回 null，调用方原样返回整条
+ *
+ * @returns {string[]|null} null 表示「空行方案不适用」
+ */
+function splitByBlankLine(raw) {
+  if (raw.includes('```')) return null
+  /* 空行 = 一个换行 + 任意**非换行**空白（含全角空格）+ 一个以上换行 */
+  const parts = raw
+    .split(/\n[^\S\n]*\n+/)
+    .map((s) => s.trim())
+    .filter(Boolean)
+  if (parts.length < 2) return null
+  if (parts.some((p) => p.length < MIN_IMPLICIT_SEGMENT_CHARS)) return null
+  return parts
+}
+
+/**
  * 把一次生成的文本拆成「要分成几条发」。
  *
- * 规则：
- *   - 没有标记 → 一条（**默认行为不变**，这是最重要的兼容点：
- *     模型不听话、或用户用的是不支持该指令的自定义人设时，一切照旧）
- *   - 空段丢弃（模型偶尔会 `A<<<MSG>>><<<MSG>>>B`）
- *   - 每条 trim；全空则返回空数组，调用方据此回落到原文
+ * 两条规则**不混用**，有标记时只认标记：
+ *   ① 有 `<<<MSG>>>`  → 按标记切（空段丢弃，模型偶尔 `A<<<MSG>>><<<MSG>>>B`）
+ *   ② 没有标记        → 退而按**空行**切（见 `splitByBlankLine` 的收紧条件）
+ *   ③ 两条都不成立    → 一条（模型不听话、或用户用自定义人设没写这条指令时，
+ *      行为与以前完全一致）
  *
- * 上限 **4 条**：再多就不像聊天而像刷屏了，而且渲染层的错峰队列
+ * 每条 trim；全空则返回空数组，调用方据此回落到原文。
+ *
+ * 上限 **4 条气泡**：再多就不像聊天而像刷屏了，而且渲染层的错峰队列
  * 最长只等到 3 秒，条数太多会让最后一条迟迟不出现。
+ * 注意上限约束的是**气泡数**，超出的内容并进最后一条而不是丢弃。
  *
  * @param {string} text
- * @param {number} [max] 最多几条
- * @returns {string[]} 至少一条（除非输入全空）；无标记时就是 [原文]
+ * @param {number} [max] 最多几个气泡（多出的内容归到最后一个）
+ * @returns {string[]} 至少一条（除非输入全空）
  */
 export function splitReplySegments(text, max = 4) {
   const raw = String(text ?? '')
-  if (!raw.includes(MSG_SPLIT_TOKEN)) return raw.trim() ? [raw.trim()] : []
-  const parts = raw
-    .split(MSG_SPLIT_TOKEN)
-    .map((s) => s.trim())
-    .filter(Boolean)
-  if (!parts.length) return []
-  return parts.slice(0, max)
+
+  if (raw.includes(MSG_SPLIT_TOKEN)) {
+    const parts = raw
+      .split(MSG_SPLIT_TOKEN)
+      .map((s) => s.trim())
+      .filter(Boolean)
+    if (!parts.length) return []
+    return collapseTail(parts, max)
+  }
+
+  const implicit = splitByBlankLine(raw)
+  if (implicit) return collapseTail(implicit, max)
+
+  return raw.trim() ? [raw.trim()] : []
 }
 
 /**
