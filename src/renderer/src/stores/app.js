@@ -441,18 +441,26 @@ export function initBridge() {
       }
     }
     if (msg.event === 'chat-done') {
-      if (msg.payload.requestId === store.chat.requestId) {
-        /*
-         * 只在**没有待落地消息**时兜底撤占位。
-         *
-         * service 里 `chat`/`message` 是先于 `chat-done` emit 的，
-         * 正常路径下撤占位由「消息落地」负责（见下面的 enqueueMessage 回调）。
-         * 这里若无条件撤，就会抢在错峰队列前面把 liveText 清掉 ——
-         * 那正是「回复的瞬间看不见」的空窗。
-         */
-        if (!pendingQueue.length) settleStream()
-        else armSettleWatchdog()
-      }
+      /*
+       * 兜底**不能**套在 requestId 匹配里。
+       *
+       * 原来整段都在 `payload.requestId === store.chat.requestId` 之内：
+       * 一旦对不上（requestId 已被别的路径清成 null、旧请求迟到、
+       * 或错峰队列卡死导致「消息落地」这条正常路径根本没跑过），
+       * `settleStream()` 和看门狗**一个都不会跑**。而 `chat-done` 是一轮里
+       * 最后一条事件，不会再有下一个机会 —— `streaming` 就永久卡在 true，
+       * 发送键永远是暂停键，只能关掉对话窗重开。
+       * 卡死不可恢复，比偶尔早撤一次占位严重得多，所以兜底与 requestId 无关。
+       *
+       * 撤占位的**时机**仍然受队列长度约束：
+       * 只在**没有待落地消息**时才就地撤。service 里 `chat`/`message` 是先于
+       * `chat-done` emit 的，正常路径下撤占位由「消息落地」负责（见下面的
+       * enqueueMessage 回调）；这里若无条件撤，就会抢在错峰队列前面把
+       * liveText 清掉 —— 那正是「回复的瞬间看不见」的空窗。
+       * 队列非空时改上超时看门狗（队列最长也就一跳）。
+       */
+      if (!pendingQueue.length) settleStream()
+      else armSettleWatchdog()
     }
     if (msg.event === 'chat' && msg.payload.type === 'message') {
       const { sessionId, message } = msg.payload
@@ -542,6 +550,32 @@ export const STAGGER_MAX_MS = 3000 /* 相邻两条 createdAt 差超过这个数�
 
 let pendingQueue = []
 let pendingTimer = null
+/*
+ * 上一条消息**落地**（push 进数组）的时刻，错峰递延从它起算。
+ *
+ * 为什么必须有这个变量：递延时长不能靠「每次重新算 createdAt 差值」得到。
+ * `step` 在 head 出队之前会被反复调用，而只要 head 没落地，`last` 就一直是
+ * **同一条**已落地的消息 —— 重算出的 gap 每次都一样，于是定时器一次次
+ * 重新武装，head **永远出不了队**。
+ *
+ * 实测（真实 API + 采样）：她的回复被 `<<<MSG>>>` 拆成 3 条时，第 1 条落地、
+ * 第 2 条起就落进这个死循环，队列**永久卡死**在 `a:第2条` 上。后果连锁：
+ *   - 那条回复剩下的分段永远不出现（用户只看到她第一句）；
+ *   - 之后**所有**消息都排在死掉的 head 后面永不落地 ——
+ *     包括用户自己发的那句（症状「我发的句子看不见」）；
+ *   - `onLanded` 是撤流式占位的唯一正常路径，队列不动 → 它永远不跑，
+ *     `chat-done` 又因为队列非空只上 4.5 秒看门狗 → 看门狗一响
+ *     `settleStream()` 把 liveText 清掉，屏幕上「她的回复闪一下就没了」
+ *     （症状「消息回滚」），期间发送键一直是■暂停键。
+ * 多段回复是**默认写法**（REPLY_SEGMENT_GAP_MS=1200 < STAGGER_MAX_MS=3000），
+ * 所以这条路径几乎每轮都会命中，从第二句起必然坏掉。
+ *
+ * 语义：`gap` 是相邻两条 `createdAt` 的差，即「她这两条之间隔了多久」，
+ * 递延应该是「距上一条出现还差多久」= gap − 已经等过的时间。
+ * 初值 0 表示「队列里还没有落地过任何东西」，此时 `Date.now() - 0`
+ * 足够大 → wait 归零 → 立即出队（切会话/重读历史后正是这个语义）。
+ */
+let lastLandAt = 0
 
 /**
  * 入队一条待展示的消息。
@@ -595,9 +629,10 @@ function pumpQueue(extraDelay) {
     /*
      * gap <= 0：乱序或同毫秒（不该发生，落库已保证递增）→ 立即出。
      * gap >  STAGGER_MAX_MS：普通对话 → 立即出。
-     * 其余：按 gap 递延。
+     * 其余：按 gap 递延 —— 但递延的是「距上一条**落地**还差多久」，
+     *       不是「再等 gap 毫秒」（见下）。
      */
-    const wait = gap > 0 && gap <= STAGGER_MAX_MS ? gap : 0
+    const wait = gap > 0 && gap <= STAGGER_MAX_MS ? Math.max(0, gap - (Date.now() - lastLandAt)) : 0
 
     if (wait > 0) {
       pendingTimer = window.setTimeout(step, wait)
@@ -605,6 +640,8 @@ function pumpQueue(extraDelay) {
     }
     pendingQueue.shift()
     if (!store.chat.messages.some((m) => m.id === next.id)) store.chat.messages.push(next)
+    /* 记下这条**落地**的时刻，下一条的递延从它起算（见上面的 wait） */
+    lastLandAt = Date.now()
     /* 落地回调必须在 push 之后 —— 顺序反了就等于没修 */
     entry.onLanded?.()
     /* 出队一条后立刻看下一条（它可能与这条很近，需要继续递延） */
@@ -618,6 +655,8 @@ function pumpQueue(extraDelay) {
 /** 切换会话时清空队列 —— 旧会话的照片不该出现在新会话里 */
 export function resetPhotoQueue() {
   pendingQueue = []
+  /* 队列清空 = 数组里剩下的消息是「重读来的」而不是「落地的」，递延基准归零 */
+  lastLandAt = 0
   if (pendingTimer) {
     window.clearTimeout(pendingTimer)
     pendingTimer = null

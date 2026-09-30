@@ -892,6 +892,40 @@ try {
 
       /* chat-done 的兜底不能无条件撤 */
       check('chat-done 兜底受队列长度约束', /if \(!pendingQueue\.length\) settleStream\(\)/.test(storeSrc), true)
+
+      /*
+       * 兜底也不能套在 requestId 匹配里。
+       *
+       * `chat-done` 是一轮里**最后**一条事件，对不上就再没有下一个机会 ——
+       * 原来整段都在 `payload.requestId === store.chat.requestId` 之内，
+       * 一旦对不上（requestId 被别的路径清成 null / 旧请求迟到 / 队列卡死
+       * 导致「消息落地」没跑过）`settleStream()` 与看门狗一个都不跑，
+       * `streaming` 永久卡在 true：发送键永远是■暂停键，只能关窗重开。
+       * 断言「队列长度判断**不在** requestId 的 if 里」。
+       */
+      const doneBlock = /if \(msg\.event === 'chat-done'\)\s*\{([\s\S]*?)\n    \}/.exec(storeSrc)
+      check(
+        'chat-done 兜底不受 requestId 约束',
+        Boolean(doneBlock) && !/if \(msg\.payload\.requestId === store\.chat\.requestId\)/.test(doneBlock[1]),
+        true,
+      )
+
+      /*
+       * 错峰队列的递延必须**扣掉已经等过的时间**。
+       *
+       * 踩过的坑（真实 API 实测采样）：写成「每次都等 gap」时，head 在等待期间
+       * 不出队、`last` 始终是同一条已落地消息 → 每次 step 重算出的 gap 都不变
+       * → 定时器一次次重新武装，head **永远出不了队**，队列彻底卡死：
+       * 之后所有消息（含用户自己发的那句）全排在它后面永不出现，
+       * 而 streaming 只能靠 4.5 秒看门狗撤掉 ——
+       * 用户看到的是「我发的看不见 / 她的回复闪一下就没 / 发送键变暂停」。
+       * 多段回复（相邻 createdAt 差 REPLY_SEGMENT_GAP_MS=1200ms）必然命中。
+       */
+      check(
+        '错峰递延扣掉已等待的时间',
+        /Math\.max\(0, gap - \(Date\.now\(\) - lastLandAt\)\)/.test(storeSrc) && /lastLandAt = Date\.now\(\)/.test(storeSrc),
+        true,
+      )
     }
 
     /* ---------- 两端图鉴的「看大图」必须都是全屏 ---------- */
