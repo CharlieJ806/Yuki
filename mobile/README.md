@@ -60,9 +60,15 @@ access-control-allow-methods: POST
 mobile/chat.js  ──import──▶  ../src/shared/moyu.js      （人设 / 时间感知 / 时段）
                             ../src/shared/content.js    （多模态 / 内容块）
                             ../src/shared/interactions.js（台词 / 服饰 / 亲密度）
+                            ../src/shared/tierLines.js  （interactions 的内部依赖：
+                                                          恋人/灵魂伴侣专属台词）
 ```
 
 改桌面端的人设或时段表，手机端**同步生效**（重新 build 即可）。
+
+`mobile/build.js` 的 `MODULES` 是**手工白名单**，而且只检查清单里的文件是否存在、
+不解析 import —— 给 shared 模块加内部依赖（`interactions.js → tierLines.js` 这种）
+时忘了登记，构建照样「成功」，但部署后 `vendor/interactions.js` 会 404。
 
 **但数据各自独立**：
 

@@ -8,7 +8,7 @@ import { state, doCheckIn, win, openChatWindow } from '../stores/app.js'
 import { formatDuration, formatMoney, REST_PATTERNS } from '@shared/moyu.js'
 /* affinityView 是本地口径（比 affinityLevel 多一层 godMode 判定），保留；
    伪装词汇表用朋友那侧的 surfaceText（组件不再就地三元判断） */
-import { AFFINITY_GAIN, CHAT_AFFINITY_DAILY_CAP, affinityView } from '@shared/interactions.js'
+import { AFFINITY_GAIN, AFFINITY_MAX_POINTS, PET_AFFINITY_DAILY_CAP, affinityView } from '@shared/interactions.js'
 import { surfaceText } from '@shared/disguise.js'
 
 /* 可见文案走伪装词汇表（shared/disguise.js），组件不再就地三元判断 */
@@ -89,7 +89,11 @@ const detailRows = computed(() => [
 
 /** 亲密度：等级进度 + 得分规则文案，展示在等级面板里 */
 const affinity = computed(() => affinityView(state.affinity?.points ?? 0, state.settings?.godMode))
-const affinityGain = computed(() => ({ ...AFFINITY_GAIN, chatDailyCap: CHAT_AFFINITY_DAILY_CAP }))
+/*
+ * 每日额度**只对桌宠交互生效**（聊天不封顶），所以这里只暴露那一个数字 ——
+ * 文案里写「每日上限」时不能含糊，否则用户会以为聊天也会被卡住。
+ */
+const affinityGain = computed(() => ({ ...AFFINITY_GAIN, petDailyCap: PET_AFFINITY_DAILY_CAP }))
 
 const checkinLabel = computed(() => {
   if (checking.value) return '打卡中...'
@@ -235,13 +239,13 @@ function goto(key) {
               </div>
               <div class="level-foot">
                 <span>Yuki · {{ affinity.level.name }}</span>
-                <span class="tabular">{{ state.affinity?.points ?? 0 }}/{{ state.affinity?.max ?? 300 }}</span>
+                <span class="tabular">{{ state.affinity?.points ?? 0 }}/{{ state.affinity?.max ?? AFFINITY_MAX_POINTS }}</span>
               </div>
               <p class="detail-hint">
                 {{
                   affinity.isMax
                     ? '关系最好的一档，她说话也最黏人'
-                    : `再互动 ${affinity.toNext} 次升到「${affinity.level.next.name}」；聊天一条 +${affinityGain.chatMessage}，每日上限 ${affinityGain.chatDailyCap} 点`
+                    : `再互动 ${affinity.toNext} 次升到「${affinity.level.next.name}」；聊天一条 +${affinityGain.chatMessage}（不限量），桌宠互动每日上限 ${affinityGain.petDailyCap} 点`
                 }}
                 <template v-if="state.affinity?.streakDays > 1"> · 连续 {{ state.affinity.streakDays }} 天</template>
               </p>

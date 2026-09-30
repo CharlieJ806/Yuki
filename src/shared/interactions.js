@@ -13,6 +13,14 @@ import { textOfContent } from './content.js'
  * outfitStories 是**零 import 的纯数据叶子模块**，所以这个方向不会成环。
  */
 import { outfitMinPoints } from './outfitStories.js'
+/*
+ * 恋人 / 灵魂伴侣的专属点击台词住在 tierLines.js。
+ *
+ * 同上：它是**零 import 的纯数据叶子**，所以这个方向也不会成环。
+ * 只引 `tierLinesFor` / `TIER_LINE_VOICES`，不把台词抄进本文件 ——
+ * 那样两档的台词会散在两个地方，加一档就得想起来改两处。
+ */
+import { tierLinesFor, TIER_LINE_VOICES } from './tierLines.js'
 
 /**
  * 主动冒泡的间隔抖动幅度（毫秒）。
@@ -74,17 +82,32 @@ export const LINES = {
   ],
 }
 
-/** 亲密度等级：按累计互动次数划分 */
+/**
+ * 亲密度等级：按累计互动次数划分。
+ *
+ * **这是全项目唯一的档位定义**：名字与阈值只写在这里，
+ * 人设档位表、关系块注入、服饰/生活照门槛、UI 进度条全部从它派生
+ * （smoke 锁着「人设档位名与阈值与 AFFINITY_LEVELS 一致」）。
+ *
+ * 七档的节奏：前五档对应「眼熟 → 搭话 → 好朋友 → 默契 → 形影不离」，
+ * 250 / 300 是**关系升级的剧情节点** —— 恋人（关系摆到明面上）、
+ * 灵魂伴侣（不用说出来也懂彼此），不是「再熟一点」。
+ *
+ * 阈值必须**单调递增且互不相等**：`affinityLevel` 的进度条拿
+ * `next.min - cur.min` 做除数，重档会除出 0。
+ */
 export const AFFINITY_LEVELS = [
   { min: 0, name: '有点眼熟', note: '刚开始相处' },
-  { min: 10, name: '熟络起来了', note: '会主动搭话了' },
-  { min: 40, name: '好朋友', note: '开始有点黏人' },
-  { min: 120, name: '默契搭档', note: '懂你在想什么' },
-  { min: 300, name: '形影不离', note: '已经离不开彼此' },
+  { min: 40, name: '熟络起来了', note: '会主动搭话了' },
+  { min: 100, name: '好朋友', note: '开始有点黏人' },
+  { min: 150, name: '默契搭档', note: '懂你在想什么' },
+  { min: 200, name: '形影不离', note: '已经离不开彼此' },
+  { min: 250, name: '恋人', note: '关系摆到明面上了' },
+  { min: 300, name: '灵魂伴侣', note: '不用说出来也懂彼此' },
 ]
 
-/** 等级索引 → 关系语气档位（见 AFFINITY_VOICE） */
-const VOICE_BY_LEVEL = ['stranger', 'familiar', 'friend', 'close', 'intimate']
+/** 等级索引 → 关系语气档位（见 AFFINITY_VOICE），与 AFFINITY_LEVELS 一一对应 */
+const VOICE_BY_LEVEL = ['stranger', 'familiar', 'friend', 'close', 'intimate', 'lover', 'soulmate']
 
 /**
  * 亲密度上限。桌宠是「处出来的」，无限涨会让等级卡在最后一档、
@@ -92,58 +115,135 @@ const VOICE_BY_LEVEL = ['stranger', 'familiar', 'friend', 'close', 'intimate']
  */
 export const AFFINITY_MAX_POINTS = AFFINITY_LEVELS[AFFINITY_LEVELS.length - 1].min
 
-/** 每种互动给多少点：贴贴/poke 给得少，来回聊天给得多 */
+/**
+ * 每种互动给多少点：贴贴/poke 给得少，来回聊天给得多。
+ *
+ * 取值按「0 → 恋人(250) 约 3 天、0 → 灵魂伴侣(300) 约 4 天」反推
+ * （每天正常聊天 15 轮），实测曲线见 docs/DESIGN.md 的亲密度章。
+ * 改任何一个数字都要重跑 `scripts/sim-affinity.js` 对节奏。
+ */
 export const AFFINITY_GAIN = {
   click: 1,
   double: 2,
   pet: 2,
   /** 每条用户消息 —— 对话才是真正处关系的地方 */
-  chatMessage: 2,
+  chatMessage: 1,
   /** 一轮问答结束（回复成功落库），把「聊完一次」再记一笔 */
-  chatRound: 3,
-  /** 每日见面 */
+  chatRound: 2,
+  /** 每日见面（同一天只记一次，见 `settleAffinity` 的 `dailyDay`） */
   daily: 1,
+  /** 解锁事件（她发来照片 / 图鉴新开一项）的奖励 */
+  photoUnlock: 8,
 }
 
 /**
- * 每天**所有来源合计**最多涨多少点。
+ * 得分来源 —— **每日额度只对桌宠交互生效**。
  *
- * 早先只封聊天（`chatMessage`/`chatRound`），点击/摸头不计 ——
- * 于是「一直点立绘」能无限涨，一天点 300 下就能从「有点眼熟」
- * 冲到「默契搭档」，等级推进完全失去节奏。
+ * 用户要求「取消好感度每日总上限，只留桌宠交互的每日上限」：
+ * 聊天是处关系的主线，不该被一个总数卡住（聊到一半不加分，用户
+ * 会觉得白聊）；而点立绘是**零成本重复动作**，不封顶就能一天点满。
  *
- * 现在全来源合计封顶。60 点约等于「聊 12 轮」或「点 60 下」，
- * 是「认真互动一会儿」的量级，不至于随手就满。
+ * 字段值直接进存储（`gainBySource`），所以只能加不能改名。
  */
-export const AFFINITY_DAILY_CAP = 60
-
-/** 兼容旧名（桌面端还在用） */
-export const CHAT_AFFINITY_DAILY_CAP = AFFINITY_DAILY_CAP
+export const AFFINITY_SOURCE = {
+  /** 桌宠交互：点击 / 双击 / 摸头 —— **唯一有每日上限的来源** */
+  PET: 'pet',
+  /** 聊天（用户消息 + 聊完一轮 + 开心加成）—— 不封顶 */
+  CHAT: 'chat',
+  /** 每日见面 —— 不封顶（一天只给一次，见 dailyDay） */
+  DAILY: 'daily',
+  /** 解锁奖励（发照片）—— 不封顶 */
+  UNLOCK: 'unlock',
+}
 
 /**
- * 亲密度**下降**规则。
+ * 每个来源的每日额度。`Infinity` = 不封顶。
  *
- * ## 为什么要有下降
+ * 桌宠交互 15 点 ≈ 点 15 下 —— 够「随手戳一会儿」，又拦住
+ * 「一直点立绘刷满级」。上限**只**管这个来源：狂点之后
+ * 聊天照样正常涨分（smoke 有断言盯着这条隔离）。
+ */
+export const AFFINITY_DAILY_CAP_BY_SOURCE = {
+  [AFFINITY_SOURCE.PET]: 15,
+  [AFFINITY_SOURCE.CHAT]: Infinity,
+  [AFFINITY_SOURCE.DAILY]: Infinity,
+  [AFFINITY_SOURCE.UNLOCK]: Infinity,
+}
+
+/** 桌宠交互的每日上限（UI 要显示这个数字） */
+export const PET_AFFINITY_DAILY_CAP = AFFINITY_DAILY_CAP_BY_SOURCE[AFFINITY_SOURCE.PET]
+
+/** 得分键（`AFFINITY_GAIN` 的键）→ 来源分桶 */
+export const SOURCE_BY_GAIN = {
+  click: AFFINITY_SOURCE.PET,
+  double: AFFINITY_SOURCE.PET,
+  pet: AFFINITY_SOURCE.PET,
+  chatMessage: AFFINITY_SOURCE.CHAT,
+  chatRound: AFFINITY_SOURCE.CHAT,
+  daily: AFFINITY_SOURCE.DAILY,
+  photoUnlock: AFFINITY_SOURCE.UNLOCK,
+}
+
+/**
+ * 得分键 → 来源。
  *
- * 只会涨的关系没有张力 —— 用户没有任何理由「记得回来看看」，
- * 而且「惹她生气」也不会有任何代价（说错话只影响这一轮的回复）。
- * 加上下降之后，亲密度才真正表示「最近处得怎么样」。
+ * 未知的键一律当成**桌宠交互**（受上限约束）—— 宁可少给，
+ * 也不要因为新增了一个没人登记上限的来源而出现无限刷分。
+ */
+export function sourceOfGain(kind) {
+  return SOURCE_BY_GAIN[kind] ?? AFFINITY_SOURCE.PET
+}
+
+/** 把来源收敛成合法值（存储 / IPC 传进来的都可能是脏值） */
+export function normalizeAffinitySource(source) {
+  return Object.values(AFFINITY_SOURCE).includes(source) ? source : AFFINITY_SOURCE.PET
+}
+
+/** 某来源的每日额度（`Infinity` 表示不封顶） */
+export function affinitySourceCap(source) {
+  const cap = AFFINITY_DAILY_CAP_BY_SOURCE[normalizeAffinitySource(source)]
+  return Number.isFinite(cap) ? Math.max(0, cap) : Infinity
+}
+
+/**
+ * 亲密度**下降**规则 —— 两条**互相独立**的扣减，同一天可以同时发生。
  *
- * ## 两条规则
+ * ## ① 每日自然流失（DAILY_DRAIN）
  *
- *   ① 久未互动：超过 `IDLE_DAYS` 天后，每天扣 `IDLE_DECAY_PER_DAY` 点
- *   ② 惹她生气：当次聊天扣 `UPSET_PENALTY` 点（见 `affinityPenalty`）
+ * **每一个自然日都扣**，跟当天有没有互动无关。它是「关系要花时间
+ * 维持」的抽象：不经营就会淡，而不是「你犯了错才扣」。
  *
- * 都取**小额度**：扣得比涨得慢，正常用不会掉档；
- * 只有长期不管或反复惹她才会真的降级。
+ * ## ② 无互动惩罚（IDLE_PENALTY）
+ *
+ * **只在那一天完全没有互动时追加**。于是：
+ *   - 互动了的那天：-DAILY_DRAIN
+ *   - 一整天没互动：-DAILY_DRAIN - IDLE_PENALTY（代价翻倍）
+ *
+ * 「有互动」= 那天有过任何一次互动（聊天、点桌宠、每日见面、解锁）。
+ * **桌宠点击算互动** —— 用户的原话是「没有互动」，而点她本来就是互动。
+ *
+ * ## ③ 惹她生气（UPSET）
+ *
+ * 当次聊天扣 `UPSET` 点，且那轮**不加分**（见 `settleAffinity`）。
+ *
+ * ## 为什么两条扣减分开算
+ *
+ * 早先是「`IDLE_DAYS` 天没互动才开始每天扣 1」—— 属于「闲置衰减」，
+ * 不互动的那天只扣一次。用户改成「每天自然流失 + 空白天额外惩罚」，
+ * 语义更直白：**关系每天都在变淡，完全不理她则加倍**。
+ *
+ * ## 结算机制没变
+ *
+ * 仍然是「按已过去的整天数结算 + 记下结算到哪一天」（`decaySettledDays`），
+ * 所以同一天里聊几轮也只会扣一次（smoke 有断言）。
  */
 export const AFFINITY_DECAY = {
-  /** 多少天没互动开始衰减 */
-  IDLE_DAYS: 3,
-  /** 之后每天扣多少点 */
-  IDLE_PER_DAY: 1,
+  /** 每个自然日固定流失多少点（无论当天有没有互动） */
+  DAILY_DRAIN: 5,
+  /** 一整天完全没有互动时，额外追加的惩罚 */
+  IDLE_PENALTY: 5,
   /** 单次惹她生气的扣分 */
-  UPSET: 2,
+  UPSET: 3,
 }
 
 export function affinityLevel(points) {
@@ -181,7 +281,7 @@ export const GOD_MODE_LEVEL = { min: 0, name: '上帝模式', note: '全部内�
  *
  * 上帝模式要覆盖的是 **voice** —— 关系语气档位。实际还看它的只剩
  * 台词（`linesFor`）与主动说话频率（`idleIntervalScale`）；
- * 动作池也收这个参数但**已经不分档**（五档都是 `ALL_IDLE_POSES`），
+ * 动作池也收这个参数但**已经不分档**（七档都是 `ALL_IDLE_POSES`），
  * 服饰门控则完全不看它（「能不能穿」由图鉴的已解锁清单决定，
  * 亲密度只决定「够不够格去触发」，见 `outfitUnlockTierName` 的注释）。
  * 顺带把 level 换成「上帝模式」——
@@ -204,16 +304,57 @@ export function affinityView(points, godMode = false) {
 }
 
 /**
- * 单次互动该记多少点：受上限与「聊天日上限」双重约束。
+ * 某个来源今天已经用掉多少额度。
  *
- * 聊天另设日上限的原因：一次对话几十条消息，不设的话一天就能从
- * 「有点眼熟」冲到「默契搭档」，等级推进完全失去节奏。
- * 摸头/双击这类手动互动不受日上限影响。
+ * 分桶记账（`gainBySource`）是这次改动的核心：**额度按来源独立**，
+ * 所以「狂点桌宠到上限」不会吃掉聊天的额度，反之亦然。
  *
- * @param {{ points?:number, lastDay?:string|null, chatDay?:string|null, chatToday?:number }} affinity
+ * 旧记录（没有分桶）里的 `gainToday` 是**全来源合计**，不能当成
+ * 某个来源的已用量 —— 否则升级当天早上聊过几句，下午就点不动她了。
+ * 所以读不到分桶时一律按 0 算（等于「这个来源今天还没用过」）。
+ *
+ * @param {object} affinity 亲密度记录
+ * @param {string} today 'YYYY-MM-DD'
+ * @param {string} source 见 `AFFINITY_SOURCE`
+ */
+export function affinityUsedToday(affinity, today, source = AFFINITY_SOURCE.PET) {
+  if (affinity?.gainDay !== today) return 0
+  const buckets = affinity?.gainBySource
+  if (!buckets || typeof buckets !== 'object') return 0
+  const used = Number(buckets[normalizeAffinitySource(source)])
+  return Number.isFinite(used) && used > 0 ? Math.floor(used) : 0
+}
+
+/**
+ * 今天（所有来源合计）已经涨了多少 —— **只用于展示**。
+ *
+ * 它不再参与任何额度判定（用户要求取消总上限），所以这里
+ * 也不用兼容旧的 `chatDay/chatToday`：那两个字段只在额度判定里
+ * 有意义，而额度判定已经完全不看合计值了。
+ */
+export function affinityTodayTotal(affinity, today) {
+  if (affinity?.gainDay !== today) return 0
+  const buckets = affinity?.gainBySource
+  if (buckets && typeof buckets === 'object') {
+    return Object.values(buckets).reduce((n, v) => {
+      const x = Number(v)
+      return n + (Number.isFinite(x) && x > 0 ? x : 0)
+    }, 0)
+  }
+  /* 旧记录：那时 `gainToday` 就是「今天一共涨了多少」，直接沿用 */
+  return Math.max(0, Number(affinity?.gainToday) || 0)
+}
+
+/**
+ * 单次互动该记多少点：受**总上限**与**该来源的每日额度**双重约束。
+ *
+ * 只有桌宠交互有日额度（见 `AFFINITY_DAILY_CAP_BY_SOURCE`）；
+ * 聊天 / 每日见面 / 解锁奖励的 `cap` 是 `Infinity`，等于不封顶。
+ *
+ * @param {{ points?:number, gainDay?:string|null, gainBySource?:object }} affinity
  * @param {number} delta 本次想加的点
  * @param {string} today 'YYYY-MM-DD'
- * @param {{ chat?: boolean, chatCap?: number, max?: number }} [opts]
+ * @param {{ source?: string, max?: number }} [opts]
  */
 export function affinityGain(affinity, delta, today, opts = {}) {
   const max = Number(opts.max) || AFFINITY_MAX_POINTS
@@ -224,58 +365,78 @@ export function affinityGain(affinity, delta, today, opts = {}) {
   const room = Math.max(0, max - cur)
   if (room === 0) return 0
 
-  /*
-   * 当日已用掉的额度。
-   *
-   * `gainDay` 是**所有来源**共用的计数日；`chatDay`/`chatToday` 是
-   * 早期的「只算聊天」字段，保留读取是为了让升级前已有的数据
-   * 不会在当天突然多出一条额度（那天前半段的聊天没被计入新的日额度）。
-   */
-  const usedToday =
-    affinity?.gainDay === today
-      ? Number(affinity.gainToday) || 0
-      : affinity?.chatDay === today
-        ? Number(affinity.chatToday) || 0
-        : 0
+  const source = normalizeAffinitySource(opts.source)
+  const cap = affinitySourceCap(source)
+  /* 不封顶的来源只受总上限约束 */
+  if (!Number.isFinite(cap)) return Math.min(want, room)
 
-  const cap = Number(opts.cap) || AFFINITY_DAILY_CAP
-  return Math.min(Math.min(want, room), Math.max(0, cap - usedToday))
+  const used = affinityUsedToday(affinity, today, source)
+  return Math.min(Math.min(want, room), Math.max(0, cap - used))
 }
 
 /**
- * 算「久未互动」该扣多少点。
+ * 结算「自然流失 + 无互动惩罚」该扣多少点。
  *
- * ## 语义
+ * ## 语义（用户定的规则）
  *
- * 从 `lastActive`（最后一次互动那天）到今天，**超过 IDLE_DAYS 之后**
- * 的每一天扣一点。不是「一次性扣一大笔」——
- * 那样用户隔一周回来会发现直接掉了一档，很像惩罚；
- * 而「每天慢慢掉」的感觉是「关系在淡」，更符合直觉，也更容易挽回。
+ * 从 `lastActive`（最后一次互动那天）到今天，**每一个自然日**都扣
+ * `DAILY_DRAIN`；其中**完全没有互动的那些天**再追加 `IDLE_PENALTY`。
+ * 于是活跃日 -5、空白天 -10。
  *
- * ## 只结算「上次结算到哪」
+ * ## 两个开关，回答两个不同的问题
  *
- * 用 `decayDay` 记录「衰减已经算到哪一天」，
- * 否则同一天内每次互动都会重算一遍、反复扣。
+ * `active`：**这次结算本身是不是一次互动**（聊天 / 点桌宠 / 见面 / 解锁
+ * 都是，所以默认 true）。它只决定「今天」算活跃日还是空白天。
+ *
+ * `settleToday`：**今天要不要一起结**（默认 true）。
+ * 传 `false` 就是「只结到昨天为止」—— 读时结算用的就是它：
+ * 今天还没过完，它到底是活跃日（-5）还是空白天（-10）此刻**还不知道**，
+ * 硬结就是猜。留着它，等「今天真的互动了」（互动那次结算按活跃日结）
+ * 或「明天再来读」（那时它已经是一个过去的整天，按空白天补上）。
+ *
+ * 为什么必须能「留着今天」：读时结算如果把今天一起结掉，就会推出
+ * **「每天先开一下面板再聊天的人，比不开面板的人每天多扣 5 点」**——
+ * 看一眼要收费，方向不对（详见 `affinityReadSettle`）。
+ *
+ * ## 只结算「还没结过的天」
+ *
+ * `decaySettledDays` 记录「从 `lastActive` 起已经结过几天」，
+ * 否则同一天里每聊一轮都会重算一遍、反复扣。
+ * 它在「今天不算互动」的结算里才会累积（互动会把 `lastActive`
+ * 推到今天、计数自然归零）。
  *
  * @param {object} affinity 亲密度记录
  * @param {string} today 'YYYY-MM-DD'
+ * @param {{ active?: boolean, settleToday?: boolean }} [opts]
  * @returns {number} 本次该扣的点（0 表示不扣）
  */
-export function affinityDecay(affinity, today) {
+export function affinityDecay(affinity, today, opts = {}) {
   const last = affinity?.lastActive
   if (!last || !today) return 0
 
   const days = daysBetween(last, today)
-  if (days <= AFFINITY_DECAY.IDLE_DAYS) return 0
+  const settled = Math.min(Math.max(0, Math.floor(Number(affinity?.decaySettledDays) || 0)), days)
+  /*
+   * 待结算天数 = 还没结过的那些天（区间 `lastActive + settled + 1` … `today`，含今天）。
+   *
+   * `settleToday === false` 时把今天剔出去 —— 今天要等「有互动」或
+   * 「明天」才有结论，现在结它就是猜。
+   */
+  const settleToday = opts.settleToday !== false
+  const pending = Math.max(0, days - settled - (settleToday ? 0 : 1))
+  if (pending <= 0) return 0
 
   /*
-   * 已经结算过的部分不再扣。
-   * `decayDay` 为空说明从没结算过 —— 那时从「开始衰减的第一天」算起。
+   * 这些天里「空白天」有几天。
+   *
+   * `lastActive` 是**最后一次有互动的那天**，所以区间里除今天之外的
+   * 每一天都必然没有互动；今天**只有在这一轮里真要结它**时才由
+   * `active` 决定是活跃日还是空白天。
    */
-  const settled = Number(affinity?.decaySettledDays) || 0
-  const totalIdleDays = days - AFFINITY_DECAY.IDLE_DAYS
-  const pending = Math.max(0, totalIdleDays - settled)
-  return pending * AFFINITY_DECAY.IDLE_PER_DAY
+  const activeToday = settleToday && opts.active !== false
+  const idleDays = Math.max(0, pending - (activeToday ? 1 : 0))
+
+  return pending * AFFINITY_DECAY.DAILY_DRAIN + idleDays * AFFINITY_DECAY.IDLE_PENALTY
 }
 
 /**
@@ -346,19 +507,242 @@ export function affinityPenalty(upsetting) {
   return upsetting ? AFFINITY_DECAY.UPSET : 0
 }
 
+/* ---------- 「开心」判定：聊天涨分的另一半 ---------- */
+
+/**
+ * 「她会开心」的词表 —— 与 `UPSET_WORDS` **成对**，形态也一样（子串匹配）。
+ *
+ * ## 为什么要有它
+ *
+ * 早先聊天加分只看「发了消息」—— 聊什么、聊得好不好，涨的分一模一样。
+ * 用户要求「聊天时让她感到开心则会获得好感度」，于是有了这一组。
+ *
+ * ## 只收「对她说」的直白好意
+ *
+ * 分四类：直白的好感表达、夸奖、感谢与认可、用户自己的好心情
+ * （她会被感染）。**不收**「还行吧」「挺好的」这类中性客套 ——
+ * 那不算「开心」，收了等于每轮都白送分。
+ *
+ * ## 词表刻意保守，但**不靠它一个人扛**
+ *
+ * 词表只管「用户说了什么」。真正的兜底是
+ * `happyReplySignals`：她这轮**回复的形态**（变长、带语气词/emoji、
+ * 分条发）本身就是「她被逗到了」的证据，且完全不依赖猜词。
+ * 两条合起来才算 `happyBonus` 的分（见那里的算法）。
+ */
+const HAPPY_WORDS = [
+  /* 直白的好感 */
+  '喜欢你', '爱你', '想你', '最喜欢你', '抱抱', '亲亲', '么么', '贴贴', '摸头',
+  /* 夸奖 */
+  '好可爱', '可爱', '真好看', '好看', '好漂亮', '漂亮', '温柔', '贴心',
+  '好棒', '太棒了', '真棒', '好厉害', '太强了', '厉害',
+  /* 感谢与认可 */
+  '谢谢你', '谢谢', '辛苦了', '有你真好', '还好有你', '多亏了你',
+  /* 用户自己的好心情（她会跟着高兴） */
+  '好开心', '开心', '高兴', '太好了', '哈哈', '笑死', '嘿嘿', '嘻嘻',
+]
+
+/**
+ * 否定尾巴：命中正向词、但它前面紧跟「不/没/别/无」时不算数。
+ *
+ * 「不喜欢你」「一点也不可爱」「没那么想你」都会被挡掉 ——
+ * 而「不是吧，我好喜欢你」不会（否定词后面隔着「是吧，」，
+ * 逗号把它截断了）。窗口取 6 个字，只回看紧邻的一小段，
+ * 免得一句话前半段的否定把后半段的夸奖也吃掉。
+ */
+const HAPPY_NEGATION_TAIL = /(不|没|别|无)[^，。！？；,.!?;]{0,2}$/
+
+/**
+ * 用户这轮说的话里，有没有**没被否定**的正向表达。
+ *
+ * 惹她生气那轮一律返回 false —— 一轮里既有冒犯又有好话时，
+ * 以冒犯为准（`happyBonus` 还会再挡一次）。
+ */
+export function isHappy(text) {
+  const s = String(text ?? '')
+  if (!s || isUpsetting(s)) return false
+  for (const w of HAPPY_WORDS) {
+    let i = s.indexOf(w)
+    while (i >= 0) {
+      const before = s.slice(Math.max(0, i - 6), i)
+      if (!HAPPY_NEGATION_TAIL.test(before)) return true
+      i = s.indexOf(w, i + 1)
+    }
+  }
+  return false
+}
+
+/** 她回复里的「亲近语气」标记：波浪线、颜文字、emoji */
+const HAPPY_TONE_RE =
+  /[～~]|\p{Extended_Pictographic}|qwq|QwQ|awa|>_<|\^_\^|[（(][^）)]{0,4}[）)]/u
+
+/** 语气词 —— 单个太常见（「好的哦」到处都是），**要两个及以上**才算信号 */
+const HAPPY_PARTICLES = ['呀', '啦', '嘛', '哦', '耶', '嘿', '嘻', '哈', '呜', '哟', '咯', '嘞']
+
+/** 「开心」加成的上限（smoke 拿它锁算法边界） */
+export const HAPPY_BONUS_MAX = 3
+
+/**
+ * 从「她这轮的回复形态」里抽正向信号 —— 零 token 成本，数据现成。
+ *
+ * 三个信号各自独立，各记 1 分（在 `happyBonus` 里）：
+ *
+ *   ① `long`   回复**明显变长**：长度 ≥ 60 且 ≥ 历史平均的 1.6 倍。
+ *              用相对值而不是死阈值 —— 「她平时回一句、这次回了三句」
+ *              才是「被聊开了」，绝对长度在短回复的人设下没意义。
+ *              没有历史（第一轮）时只看绝对长度。
+ *   ② `tone`   撒娇语气：波浪线、颜文字、emoji，或**两个以上**语气词。
+ *   ③ `multi`  这轮**分条发**了（≥ 2 条）—— 有话要说才会拆开发。
+ *
+ * @param {string} reply 她这轮的完整回复
+ * @param {{ avgReplyLen?: number, segments?: number }} [ctx]
+ * @returns {{ long:boolean, tone:boolean, multi:boolean, count:number }}
+ */
+export function happyReplySignals(reply, ctx = {}) {
+  const r = String(reply ?? '')
+  const len = r.length
+
+  const avg = Number(ctx.avgReplyLen) || 0
+  const long = len >= 60 && (avg <= 0 || len >= avg * 1.6)
+
+  let particles = 0
+  for (const p of HAPPY_PARTICLES) {
+    let i = r.indexOf(p)
+    while (i >= 0) {
+      particles++
+      i = r.indexOf(p, i + 1)
+    }
+  }
+  const tone = HAPPY_TONE_RE.test(r) || particles >= 2
+
+  const multi = (Number(ctx.segments) || 1) >= 2
+
+  return { long, tone, multi, count: (long ? 1 : 0) + (tone ? 1 : 0) + (multi ? 1 : 0) }
+}
+
+/**
+ * 她这轮回复的平均长度 —— 给 `happyReplySignals` 的「变长」判据用。
+ *
+ * 只数 assistant 的纯文本（图文消息的 content 是块数组，走 `textOfContent`）。
+ */
+export function averageReplyLength(messages, fallback = 0) {
+  const rows = (Array.isArray(messages) ? messages : [])
+    .filter((m) => m?.role === 'assistant')
+    .map((m) => textOfContent(m?.content).trim().length)
+    .filter((n) => n > 0)
+  if (!rows.length) return fallback
+  return rows.reduce((a, b) => a + b, 0) / rows.length
+}
+
+/**
+ * 这轮聊天该额外给多少亲密度（0 ~ 3）—— 「她开心」的量化。
+ *
+ * ## 算法
+ *
+ *   词表命中（用户说了让她开心的话）        → 2 分
+ *   回复变长 / 撒娇语气 / 分条发，各         → 1 分
+ *   合计**封顶 3 分**，什么都没有则 0 分
+ *
+ * 于是：只说了一句好话 = 2；纯靠她的回复形态最多 = 3；
+ * 好话 + 任一信号 = 3（封顶）。**下限不是 1** —— 平淡的一轮
+ * （她回一句「嗯，好的」）就是 0，否则「开心」这个判定没有意义。
+ *
+ * ## 为什么惹她生气时返回 0
+ *
+ * 与「生气当轮只扣不加」同一条纪律：一轮里既有冒犯又有好话，
+ * 不能靠好话把扣的分抵回来。调用点也必须用同一个 `upsetting`
+ * 挡住（见 smoke 的源码级守卫）。
+ *
+ * @param {{ text?:string, reply?:string, avgReplyLen?:number, segments?:number }} args
+ * @returns {number} 0 ~ `HAPPY_BONUS_MAX`
+ */
+export function happyBonus(args = {}) {
+  const text = String(args.text ?? '')
+  if (!text && !args.reply) return 0
+  if (isUpsetting(text)) return 0
+
+  const sig = happyReplySignals(args.reply, {
+    avgReplyLen: args.avgReplyLen,
+    segments: args.segments,
+  })
+  const score = (isHappy(text) ? 2 : 0) + sig.count
+  return Math.min(HAPPY_BONUS_MAX, score)
+}
+
+/**
+ * 「读时结算」—— 打开面板 / 应用的那一刻，把这段没见面的账结到**昨天**。
+ *
+ * ## 为什么需要它
+ *
+ * `settleAffinity` 只在**有互动**时被调用，所以「连续 30 天不理她」期间
+ * 库里那份点数是**冻结**的：用户打开面板看到的还是离开时的旧值，
+ * 直到他发出第一句话才「啪」地掉到最低档 —— 观感像是**惩罚他回来**。
+ * 读时结算把这一步提前到「打开的那一刻」，回来的第一眼看到的就是真实值。
+ *
+ * ## 只结到昨天（`settleToday: false`）
+ *
+ * **今天还没过完**：它到底是活跃日（-5）还是空白天（-10）此刻并不知道，
+ * 硬结就是猜。所以读时结算只结「已经完整过去的那些天」，今天留着：
+ *
+ *   - 今天真的互动了 → 那次 `addAffinity`（`active` 默认 true）按**活跃日**结
+ *   - 今天什么都没发生 → **明天**的读时结算把它当**空白天**补上
+ *
+ * 这样两条路径才**净扣一样多**（都是 `10N − 5`）：
+ *
+ *   挂 N 天 → 直接聊一句        = (N−1)×10 + 5
+ *   挂 N 天 → 先开面板 → 再聊一句 = (N−1)×10 + 5
+ *
+ * 早先的实现是「连今天一起结」，于是**每天先开一下面板再聊天的人，
+ * 比不开面板的人每天多扣 5 点** —— 看一眼要收费，方向不对：节奏不该
+ * 取决于「有没有先打开面板」这种与关系无关的动作。
+ *
+ * ## 不推进 `lastActive`
+ *
+ * `active: false` —— 打开面板**不是互动**。随后真的聊一句，那次结算
+ * （`active` 默认 true）才是互动日、才会推进它。
+ *
+ * ## 幂等（这条是给热路径用的）
+ *
+ * 没有「截至昨天」的待结算天数时返回 `null`，**调用方据此跳过写库**。
+ * `getState` 每次广播、每次轮询、每个窗口都会被调到，
+ * 无待结算还写库等于让每个窗口每次刷新都打一次磁盘。
+ *
+ * 结算后 `decaySettledDays` 推到**昨天**，所以同一天内再读多少次，
+ * 「截至昨天的 pending」都是 0 → 纯读不写库。**今天不算进来**不会破坏幂等：
+ * 待结的是「整段过去」，而过去确实已经结完了。
+ *
+ * @param {object} affinity 亲密度记录（`readAffinity` 读出来的形状）
+ * @param {string} today 'YYYY-MM-DD'
+ * @returns {object|null} 结算后的完整记录；无需结算时 `null`
+ */
+export function affinityReadSettle(affinity, today) {
+  /*
+   * 判据用**同一个** `affinityDecay`（同一组 opts），不另算一遍 pending ——
+   * 两处算式一旦漂了，就会出现「判定说不用结算、结算函数却扣了」这种静默漏扣。
+   */
+  const opts = { active: false, settleToday: false }
+  if (affinityDecay(affinity, today, opts) <= 0) return null
+  return settleAffinity(affinity, {
+    today,
+    delta: 0,
+    source: AFFINITY_SOURCE.CHAT,
+    ...opts,
+  })
+}
+
 /**
  * 结算一次亲密度变化 —— **两端共用**，保证 PC 和手机的规则完全一致。
  *
  * ## 为什么合成一个函数
  *
- * 一次互动要处理四件事：加、减、每日额度、久未互动的衰减。
- * 两端各写一遍的话，任何一处改规则（比如调整衰减天数）
+ * 一次互动要处理五件事：加、减、该来源的每日额度、每日自然流失、
+ * 无互动惩罚。两端各写一遍的话，任何一处改规则（比如调整流失点数）
  * 都要记得改两处 —— 而漏改的表现是「手机上掉了 3 点、电脑上只掉 1 点」，
  * 用户根本没法理解为什么。
  *
  * ## 结算顺序（有讲究）
  *
- *   ① 先算**久未互动的衰减**（基于上次互动日期）
+ *   ① 先算**每日流失与无互动惩罚**（基于上次互动日期）
  *   ② 再算**本次互动**（加 or 扣）
  *
  * 不能反过来：如果先加、再按「上次互动日期」算衰减，
@@ -366,30 +750,48 @@ export function affinityPenalty(upsetting) {
  *
  * ## 不变量
  *
- *   - 结果夹在 `[0, AFFINITY_MAX_POINTS]`
- *   - `lastActive` 与 `gainDay` 只在**有正向互动**时推进
- *     （纯扣分不该刷新「最近活跃」，否则冷暴力期间永远不会衰减）
+ *   - 结果夹在 `[0, AFFINITY_MAX_POINTS]`（**扣不成负数**）
+ *   - `lastActive` 在「这次结算算互动」时推进到今天。
+ *     注意判据是**有没有互动**，不是「有没有加分」：
+ *     惹她生气那轮、以及额度用尽后继续点她，都仍然算互动 ——
+ *     每日自然流失本来就与互动无关，而 `lastActive` 现在的唯一
+ *     职责就是回答「哪些天是完全没人理她的」（见 `affinityDecay`）。
+ *   - `gainDay` 只在**有加分**时推进（额度计数必须按「有得分的那天」重置）
  *
  * @param {object} affinity 当前记录
  * @param {object} args
  * @param {string} args.today 'YYYY-MM-DD'
  * @param {number} [args.delta] 想加的点
  * @param {boolean} [args.upsetting] 这轮是否惹她生气了
- * @returns {{points:number, gainDay:string, gainToday:number, lastActive:string, decaySettledDays:number, gained:number, lost:number}}
+ * @param {string} [args.source] 得分来源（见 `AFFINITY_SOURCE`）—— 决定吃哪个每日额度
+ * @param {boolean} [args.active] 这次结算本身算不算一次互动（默认算）
+ * @param {boolean} [args.settleToday] 今天要不要一起结（默认结；`false` = 只结到昨天，读时结算用）
+ * @returns {{points:number, gainDay:string, gainToday:number, gainBySource:object, lastActive:string, decaySettledDays:number, dailyDay:string, gained:number, lost:number}}
  */
-export function settleAffinity(affinity = {}, { today, delta = 0, upsetting = false } = {}) {
+export function settleAffinity(
+  affinity = {},
+  {
+    today,
+    delta = 0,
+    upsetting = false,
+    source = AFFINITY_SOURCE.PET,
+    active = true,
+    settleToday = true,
+  } = {},
+) {
   const max = AFFINITY_MAX_POINTS
   const cur = Math.max(0, Math.min(max, Number(affinity.points) || 0))
+  const src = normalizeAffinitySource(source)
 
-  /* ---------- ① 久未互动的衰减 ---------- */
-  const days = affinityDecay(affinity, today)
+  /* ---------- ① 每日自然流失 + 无互动惩罚 ---------- */
   /*
-   * 衰减按「累计待扣天数」结算，并记下已结算到哪一天 ——
-   * 否则同一天里每次互动都会重算一遍、反复扣。
+   * 按「已过去的整天数」结算，并把「结到哪一天」记回去 ——
+   * 同一天里聊三轮也只扣一次（smoke 有断言盯着）。
+   *
+   * `settleToday: false` 时**今天不结**（读时结算专用）：今天还没过完，
+   * 它是活跃日还是空白天此刻不知道，留着等结论 —— 详见 `affinityDecay`。
    */
-  const idleDays = affinity?.lastActive
-    ? Math.max(0, daysBetween(affinity.lastActive, today) - AFFINITY_DECAY.IDLE_DAYS)
-    : 0
+  const days = affinityDecay(affinity, today, { active, settleToday })
   const lost = Math.min(cur, days)
   let points = cur - lost
 
@@ -405,49 +807,69 @@ export function settleAffinity(affinity = {}, { today, delta = 0, upsetting = fa
   points -= upsetLoss
 
   /*
-   * 当日已用额度。
+   * 当日额度**按来源分桶**。
    *
-   * **必须先判断「计数器是不是今天的」**，否则跨天不会重置：
-   * 第 2 天读到的还是第 1 天的 `gainToday: 60`，额度判定为「已用完」，
-   * 于是 `gained` 永远是 0、`gainDay` 永远不推进 —— 卡死在第一天。
-   * （这个 bug 的表现是「每天只能涨第一天的量」，很隐蔽。）
-   *
-   * 旧字段 `chatDay/chatToday` 也要认：升级当天的额度
-   * 不能因为换了字段名而凭空重置一截。
+   * `gainDay` 是这组桶的日期；跨天必须整体重置（否则第 2 天读到的
+   * 还是第 1 天的桶，桌宠额度判定为「已用完」，`gained` 永远是 0）。
+   * 旧记录没有 `gainBySource`，此时 `affinityGain` 一律按「该来源今天
+   * 还没用过」算 —— 不能拿旧的合计 `gainToday` 顶替，那是所有来源的和。
    */
   const sameDay = affinity.gainDay === today
-  const legacySameDay = !sameDay && affinity.chatDay === today
-  const usedToday = sameDay
-    ? Number(affinity.gainToday) || 0
-    : legacySameDay
-      ? Number(affinity.chatToday) || 0
-      : 0
-
-  const gained = upsetting
-    ? 0
-    : affinityGain({ ...affinity, points }, delta, today, { usedToday })
-  points = Math.min(max, points + gained)
+  const buckets = sameDay && affinity.gainBySource && typeof affinity.gainBySource === 'object'
+    ? affinity.gainBySource
+    : {}
 
   /*
-   * 有正向互动才推进「最近活跃」——
-   * 惹她生气那天不算「互动」，否则冷暴力不会触发衰减。
+   * 每日见面**一天只算一次**。
+   *
+   * 桌面端是在桌宠窗挂载时给这一笔，而挂载发生在**每次启动**；
+   * 取消总上限之后，反复重启就能反复 +1。这里用独立的 `dailyDay`
+   * 记账（不能复用 `lastDay`：那个被每一条消息推进，会误伤当天的见面分）。
    */
-  const activeToday = gained > 0
-  const lastActive = activeToday ? today : (affinity.lastActive ?? today)
+  const dailyAlready = src === AFFINITY_SOURCE.DAILY && affinity.dailyDay === today
+
+  const gained = upsetting || dailyAlready
+    ? 0
+    : affinityGain({ ...affinity, points }, delta, today, { source: src })
+  points = Math.min(max, points + gained)
+
+  const gainBySource = gained > 0
+    ? { ...buckets, [src]: Math.max(0, Math.floor(Number(buckets[src]) || 0)) + gained }
+    : { ...buckets }
+  const gainDay = gained > 0 ? today : sameDay ? today : affinity.gainDay
+  const gainToday = gained > 0
+    ? affinityTodayTotal({ gainDay: today, gainBySource }, today)
+    : sameDay
+      ? affinityTodayTotal({ gainDay: today, gainBySource: buckets }, today)
+      : 0
+
+  /*
+   * 互动日推进到今天。`active === false` 是「结算不是互动」，
+   * 那时不动 `lastActive`，并把已结天数推到**这一轮结到的那天**：
+   *   - 默认（`settleToday: true`）结到**今天**
+   *   - `settleToday: false`（读时结算）只结到**昨天** —— 今天留着，
+   *     否则明天的「今天」会算错，或者同一笔账被重复计
+   * 两种情况都是为了下次不再重复扣同一段。
+   */
+  const lastActive = active ? today : (affinity.lastActive ?? today)
+  const settledThrough = Math.max(0, daysBetween(affinity.lastActive ?? today, today) - (settleToday ? 0 : 1))
+  const decaySettledDays = active ? 0 : (affinity.lastActive ? settledThrough : 0)
 
   return {
     points,
     /*
      * 当日额度计数：有加才累计。
-     * 用 `gainDay/gainToday` 而不是沿用旧的 `chatDay/chatToday` ——
+     * 用 `gainDay/gainBySource` 而不是沿用旧的 `chatDay/chatToday` ——
      * 后者的名字带「chat」，现在点击/摸头也计入，叫那个名会误导。
      */
-    gainDay: gained > 0 ? today : (sameDay || legacySameDay ? today : affinity.gainDay),
-    gainToday: gained > 0 ? usedToday + gained : sameDay ? Number(affinity.gainToday) || 0 : 0,
+    gainDay,
+    gainToday,
+    gainBySource,
     lastActive,
-    decaySettledDays: idleDays,
+    decaySettledDays,
+    dailyDay: src === AFFINITY_SOURCE.DAILY ? today : (affinity.dailyDay ?? null),
     gained,
-    /* 扣的总数（衰减 + 惹怒），调用方要用它决定要不要提示用户 */
+    /* 扣的总数（流失 + 无互动惩罚 + 惹怒），调用方要用它决定要不要提示用户 */
     lost: lost + upsetLoss,
   }
 }
@@ -826,7 +1248,7 @@ export const EMOTE_KEYS = [
  * 挂机只轮换固定 4 张，其他基本是废资源。所以先扩充成这 4 张的池子。
  *
  * **这已经不再是「最低档的池子」**：动作不再按亲密度分层，实际用的池子是
- * 下面的 `ALL_IDLE_POSES`（15 张，五档全给）。这里保留成基名列表，
+ * 下面的 `ALL_IDLE_POSES`（15 张，七档全给）。这里保留成基名列表，
  * 只是为了 `ALL_IDLE_POSES` 能接着它写、以及文档留下「最初是哪 4 张」。
  *
  * 注意每张图都得适配「自己待着」的语义：举手、竖大拇指这类
@@ -870,10 +1292,9 @@ export const IDLE_POSES_BY_VOICE = {
   friend: ALL_IDLE_POSES,
   close: ALL_IDLE_POSES,
   intimate: ALL_IDLE_POSES,
+  lover: ALL_IDLE_POSES,
+  soulmate: ALL_IDLE_POSES,
 }
-
-/** 档位顺序 —— 与 `VOICE_BY_LEVEL` / `AFFINITY_LEVELS` 一一对应 */
-const VOICE_ORDER = ['stranger', 'familiar', 'friend', 'close', 'intimate']
 
 /**
  * 某套衣服要到哪一档亲密度才有资格解锁 —— 给 UI 显示「🔒 形影不离后可用」。
@@ -1358,8 +1779,9 @@ const lastChatAction = Object.create(null)
  * 这是「对话提升亲密度」的第二层意思：点数不该只是个数字。
  * 关系变近后如果说话方式还是老样子，数值涨了也没有感觉。
  *
- * 做法上不做「每档一套完整台词池」——那要写五倍台词，写不细就会显得敷衍。
- * 通用池上挂亲近前缀，只有「形影不离」才切专属池。
+ * 做法上不做「每档一套完整台词池」——那要写七倍台词，写不细就会显得敷衍。
+ * 通用池上挂亲近前缀，只有「形影不离」及以上才切专属池。
+ * `idleScale` 必须**随档位单调递减**（越熟越黏人），smoke 有断言盯着。
  */
 export const AFFINITY_VOICE = {
   stranger: { prefix: null, idleScale: 1.15 },
@@ -1380,9 +1802,30 @@ export const AFFINITY_VOICE = {
     idleScale: 0.7,
     extraIdle: ['我一直在的', '今天也想和你多待一会儿', '不用理我，我就看看你'],
   },
+  /*
+   * 恋人（250）：关系从「地下」摆到明面上之后的黏度。
+   * 台词仍然克制 —— 她是大学生，不是言情剧女主，别把挂机气泡写成告白。
+   */
+  lover: {
+    prefix: null,
+    idleScale: 0.65,
+    extraIdle: ['在忙也要记得吃饭', '刚跟室友提到你了，说你肯定很闷', '你今天回来得晚，我等着呢'],
+  },
+  /* 灵魂伴侣（300）：不用找话题的那种自在 */
+  soulmate: {
+    prefix: null,
+    idleScale: 0.6,
+    extraIdle: ['不用说话，我在这儿就好', '你忙你的，我看着你就行', '今天也不用说什么，我知道'],
+  },
 }
 
-/** 最高档（形影不离）专用的亲近回应，替换掉通用池里的客套话 */
+/**
+ * 形影不离（200）专用的亲近回应，替换掉通用池里的客套话。
+ *
+ * 恋人 / 灵魂伴侣**不再共用它** —— 那两档的专属池在
+ * `tierLines.js`（升到恋人之后点她的反应必须跟着变，
+ * 共用一套等于「升级只改了界面上的字」）。
+ */
 export const AFFINITY_LINES = {
   petIntimate: ['嗯…随便你摸', '诶嘿，今天心情好？', '再摸一下也不是不行'],
   pokeIntimate: ['怎么啦，说', '嗯？我在听', '又想偷懒啦'],
@@ -1391,10 +1834,28 @@ export const AFFINITY_LINES = {
 }
 
 /**
+ * 用「最熟档专属池」的档位 —— 形影不离（200）及以上。
+ *
+ * 单独一套池子而不是每档各写一份：这几句本身就是「不再说客套话」的意思，
+ * 任何一档都不该**倒退回**通用池（那种递进会反着来）。
+ */
+const TOP_TIER_VOICES = new Set(['intimate', ...TIER_LINE_VOICES])
+
+/** 场景 key → `AFFINITY_LINES` 的字段名（形影不离那套） */
+const INTIMATE_KEYS = {
+  pet: 'petIntimate',
+  poke: 'pokeIntimate',
+  doubleTap: 'doubleTapIntimate',
+}
+
+/**
  * 按关系档位取台词池。
  *
  * 前缀只加句首，不动原句 —— 维护台词时不用每档抄一遍。
  * 语气词开头的句子不加前缀（「诶嘿…」→「诶，诶嘿…」很怪）。
+ *
+ * 档位优先级：**本档专属池**（恋人 / 灵魂伴侣，见 tierLines.js）
+ * → 形影不离专属池 → 通用池。
  */
 export function linesFor(key, voice = 'stranger') {
   const base = LINES[key]
@@ -1402,10 +1863,17 @@ export function linesFor(key, voice = 'stranger') {
   const v = AFFINITY_VOICE[voice]
   if (!v) return base
 
-  if (voice === 'intimate') {
-    const intimate = { pet: AFFINITY_LINES.petIntimate, poke: AFFINITY_LINES.pokeIntimate, doubleTap: AFFINITY_LINES.doubleTapIntimate }[key]
-    if (intimate) return intimate
-    if (key === 'idle') return [...base, ...(v.extraIdle ?? [])]
+  /* 挂机台词各档自己加料，不走专属池 */
+  if (key === 'idle') {
+    return TOP_TIER_VOICES.has(voice) ? [...base, ...(v.extraIdle ?? [])] : base
+  }
+
+  const own = tierLinesFor(voice, key)
+  if (own) return own
+
+  if (TOP_TIER_VOICES.has(voice)) {
+    const top = INTIMATE_KEYS[key] ? AFFINITY_LINES[INTIMATE_KEYS[key]] : null
+    if (top) return top
     return base
   }
 
@@ -1413,9 +1881,11 @@ export function linesFor(key, voice = 'stranger') {
   return base.map((line) => (/^[诶啊哦嗯咦哈嘿]|…$/.test(line) ? line : `${v.prefix}${line}`))
 }
 
-/** 悬停搭话专用池：最熟之后换成更主动的问句 */
+/** 悬停搭话专用池：越熟越主动，两档最熟的各有各的说法 */
 export function hoverLinesFor(voice) {
-  return voice === 'intimate' ? AFFINITY_LINES.hoverIntimate : LINES.poke
+  const own = tierLinesFor(voice, 'hover')
+  if (own) return own
+  return TOP_TIER_VOICES.has(voice) ? AFFINITY_LINES.hoverIntimate : LINES.poke
 }
 
 /**

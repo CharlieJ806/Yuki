@@ -14,6 +14,8 @@ import {
   todaySnapshot,
   toDateKey,
 } from '@shared/moyu.js'
+/* 上限只从 shared 读 —— 预览用的 mock 也不许另写一个数字 */
+import { AFFINITY_MAX_POINTS, PET_AFFINITY_DAILY_CAP } from '@shared/interactions.js'
 
 const store = reactive({
   ready: false,
@@ -38,8 +40,12 @@ const store = reactive({
   backend: 'mock',
   lastError: null,
   personas: [],
-  /* 亲密度：{ points, lastDay, streakDays, gainToday, max, isMax, sessionId } */
-  affinity: { points: 0, lastDay: null, streakDays: 0, gainToday: 0, max: 0, isMax: false },
+  /*
+   * 亲密度：{ points, lastDay, streakDays, gainToday, petToday, petCap, max, isMax, sessionId }
+   * `gainToday` 是**今天一共涨了多少**（只用于展示，聊天不限量）；
+   * `petToday/petCap` 才是唯一还有的那个每日额度（桌宠互动）。
+   */
+  affinity: { points: 0, lastDay: null, streakDays: 0, gainToday: 0, petToday: 0, petCap: 0, max: 0, isMax: false },
   /*
    * 未读数：她说的、我还没看过的条数（由 getState 下发）。
    * 桌宠据此显示红点；对话窗获得焦点时调 markChatRead() 清零。
@@ -183,9 +189,9 @@ function createMockBackend() {
     personaDuplicate: async () => ({ id: 'mock-p2', label: '副本', prompt: '', custom: true }),
     personaUpdate: async (id, patch) => ({ id, ...patch, custom: true }),
     personaDelete: async () => ({ ok: true }),
-    affinityGet: async () => ({ points: 0, lastDay: null, streakDays: 0, gainToday: 0, max: 300, isMax: false }),
-    affinityAdd: async (d) => ({ points: d ?? 0, lastDay: null, streakDays: 0, gainToday: 0, max: 300, isMax: false }),
-    affinityReset: async () => ({ points: 0, lastDay: null, streakDays: 0, gainToday: 0, max: 300, isMax: false }),
+    affinityGet: async () => ({ points: 0, lastDay: null, streakDays: 0, gainToday: 0, petToday: 0, petCap: PET_AFFINITY_DAILY_CAP, max: AFFINITY_MAX_POINTS, isMax: false }),
+    affinityAdd: async (d) => ({ points: d ?? 0, lastDay: null, streakDays: 0, gainToday: d ?? 0, petToday: d ?? 0, petCap: PET_AFFINITY_DAILY_CAP, max: AFFINITY_MAX_POINTS, isMax: false }),
+    affinityReset: async () => ({ points: 0, lastDay: null, streakDays: 0, gainToday: 0, petToday: 0, petCap: PET_AFFINITY_DAILY_CAP, max: AFFINITY_MAX_POINTS, isMax: false }),
     /* 预览模式本来就没有真数据，清空即重置内存态 */
     wipeAllData: async () => {
       settings = { ...DEFAULT_SETTINGS }

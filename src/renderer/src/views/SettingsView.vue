@@ -27,7 +27,9 @@ import { DEFAULT_SETTINGS, formatDuration, formatHours } from '@shared/moyu.js'
 import {
   affinityView,
   AFFINITY_GAIN,
-  CHAT_AFFINITY_DAILY_CAP,
+  AFFINITY_DECAY,
+  AFFINITY_MAX_POINTS,
+  PET_AFFINITY_DAILY_CAP,
   OUTFITS,
   rotationCandidatesFor,
   resolveRotationPool,
@@ -151,9 +153,15 @@ const affinityMsg = ref('')
 
 /**
  * 得分规则在设置页摊开写清楚 —— 之前只说「互动会累积亲密度」，
- * 用户根本不知道聊天也算、也不知道每天有限额。
+ * 用户根本不知道聊天也算、也不知道哪些来源有每日额度。
+ *
+ * 现在额度**只挂在桌宠交互上**（`petDailyCap`），所以文案里
+ * 不能再出现「每日上限 N 点」这种不指明来源的说法。
  */
-const affinityGain = computed(() => ({ ...AFFINITY_GAIN, chatDailyCap: CHAT_AFFINITY_DAILY_CAP }))
+const affinityGain = computed(() => ({ ...AFFINITY_GAIN, petDailyCap: PET_AFFINITY_DAILY_CAP }))
+
+/** 每日流失 / 空白天惩罚 —— 文案要能说清「为什么掉了」 */
+const affinityDecay = AFFINITY_DECAY
 
 async function onResetAffinity() {
   if (!confirm('重置亲密度？累计点数与连续天数都会清零，互动记录不影响其他数据。')) return
@@ -789,14 +797,22 @@ const syncStatus = computed(() => ({
             <span>互动会累积亲密度，右键菜单可查看</span>
           </label>
           <span class="hint">
-            当前 {{ state.affinity?.points ?? 0 }} / {{ state.affinity?.max ?? 300 }} 点 ·
+            当前 {{ state.affinity?.points ?? 0 }} / {{ state.affinity?.max ?? AFFINITY_MAX_POINTS }} 点 ·
             {{ affinityName }} · 连续 {{ state.affinity?.streakDays ?? 0 }} 天
           </span>
           <span class="hint">
-            聊天一条 +{{ affinityGain.chatMessage }}、聊完一轮 +{{ affinityGain.chatRound }}（每日上限
-            {{ affinityGain.chatDailyCap }} 点）；摸头 +{{ affinityGain.pet }}、双击 +{{ affinityGain.double }}、
-            每天见面 +{{ affinityGain.daily }}。
+            聊天一条 +{{ affinityGain.chatMessage }}、聊完一轮 +{{ affinityGain.chatRound }}，
+            聊得让她开心再 +1~3（<strong>聊天不限量</strong>）；
+            摸头 +{{ affinityGain.pet }}、双击 +{{ affinityGain.double }}（桌宠互动合计每日
+            {{ affinityGain.petDailyCap }} 点封顶）、每天见面 +{{ affinityGain.daily }}、
+            解锁新照片 +{{ affinityGain.photoUnlock }}。
             关系越近，Yuki 说话越黏、主动搭话越频繁，聊天窗标题栏会实时显示进度。
+          </span>
+          <span class="hint">
+            每天自然流失 {{ affinityDecay.DAILY_DRAIN }} 点（跟聊没聊无关）；
+            一整天完全没互动再额外扣 {{ affinityDecay.IDLE_PENALTY }} 点；
+            说重话惹她生气当轮扣 {{ affinityDecay.UPSET }} 点且不加分。
+            掉档只会让说话变冷，<strong>已经解锁的照片和衣服不会收回</strong>。
           </span>
           <button class="btn" :disabled="affinityBusy" @click="onResetAffinity">
             {{ affinityBusy ? '重置中…' : '重置亲密度' }}

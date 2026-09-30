@@ -12,13 +12,14 @@ import { createService, REPLY_SEGMENT_GAP_MS } from '../src/main/service.js'
 import { openStore } from '../src/main/store.js'
 import { toDateKey, isRestDay, levelOf, todaySnapshot, workDaysInMonth, timeContextFor, dayPartOf } from '../src/shared/moyu.js'
 import { isCacheFresh } from '../src/main/holiday.js'
-import { OUTFIT_STORIES, conditionUnlocks, OUTFIT_MIN_POINTS, outfitMinPoints } from '../src/shared/outfitStories.js'
-import { PHOTO_SLUGS, photoFiles } from '../src/shared/photoStories.js'
+import { OUTFIT_STORIES, conditionUnlocks, keywordCandidates, OUTFIT_MIN_POINTS, outfitMinPoints } from '../src/shared/outfitStories.js'
+import { PHOTO_SLUGS, PHOTO_MIN_POINTS, photoFiles } from '../src/shared/photoStories.js'
 import { GALLERY_KINDS, GALLERY_KEYS } from '../src/shared/gallery.js'
 import { pickChatBackground, rotateIntervalMs } from '../src/shared/chatBackground.js'
 import {
   tapLineCount,
   tapTier,
+  TAP_TIERS,
   TAP_LINES,
   pickFromBag,
   resetBags,
@@ -43,16 +44,28 @@ import {
   pickLine,
   affinityLevel,
   affinityGain,
+  affinityReadSettle,
+  affinityTodayTotal,
+  affinityUsedToday,
   AFFINITY_GAIN,
   AFFINITY_MAX_POINTS,
   AFFINITY_LEVELS,
-  AFFINITY_DAILY_CAP,
+  AFFINITY_SOURCE,
+  AFFINITY_DAILY_CAP_BY_SOURCE,
+  PET_AFFINITY_DAILY_CAP,
+  sourceOfGain,
   AFFINITY_DECAY,
   affinityDecay,
+  averageReplyLength,
+  happyBonus,
+  happyReplySignals,
+  isHappy,
+  HAPPY_BONUS_MAX,
   settleAffinity,
   isUpsetting,
   linesFor,
   hoverLinesFor,
+  AFFINITY_LINES,
   idleIntervalScale,
   idlePosesFor,
   idleCandidatesFor,
@@ -93,6 +106,7 @@ import {
   sanitizeChatter,
   recentDialogueMessages,
 } from '../src/shared/interactions.js'
+import { TIER_LINES, TIER_LINE_VOICES, tierLinesFor } from '../src/shared/tierLines.js'
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..')
 const ROOT_PUBLIC = join(ROOT, 'src', 'renderer', 'public')
@@ -496,10 +510,46 @@ try {
 
     /* 亲密度等级 */
     check('0 点等级', affinityLevel(0).level.name, '有点眼熟')
-    check('10 点升级', affinityLevel(10).level.name, '熟络起来了')
+    check('40 点升级', affinityLevel(40).level.name, '熟络起来了')
     check('满级判定', affinityLevel(99999).isMax, true)
-    check('距下一级计算', affinityLevel(0).toNext, 10)
+    check('距下一级计算', affinityLevel(0).toNext, AFFINITY_LEVELS[1].min)
     check('负值归零', affinityLevel(-5).points ?? affinityLevel(-5).level.min, 0)
+
+    /*
+     * 档位边界**逐点**核对 —— 每一档的门槛值必须刚好进那一档，
+     * 门槛减 1 必须还留在上一档。
+     *
+     * 这是「扩档只改一处」的守门人：阈值漂了、档位名重了、
+     * 或者中间插了一档却没接上，都会在这里当场红。
+     * 报错文本里带上档位名，是为了让人一眼看出错的是哪一档。
+     */
+    const boundaryErrors = []
+    for (let i = 0; i < AFFINITY_LEVELS.length; i++) {
+      const l = AFFINITY_LEVELS[i]
+      const at = affinityLevel(l.min)
+      if (at.index !== i || at.level.name !== l.name) {
+        boundaryErrors.push(`${l.min} 应进「${l.name}」，实际「${at.level.name}」(index ${at.index})`)
+      }
+      if (i > 0 && affinityLevel(l.min - 1).level.name !== AFFINITY_LEVELS[i - 1].name) {
+        boundaryErrors.push(`${l.min - 1} 应留在「${AFFINITY_LEVELS[i - 1].name}」`)
+      }
+    }
+    check('档位边界逐点正确', boundaryErrors, [])
+
+    /* 阈值严格递增且不重复 —— 重档会让进度条拿 0 做除数（NaN%） */
+    const mins = AFFINITY_LEVELS.map((l) => l.min)
+    check('档位阈值严格递增', mins.every((m, i) => i === 0 || m > mins[i - 1]), true)
+    check('档位名不重复', new Set(AFFINITY_LEVELS.map((l) => l.name)).size, AFFINITY_LEVELS.length)
+    /* 最高档的阈值 = 上限（AFFINITY_MAX_POINTS 是从表尾推导的，漂了就说明有人另写了数字） */
+    check('上限 = 最后一档的门槛', AFFINITY_LEVELS[AFFINITY_LEVELS.length - 1].min, AFFINITY_MAX_POINTS)
+    /* 每一档都必须有 voice：VOICE_BY_LEVEL 漏一个就会取到 undefined */
+    check('每档都配了 voice', AFFINITY_LEVELS.some((l) => !affinityLevel(l.min).voice), false)
+
+    /* 扩档新增的两档是**剧情节点**，名字与阈值单独钉一下 */
+    check('第六档 = 恋人 @250', [AFFINITY_LEVELS[5].min, AFFINITY_LEVELS[5].name], [250, '恋人'])
+    check('第七档 = 灵魂伴侣 @300', [AFFINITY_LEVELS[6].min, AFFINITY_LEVELS[6].name], [300, '灵魂伴侣'])
+    check('恋人档 voice', affinityLevel(250).voice, 'lover')
+    check('灵魂伴侣档 voice', affinityLevel(300).voice, 'soulmate')
 
     /* 情境台词优先级 */
     const snap = { restDay: false, workStart: '09:00', workEnd: '18:00' }
@@ -528,7 +578,11 @@ try {
 
     /* ---------- 挂机姿态：不再分档，一开始就全给 ---------- */
     {
-      const voices = ['stranger', 'familiar', 'friend', 'close', 'intimate']
+      /*
+       * 档位列表**从 AFFINITY_LEVELS 派生**，不手抄 —— 手抄的列表在扩档时
+       * 会静默漏测新档（新档没池子、或者没图都测不出来）。
+       */
+      const voices = AFFINITY_LEVELS.map((l) => affinityLevel(l.min).voice)
       /*
        * 用户要求「动作初始全都可用」。
        *
@@ -1204,6 +1258,8 @@ try {
       })
       check('惹她生气当次是净负', afterMsg.points < base.points, true)
       check('扣的量正好是 UPSET', base.points - afterMsg.points, AFFINITY_DECAY.UPSET)
+      /* 更直接的守卫：生气那轮**一分都不加**（只比净负的话，加 1 分也能蒙混过去） */
+      check('生气那轮一点加分都没有', afterMsg.gained, 0)
 
       /* 同一轮若再补一笔 chatRound，就会把扣的分加回来 —— 这就是那个 bug 的形态 */
       const wrong = settleAffinity(afterMsg, { today: '2026-09-24', delta: AFFINITY_GAIN.chatRound })
@@ -1287,6 +1343,49 @@ try {
         .map(([slug]) => slug)
         .filter((slug) => !(slug in OUTFIT_MIN_POINTS))
       check('condition 类的门槛都能查到', condMissing, [])
+
+      /*
+       * 门槛值必须**正好落在某一档的门槛上**。
+       *
+       * 这是「UI 档位名不能骗人」的根因防线：`outfitUnlockTierName` 取的是
+       * 「第一个 `min >= 门槛` 的档位」，门槛卡在两档之间时名字会指向上面那一档，
+       * 于是界面写「默契搭档」、真实解锁却要更少的点（或反过来）。
+       * 历史坑：档位 5 → 7 档时 120 落进「好朋友（100）」区间，
+       * 名字却算成「默契搭档（150）」—— 全表只有这一个值，肉眼极难发现。
+       *
+       * 服饰与生活照两张表一起查：它们各自独立，漏一张就会漏一类错位。
+       */
+      const levelMins = new Set(AFFINITY_LEVELS.map((l) => l.min))
+      const offGrid = [
+        ...Object.entries(OUTFIT_MIN_POINTS).map(([slug, n]) => [`outfit:${slug}`, n]),
+        ...Object.entries(PHOTO_MIN_POINTS).map(([slug, n]) => [`photo:${slug}`, n]),
+      ]
+        .filter(([, n]) => !levelMins.has(n))
+        .map(([k, n]) => `${k}=${n}`)
+      check('门槛值都落在档位边界上', offGrid, [])
+
+      /*
+       * **每一档都要有东西解锁**。
+       *
+       * 扩到 7 档时 24 套衣服挤在 0 / 40 / 150 / 300 四档上，
+       * 中间三档（100 / 200 / 250）升上去一件新衣服都没有 ——
+       * 「升级」只剩进度条在动，收集的节奏感完全断了。
+       * 生活照同理。两张表都要按档位铺满，这条断言是那个设计的守门人。
+       *
+       * 铺满要按**全部 slug** 算（两表都是「没列出来的 = 0」），
+       * 只数表里的键会把 0 档漏掉。
+       */
+      const tierCoverage = (slugs, need) => {
+        const names = new Set(slugs.map((s) => need(s)))
+        return AFFINITY_LEVELS.map((l) => l.min).filter((m) => !names.has(m))
+      }
+      const outfitCoverage = tierCoverage(OUTFIT_SLUGS, (s) => OUTFIT_MIN_POINTS[s] ?? 0)
+      check('每档都有服饰解锁', outfitCoverage, [])
+      check('服饰门槛表覆盖全部套装', Object.keys(OUTFIT_MIN_POINTS).length, OUTFIT_SLUGS.length)
+      check('套装总数仍是 24 套', OUTFIT_SLUGS.length, 24)
+      const photoCoverage = tierCoverage(PHOTO_SLUGS, (s) => PHOTO_MIN_POINTS[s] ?? 0)
+      check('每档都有生活照解锁', photoCoverage, [])
+      check('生活照总数仍是 23 组', PHOTO_SLUGS.length, 23)
     }
 
     /* ---------- 未读：她说了但我还没看 ---------- */
@@ -1508,7 +1607,8 @@ try {
        * 满级池从 19 项掉到 12 项，最低档只剩 2 项，
        * 「每个都会用到」直接不成立。现在改成加权，不再排除。
        */
-      const voices = ['stranger', 'familiar', 'friend', 'close', 'intimate']
+      /* 档位列表从 AFFINITY_LEVELS 派生（理由见「挂机姿态」那节） */
+      const voices = AFFINITY_LEVELS.map((l) => affinityLevel(l.min).voice)
 
       /* 加权池必须包含原池的每一项（不丢项） */
       let noLoss = true
@@ -1699,7 +1799,8 @@ try {
        * 服饰那一侧两边都是空集，「候选 ⊆ 池」就退化成「全集 ⊆ 全集」的恒真式，
        * 标题里的「已解锁池／全部服饰」一格都没测到。
        */
-      for (const v of ['stranger', 'familiar', 'friend', 'close', 'intimate']) {
+      /* 档位列表从 AFFINITY_LEVELS 派生（理由见「挂机姿态」那节） */
+      for (const v of AFFINITY_LEVELS.map((l) => affinityLevel(l.min).voice)) {
         const pool = idleCandidatesFor(v, OUTFIT_SLUGS)
         const cands = rotationCandidatesFor(v, OUTFIT_SLUGS)
         if (cands.some((c) => !pool.includes(c.key))) rotationCandidatesOk = false
@@ -1723,7 +1824,7 @@ try {
       check('关闭时不带 godMode 标记', plain.godMode, false)
 
       const god = affinityView(0, true)
-      check('上帝模式：0 点也到满档', god.voice, 'intimate')
+      check('上帝模式：0 点也到满档', god.voice, affinityLevel(AFFINITY_MAX_POINTS).voice)
       check('上帝模式：显示为上帝模式', god.level.name, '上帝模式')
       check('上帝模式：进度满', god.progress, 100)
       check('上帝模式：标记为 true', god.godMode, true)
@@ -1733,7 +1834,7 @@ try {
        * 上帝模式覆盖 voice —— 但**服饰不再由档位决定**，所以这里只断言
        * 动作那一侧（动作本来就不分档了，这里验证 voice 确实被顶到满档）。
        */
-      check('上帝模式：voice 顶到最高档', god.voice, 'intimate')
+      check('上帝模式：voice 顶到最高档', god.voice, affinityLevel(AFFINITY_MAX_POINTS).voice)
       check('对照：0 点真实档位是最低档', affinityLevel(0).voice, 'stranger')
       /* 缺省参数不能当成开启 */
       check('缺省 godMode 为关闭', affinityView(300).godMode, false)
@@ -1797,6 +1898,86 @@ try {
       check('未登记的 slug 按门槛 0 落在最低档', outfitUnlockTierName('nope'), AFFINITY_LEVELS[0].name)
       /* 档位名必须真的是某一档 —— 不能返回内部 voice 标识 */
       check('返回的是档位名不是 voice 标识', AFFINITY_LEVELS.some((l) => l.name === outfitUnlockTierName('swimsuit')), true)
+    }
+
+    /* ---------- 掉档不收回已解锁内容 ---------- */
+    {
+      /*
+       * 用户明确要求：**档位会掉、语气会冷，但解锁过的东西永久保留**。
+       *
+       * 这条在「每日自然流失」上线后变得更关键 —— 以前只有长期不理才会
+       * 掉档，现在**每一天都在掉**，档位会频繁上下穿档。如果图鉴的
+       * 「已解锁」是靠「当前点数 ≥ 门槛」实时算的，那么掉档当天
+       * 用户会发现刚收到的照片又变回锁的（甚至衣服也穿不回去）。
+       *
+       * 设计上它是天然满足的：`unlocked` 是**独立存库的清单**，
+       * `OUTFIT_MIN_POINTS` / `PHOTO_MIN_POINTS` 只回答「够不够格去触发」。
+       * 但「天然满足」不是「验证过」—— 这条断言就是那次验证。
+       */
+      const dDir = mkdtempSync(join(tmpdir(), 'desk-decay-gallery-'))
+      const dStore = openStore(join(dDir, 'd.db'))
+      const dSvc = createService(dStore)
+      const dSid = (await dSvc.ensureChatSession()).id
+
+      /* 先攒到满级，再把两套最高门槛的服饰与一组最高门槛的生活照标成已解锁 */
+      /*
+       * 日期**锚在真实今天**：读路径现在带「读时结算」，用真实今天再读一次
+       * 会把这之后的日子也结掉 —— 写死的过去日期会让「先攒到满级」当场变红。
+       */
+      const anchor = new Date()
+      anchor.setHours(10, 0, 0, 0)
+      await dSvc.addAffinity(AFFINITY_MAX_POINTS, { kind: 'chat' }, dSid, anchor)
+      check('掉档测试：先攒到满级', (await dSvc.sessionAffinity(dSid)).points, AFFINITY_MAX_POINTS)
+      await dStore.setMeta(`unlockedOutfits:${dSid}`, [DEFAULT_OUTFIT, 'pajamas-black', 'swimsuit'])
+      await dStore.setMeta(`triggeredPhotos:${dSid}`, ['g08'])
+      /* 解锁时的记忆（她说的那句话）也要一起就位，掉档后同样不该被抹掉 */
+      await dStore.setMeta(`photoMemories:${dSid}`, { g08: { at: 1758000000000, line: '刚洗完澡', title: '刚洗完澡' } })
+
+      const before = await dSvc.gallery(dSid)
+      check('掉档测试：解锁清单已就位', before.outfit.unlocked.includes('pajamas-black'), true)
+
+      /* 60 天不理她 → 按 DAILY_DRAIN + IDLE_PENALTY 早就扣穿，点数归零 */
+      const later = new Date(anchor)
+      later.setDate(later.getDate() + 60)
+      await dSvc.addAffinity(0, { kind: 'chat' }, dSid, later)
+      const dropped = await dSvc.sessionAffinity(dSid)
+      check('掉档测试：点数扣到 0（不为负）', dropped.points, 0)
+      check('掉档测试：档位掉回最低档', affinityLevel(dropped.points).level.name, AFFINITY_LEVELS[0].name)
+
+      const after = await dSvc.gallery(dSid)
+      check('掉档不收回服饰', after.outfit.unlocked, [DEFAULT_OUTFIT, 'pajamas-black', 'swimsuit'])
+      check('掉档不收回生活照', after.photo.unlocked, ['g08'])
+      check(
+        '掉档后图鉴仍标记为已获得',
+        after.outfit.items.filter((it) => it.got).map((it) => it.slug),
+        [DEFAULT_OUTFIT, 'pajamas-black', 'swimsuit'],
+      )
+      /* 记忆（她当时说的那句话）也不能被掉档抹掉 */
+      check('掉档后解锁记忆仍在', after.photo.items.find((it) => it.slug === 'g08')?.at != null, true)
+
+      /*
+       * 「能不能穿」只看已解锁清单，**完全不看当前档位** ——
+       * 最低档 + 已解锁泳装 = 穿得上（这正是「掉档不收回」的落点）。
+       * 反过来，最高档 + 空清单 = 一套都没有（没解锁就是没解锁）。
+       */
+      check('最低档也能穿已解锁的泳装', idleCandidatesFor('stranger', ['swimsuit']).includes('outfit:swimsuit'), true)
+      check('最高档没解锁也穿不了', idleCandidatesFor('soulmate', []).some((c) => c.startsWith('outfit:')), false)
+
+      /*
+       * 但门槛仍然管**新解锁**：0 点时那套泳装进不了「够格触发」的候选
+       * （否则掉档之后随便聊一句又能白拿一次）。
+       */
+      check(
+        '掉档后高门槛内容不再进触发候选',
+        keywordCandidates('想看你泳装', [], 0).includes('swimsuit'),
+        false,
+      )
+      check(
+        '门槛够了才进触发候选',
+        keywordCandidates('想看你泳装', [], OUTFIT_MIN_POINTS.swimsuit).includes('swimsuit'),
+        true,
+      )
+      await dSvc.close()
     }
 
     /* ---------- 清空全部数据 ---------- */
@@ -2441,12 +2622,21 @@ try {
       const allTap = tiers.flatMap((t) => TAP_LINES[t])
       check('单击台词无重复', allTap.length - new Set(allTap).size, 0)
 
-      /* 档次边界：40 / 120 与 AFFINITY_LEVELS 的「好朋友」「默契搭档」对齐 */
+      /* 档次边界：40 / 150 与 AFFINITY_LEVELS 的「熟络起来了」「默契搭档」对齐 */
       check('亲密度 0 是冷档', tapTier(0), 'cold')
       check('亲密度 39 还是冷档', tapTier(39), 'cold')
       check('亲密度 40 进熟档', tapTier(40), 'warm')
-      check('亲密度 119 还是熟档', tapTier(119), 'warm')
-      check('亲密度 120 进热档', tapTier(120), 'hot')
+      check('亲密度 149 还是熟档', tapTier(149), 'warm')
+      check('亲密度 150 进热档', tapTier(150), 'hot')
+      /*
+       * 边界必须**正好**是某一档的门槛 —— 落在两档之间的话，点击手感
+       * 会和界面上写的档位对不上（与服饰门槛同一条纪律）。
+       */
+      check(
+        '点击档次边界都落在档位门槛上',
+        [TAP_TIERS.COLD, TAP_TIERS.WARM].every((n) => AFFINITY_LEVELS.some((l) => l.min === n)),
+        true,
+      )
 
       /*
        * 洗牌袋：**一轮之内绝不重复**。
@@ -2636,7 +2826,7 @@ try {
 
     /* ---------- 亲密度：关系档位影响说话方式 ---------- */
     check('等级带关系档位', affinityLevel(0).voice, 'stranger')
-    check('高档位 voice 正确', affinityLevel(300).voice, 'intimate')
+    check('最高档 voice 正确', affinityLevel(AFFINITY_MAX_POINTS).voice, 'soulmate')
     check('满级 upper bound', affinityLevel(AFFINITY_MAX_POINTS).isMax, true)
 
     /*
@@ -2655,55 +2845,327 @@ try {
     check('语气词句跳过前缀（pet）', familiarPet.includes('诶嘿…'), true)
     check('最熟档切专属池', linesFor('pet', 'intimate'), ['嗯…随便你摸', '诶嘿，今天心情好？', '再摸一下也不是不行'])
     check('最熟档挂机台词变多', linesFor('idle', 'intimate').length > linesFor('idle', 'stranger').length, true)
+    /*
+     * 恋人 / 灵魂伴侣各有**自己的**点击台词池，不再共用「形影不离」那套。
+     *
+     * 这是用户明确要求补的一处：升到恋人却听到和上一档一模一样的反应，
+     * 等于「升级只改了界面上的字」。三件事都要钉：
+     *   ① 两档都真的有专属池（不是回落到 intimate / 通用池）
+     *   ② 三档（intimate / lover / soulmate）两两不同
+     *   ③ 条数与 intimate 对齐，且每个场景都配齐了
+     *      （漏一个场景就会静默回落，表现是「点她偶尔变回上一档的语气」）
+     */
+    const topVoices = ['intimate', ...TIER_LINE_VOICES, 'stranger']
+    check('两档专属台词都登记了', TIER_LINE_VOICES, ['lover', 'soulmate'])
+    const tierKeys = ['pet', 'poke', 'doubleTap']
+    /* 「形影不离」那套是条数基准（用户要求新两档与现有各档对齐） */
+    const intimateRef = {
+      pet: AFFINITY_LINES.petIntimate,
+      poke: AFFINITY_LINES.pokeIntimate,
+      doubleTap: AFFINITY_LINES.doubleTapIntimate,
+    }
+    const tierMissing = []
+    for (const v of TIER_LINE_VOICES) {
+      for (const k of tierKeys) {
+        const own = tierLinesFor(v, k)
+        if (!own) tierMissing.push(`${v}.${k}`)
+        else if (own.length !== intimateRef[k].length) {
+          tierMissing.push(`${v}.${k} 条数 ${own.length} ≠ ${intimateRef[k].length}`)
+        }
+      }
+      const hover = tierLinesFor(v, 'hover')
+      if (!hover) tierMissing.push(`${v}.hover`)
+      else if (hover.length !== AFFINITY_LINES.hoverIntimate.length) {
+        tierMissing.push(`${v}.hover 条数 ${hover.length} ≠ ${AFFINITY_LINES.hoverIntimate.length}`)
+      }
+    }
+    check('两档每个场景都有专属台词且条数对齐', tierMissing, [])
+    /* 专属池必须真的生效（linesFor / hoverLinesFor 都接线了） */
+    check('恋人摸头走自己的池子', linesFor('pet', 'lover'), TIER_LINES.lover.pet)
+    check('灵魂伴侣摸头走自己的池子', linesFor('pet', 'soulmate'), TIER_LINES.soulmate.pet)
+    check('恋人悬停走自己的池子', hoverLinesFor('lover'), TIER_LINES.lover.hover)
+    check('灵魂伴侣悬停走自己的池子', hoverLinesFor('soulmate'), TIER_LINES.soulmate.hover)
+    /* 三档两两不同：任何一档偷懒抄隔壁的都会被这条抓住 */
+    const distinctPools = new Set(
+      ['intimate', ...TIER_LINE_VOICES].map((v) =>
+        [...tierKeys.map((k) => linesFor(k, v).join('|')), hoverLinesFor(v).join('|')].join('/'),
+      ),
+    )
+    check('三档最熟台词两两不同', distinctPools.size, 1 + TIER_LINE_VOICES.length)
+    /* 台词不能跟上一档重样 —— 同一个场景里撞句就是没写 */
+    const dupLines = []
+    for (const v of TIER_LINE_VOICES) {
+      for (const k of [...tierKeys, 'hover']) {
+        const mine = k === 'hover' ? hoverLinesFor(v) : linesFor(k, v)
+        const upper = k === 'hover' ? hoverLinesFor('intimate') : linesFor(k, 'intimate')
+        for (const l of mine) if (upper.includes(l)) dupLines.push(`${v}.${k}: ${l}`)
+      }
+    }
+    check('专属台词与上一档不重样', dupLines, [])
+    /* 两档自己的挂机台词也各不相同 */
+    check(
+      '新两档的挂机台词各不相同',
+      new Set(topVoices.map((v) => linesFor('idle', v).join('|'))).size,
+      topVoices.length,
+    )
     check('未知档位回落通用池', linesFor('poke', 'nope').length, strangerPoke.length)
     check('未知 key 返回空', linesFor('nope', 'intimate'), [])
     check('悬停台词随档位切换', hoverLinesFor('intimate')[0], '忙完啦？')
     check('悬停台词默认用通用池', hoverLinesFor('stranger').length > 0, true)
-    /* 越熟越黏人：倍率必须单调下降 */
-    const scales = ['stranger', 'familiar', 'friend', 'close', 'intimate'].map(idleIntervalScale)
+    /*
+     * 越熟越黏人：倍率必须单调下降。
+     *
+     * 档位列表从 AFFINITY_LEVELS 派生 —— 手抄五档的话，新加的档位
+     * 就算 `idleScale` 漏配（回落成 1）也不会被测到，
+     * 而表现正是「关系更近了，她反而更少说话」。
+     */
+    const scales = AFFINITY_LEVELS.map((l) => idleIntervalScale(affinityLevel(l.min).voice))
     check('主动说话频率随亲密度递增', scales.every((s, i) => i === 0 || s < scales[i - 1]), true)
     check('未知档位倍率为 1', idleIntervalScale('nope'), 1)
 
-    /* ---------- 亲密度：得分规则（上限 + 每日总额度） ---------- */
+    /* ---------- 亲密度：得分规则（来源分桶的每日额度） ---------- */
     check('满级后不再涨点', affinityGain({ points: AFFINITY_MAX_POINTS }, 5, '2026-09-21'), 0)
     check('接近上限时被截断', affinityGain({ points: AFFINITY_MAX_POINTS - 2 }, 5, '2026-09-21'), 2)
     check('正常加点', affinityGain({ points: 0 }, AFFINITY_GAIN.pet, '2026-09-21'), AFFINITY_GAIN.pet)
     check('零和负数不加点', affinityGain({ points: 0 }, 0, '2026-09-21'), 0)
 
     /*
-     * 每日额度：**所有来源合计**封顶（原来是「只封聊天」）。
+     * 每日额度**只对桌宠交互生效**（用户要求取消全来源总上限）。
      *
-     * 改的原因：只封聊天时，一直点立绘能无限涨 ——
-     * 一天点 300 下就能从「有点眼熟」冲到「默契搭档」，
-     * 等级推进完全失去节奏。
+     * 早先是「所有来源合计封顶 60」—— 后果是**聊天会被摸头挤掉额度**
+     * （点几下立绘，今天聊天就不涨分了），而聊天才是处关系的主线。
      */
-    const capUsed = { points: 10, gainDay: '2026-09-21', gainToday: AFFINITY_DAILY_CAP }
-    check('额度用尽后聊天不加分', affinityGain(capUsed, 3, '2026-09-21'), 0)
-    check('额度用尽后点击也不加分', affinityGain(capUsed, AFFINITY_GAIN.click, '2026-09-21'), 0)
-    check('跨天后额度重置', affinityGain(capUsed, 3, '2026-09-22'), 3)
-    check('额度快满时按剩余给', affinityGain({ points: 10, gainDay: '2026-09-21', gainToday: 59 }, 3, '2026-09-21'), 1)
-    /* 旧字段（chatDay/chatToday）仍要能读到，否则升级当天的额度会凭空多出来 */
+    const petUsedUp = {
+      points: 10,
+      gainDay: '2026-09-21',
+      gainBySource: { [AFFINITY_SOURCE.PET]: PET_AFFINITY_DAILY_CAP },
+    }
+    check('桌宠额度用尽后点击不加分', affinityGain(petUsedUp, AFFINITY_GAIN.click, '2026-09-21', { source: AFFINITY_SOURCE.PET }), 0)
+    /* 关键隔离：桌宠额度用尽**不影响**聊天（反之亦然，下面 service 那节还有整链断言） */
+    check('桌宠额度用尽后聊天照涨', affinityGain(petUsedUp, 5, '2026-09-21', { source: AFFINITY_SOURCE.CHAT }), 5)
+    check('桌宠额度用尽后解锁奖励照给', affinityGain(petUsedUp, AFFINITY_GAIN.photoUnlock, '2026-09-21', { source: AFFINITY_SOURCE.UNLOCK }), AFFINITY_GAIN.photoUnlock)
+    check('桌宠额度用尽后每日见面照给', affinityGain(petUsedUp, AFFINITY_GAIN.daily, '2026-09-21', { source: AFFINITY_SOURCE.DAILY }), AFFINITY_GAIN.daily)
+    /* 聊天额度用尽（不封顶，随便攒多少）也不该动到桌宠额度 */
+    const chatHeavy = {
+      points: 10,
+      gainDay: '2026-09-21',
+      gainBySource: { [AFFINITY_SOURCE.CHAT]: 500, [AFFINITY_SOURCE.PET]: 0 },
+    }
+    check('聊天涨了 500 点也不吃桌宠额度', affinityGain(chatHeavy, AFFINITY_GAIN.click, '2026-09-21', { source: AFFINITY_SOURCE.PET }), AFFINITY_GAIN.click)
+    check('跨天后额度重置', affinityGain(petUsedUp, AFFINITY_GAIN.click, '2026-09-22', { source: AFFINITY_SOURCE.PET }), AFFINITY_GAIN.click)
     check(
-      '旧的聊天计数字段仍被识别',
-      affinityGain({ points: 10, chatDay: '2026-09-21', chatToday: AFFINITY_DAILY_CAP }, 3, '2026-09-21'),
-      0,
+      '额度快满时按剩余给',
+      affinityGain(
+        { points: 10, gainDay: '2026-09-21', gainBySource: { [AFFINITY_SOURCE.PET]: PET_AFFINITY_DAILY_CAP - 1 } },
+        3,
+        '2026-09-21',
+        { source: AFFINITY_SOURCE.PET },
+      ),
+      1,
     )
-
-    /* ---------- 亲密度：下降机制 ---------- */
-    check('刚互动过不衰减', affinityDecay({ points: 100, lastActive: '2026-09-21' }, '2026-09-21'), 0)
-    check('宽限期内不衰减', affinityDecay({ points: 100, lastActive: '2026-09-21' }, '2026-09-24'), 0)
+    /*
+     * 旧记录（只有合计 `gainToday`、没有分桶）**不能**被当成某个来源的
+     * 已用量 —— 否则升级当天早上聊过几句，下午就点不动她了。
+     */
     check(
-      '超过宽限期后按天扣',
-      affinityDecay({ points: 100, lastActive: '2026-09-21' }, '2026-09-26'),
-      2 * AFFINITY_DECAY.IDLE_PER_DAY,
+      '旧记录的合计额度不顶替来源额度',
+      affinityGain({ points: 10, gainDay: '2026-09-21', gainToday: 999 }, AFFINITY_GAIN.click, '2026-09-21', { source: AFFINITY_SOURCE.PET }),
+      AFFINITY_GAIN.click,
+    )
+    /* 来源分桶的读数是「按来源」的 */
+    check('分桶读数只认本来源', affinityUsedToday(chatHeavy, '2026-09-21', AFFINITY_SOURCE.CHAT), 500)
+    check('分桶读数不串来源', affinityUsedToday(chatHeavy, '2026-09-21', AFFINITY_SOURCE.PET), 0)
+    check('跨天读数归零', affinityUsedToday(chatHeavy, '2026-09-22', AFFINITY_SOURCE.CHAT), 0)
+    /* 得分键 → 来源：新增得分项忘了登记就会掉进 pet（受上限），不会无限刷 */
+    check('聊天键归到 chat', sourceOfGain('chatRound'), AFFINITY_SOURCE.CHAT)
+    check('点击键归到 pet', sourceOfGain('click'), AFFINITY_SOURCE.PET)
+    check('解锁键归到 unlock', sourceOfGain('photoUnlock'), AFFINITY_SOURCE.UNLOCK)
+    check('未知键保守归到 pet', sourceOfGain('nope'), AFFINITY_SOURCE.PET)
+    check('只有桌宠来源有上限', Object.entries(AFFINITY_DAILY_CAP_BY_SOURCE).filter(([, v]) => Number.isFinite(v)).map(([k]) => k), [AFFINITY_SOURCE.PET])
+    /* 当日合计只用于展示，不等于任何来源的额度 */
+    check('当日合计按分桶求和', affinityTodayTotal(chatHeavy, '2026-09-21'), 500)
+    check('当日合计跨天归零', affinityTodayTotal(chatHeavy, '2026-09-22'), 0)
+
+    /* ---------- 亲密度：每日自然流失 + 无互动惩罚 ---------- */
+    /*
+     * 规则（用户定）：**每一天**都扣 DAILY_DRAIN；其中**完全没互动**的
+     * 那些天再追加 IDLE_PENALTY。于是活跃日 -5、空白天 -10。
+     */
+    const day1 = '2026-09-21'
+    check('当天结算不扣（没有整天过去）', affinityDecay({ points: 100, lastActive: day1 }, day1), 0)
+    check('活跃一天只扣自然流失', affinityDecay({ points: 100, lastActive: day1 }, '2026-09-22'), AFFINITY_DECAY.DAILY_DRAIN)
+    check(
+      '空白天 = 流失 + 惩罚（返回那天结算）',
+      affinityDecay({ points: 100, lastActive: day1 }, '2026-09-23'),
+      2 * AFFINITY_DECAY.DAILY_DRAIN + 1 * AFFINITY_DECAY.IDLE_PENALTY,
+    )
+    check(
+      '连续 5 天不管 = 5 天流失 + 4 天惩罚',
+      affinityDecay({ points: 100, lastActive: day1 }, '2026-09-26'),
+      5 * AFFINITY_DECAY.DAILY_DRAIN + 4 * AFFINITY_DECAY.IDLE_PENALTY,
     )
     /* 已结算过的天数不再重复扣 —— 否则同一天里每次互动都扣一遍 */
     check(
       '已结算的不重复扣',
-      affinityDecay({ points: 100, lastActive: '2026-09-21', decaySettledDays: 2 }, '2026-09-26'),
+      affinityDecay({ points: 100, lastActive: day1, decaySettledDays: 5 }, '2026-09-26'),
       0,
     )
-    check('没有 lastActive 不衰减', affinityDecay({ points: 100 }, '2026-09-26'), 0)
+    /* `active:false` = 今天也没人理她：这一天同样要算空白天 */
+    check(
+      '纯日结时空白天含今天',
+      affinityDecay({ points: 100, lastActive: day1 }, '2026-09-23', { active: false }),
+      2 * AFFINITY_DECAY.DAILY_DRAIN + 2 * AFFINITY_DECAY.IDLE_PENALTY,
+    )
+    check('没有 lastActive 不扣', affinityDecay({ points: 100 }, '2026-09-26'), 0)
+
+    /* ---------- 读时结算（打开面板就把账结到昨天） ---------- */
+    /*
+     * `settleAffinity` 只在有互动时被调用，所以「30 天不理她」期间库里的
+     * 点数是冻结的 —— 用户打开面板看到旧值，发第一句话才一下掉到底。
+     * `affinityReadSettle` 把这一步提前到「读的那一刻」。
+     *
+     * **只结到昨天**（`settleToday: false`）：今天还没过完，它是活跃日
+     * （-5）还是空白天（-10）此刻不知道，硬结就是猜。留着今天之后，
+     * 「先开面板再聊」与「直接聊」的净扣减才相等（都是 10N−5）；
+     * 早先「连今天一起结」会推出**每天先开面板再聊天的人多扣 5 点**。
+     *
+     * 四条不变量：无待结算返回 `null`（调用方据此**跳过写库**）、
+     * **不推进 `lastActive`**（读不是互动）、`decaySettledDays` 推到昨天
+     * （同一天再读多少次都是 null）、两条路径净扣相等。
+     */
+    check('读时结算：当天读不结算', affinityReadSettle({ points: 100, lastActive: day1 }, day1), null)
+    check(
+      '读时结算：昨天才互动过，没什么可结',
+      affinityReadSettle({ points: 100, lastActive: day1 }, '2026-09-22'),
+      null,
+    )
+    check(
+      '读时结算：已结到昨天不结算',
+      affinityReadSettle({ points: 100, lastActive: day1, decaySettledDays: 1 }, '2026-09-23'),
+      null,
+    )
+    const readSettled = affinityReadSettle({ points: 100, lastActive: day1 }, '2026-09-23')
+    check('读时结算：跨天返回新记录', readSettled !== null, true)
+    /* 9/21 互动过，9/22 整个空白 → 只结 9/22 这一天（10 点）；今天（9/23）留着 */
+    check('读时结算：只结到昨天，每天 10 点', 100 - readSettled.points, 10)
+    check('读时结算：不推进 lastActive（读不是互动）', readSettled.lastActive, day1)
+    check('读时结算：已结天数推到昨天', readSettled.decaySettledDays, 1)
+    check('读时结算：不加分', readSettled.gained, 0)
+    check('读时结算：幂等（结算后再读不返回）', affinityReadSettle({ ...readSettled }, '2026-09-23'), null)
+    /*
+     * 跨天补账：昨天是「只读没聊」的一天 → 今天再读时它已经是个过去的整天，
+     * 按**空白天**补上（-10），不能漏、也不能按活跃日算。
+     */
+    const nextDayRead = affinityReadSettle({ ...readSettled }, '2026-09-24')
+    check('读时结算：昨天只读没聊，今天补上那一笔', 100 - nextDayRead.points, 10 + 10)
+    check('读时结算：补账后同样幂等', affinityReadSettle({ ...nextDayRead }, '2026-09-24'), null)
+    /*
+     * 核心不变式：**「先读再聊」与「直接聊」净扣一样多**。
+     * 9/21 互动 → 9/23 回来（中间空了 9/22 一整天）。
+     */
+    const directChat = settleAffinity(
+      { points: 100, lastActive: day1 },
+      { today: '2026-09-23', delta: AFFINITY_GAIN.chatMessage, source: AFFINITY_SOURCE.CHAT },
+    )
+    const readThenChat = settleAffinity(
+      { ...readSettled },
+      { today: '2026-09-23', delta: AFFINITY_GAIN.chatMessage, source: AFFINITY_SOURCE.CHAT },
+    )
+    check('读时结算：先读再聊 = 直接聊（净扣相等）', readThenChat.points, directChat.points)
+    check('读时结算：先读再聊会推进 lastActive', readThenChat.lastActive, '2026-09-23')
+    /* 扣不成负数：读时结算同样受 0 下限 */
+    check('读时结算：扣不到负数', affinityReadSettle({ points: 5, lastActive: '2026-08-01' }, '2026-09-30').points, 0)
+    check(
+      '读时结算：扣的总数不超过当时点数',
+      affinityReadSettle({ points: 5, lastActive: '2026-08-01' }, '2026-09-30').lost,
+      5,
+    )
+    check('读时结算：没有 lastActive 不算', affinityReadSettle({ points: 100 }, '2026-09-26'), null)
+    /*
+     * 升级路径：上一版读时结算把 `decaySettledDays` 推到**今天**（比现在多 1）。
+     * 那种记录在新算法下算出的「截至昨天的 pending」是负数 → 0 → 纯读，
+     * 既不会重复扣，也不会漏扣（那天在旧版里已经结过了）。
+     * 这条是「pending 会不会恒 ≥1 导致每次都写库」那个担心的正面回答：
+     * 结算只会让 `decaySettledDays` 单调前进，同一天内必然归零。
+     */
+    check(
+      '读时结算：旧版记的「已结到今天」不会重复扣',
+      affinityReadSettle({ points: 100, lastActive: day1, decaySettledDays: 2 }, '2026-09-23'),
+      null,
+    )
+    check(
+      '读时结算：旧版记录次日也不重复扣',
+      affinityReadSettle({ points: 100, lastActive: day1, decaySettledDays: 2 }, '2026-09-24'),
+      null,
+    )
+    /* 下限 0：扣不成负数 */
+    const drained = settleAffinity({ points: 3, lastActive: '2026-08-01' }, { today: '2026-09-30' })
+    check('流失扣不到负数', drained.points, 0)
+    check('扣的总数不超过当时点数', drained.lost, 3)
+
+    /* ---------- 同一天多次结算只能扣一次 ---------- */
+    {
+      const day = '2026-09-24'
+      const rec0 = { points: 100, lastActive: '2026-09-22', lastDay: '2026-09-22' }
+      /* 空白的 9/23 + 今天的 9/24 = 10 + 5 = 15 */
+      const first = settleAffinity(rec0, { today: day, delta: AFFINITY_GAIN.chatMessage, source: AFFINITY_SOURCE.CHAT })
+      check('首次结算扣掉空白天与今天的流失', 100 - first.points + first.gained, 15)
+      const second = settleAffinity({ ...rec0, ...first }, { today: day, delta: AFFINITY_GAIN.chatRound, source: AFFINITY_SOURCE.CHAT })
+      check('同一天第二次结算不再扣', second.lost, 0)
+      const third = settleAffinity({ ...rec0, ...first, ...second }, { today: day, delta: 1, source: AFFINITY_SOURCE.PET })
+      check('同一天第三次结算也不扣', third.lost, 0)
+    }
+
+    /* ---------- 「开心」判定 ---------- */
+    /*
+     * 用户要求「聊天时让她感到开心则会获得好感度」。
+     * 判据 = 词表 + 她这轮回复的形态（变长 / 撒娇语气 / 分条发）。
+     * 正反例都要钉：**误判**会让亲密度无端上涨，**漏判**会让用户觉得白聊。
+     */
+    check('夸她算开心', isHappy('你今天好可爱'), true)
+    check('直白好感算开心', isHappy('我想你了'), true)
+    check('表白算开心', isHappy('最喜欢你了'), true)
+    check('谢谢算开心', isHappy('谢谢你陪我'), true)
+    check('用户自己也高兴算开心', isHappy('今天好开心哈哈'), true)
+    /* 反例：中性、客套、以及「否定式」的假阳性 */
+    check('普通聊天不算开心', isHappy('今天天气不错'), false)
+    check('客套不算开心', isHappy('还行吧'), false)
+    check('「不喜欢你」不算开心', isHappy('我不喜欢你'), false)
+    check('「一点也不可爱」不算开心', isHappy('一点也不可爱'), false)
+    check('「没那么想你」不算开心', isHappy('我没那么想你'), false)
+    check('否定词隔着标点不吃掉后半句', isHappy('不是吧，我好喜欢你'), true)
+    /* 惹她生气那轮一律不算开心（一轮里既有冒犯又有好话，以冒犯为准） */
+    check('骂她那轮不算开心', isHappy('讨厌你，不过你也可爱'), false)
+    check('骂她那轮开心加成为 0', happyBonus({ text: '讨厌你', reply: '嗯。' }), 0)
+
+    /* 回复形态的三个信号 */
+    const longReply = '今天上课的时候老师突然点我起来回答问题，我完全没准备，站起来脑子一片空白，' + '然后随便说了一句，结果全班都笑了，我坐下之后脸一直红到下课。'
+    check('回复变长算信号', happyReplySignals(longReply, { avgReplyLen: 20 }).long, true)
+    check('回复不长不算信号', happyReplySignals('嗯，好的。', { avgReplyLen: 20 }).long, false)
+    check('没有历史时按绝对长度判', happyReplySignals(longReply, {}).long, true)
+    check('波浪线算撒娇语气', happyReplySignals('好呀～', {}).tone, true)
+    check('emoji 算撒娇语气', happyReplySignals('好呀 😊', {}).tone, true)
+    check('颜文字算撒娇语气', happyReplySignals('好呀 qwq', {}).tone, true)
+    check('两个语气词才算语气信号', happyReplySignals('好呀', {}).tone, false)
+    check('两个语气词够数', happyReplySignals('好呀好啦', {}).tone, true)
+    check('分条发算信号', happyReplySignals('第一条', { segments: 2 }).multi, true)
+    check('单条不算分条', happyReplySignals('第一条', { segments: 1 }).multi, false)
+
+    /* 加成的边界：0 ~ HAPPY_BONUS_MAX */
+    check('什么都没有 = 0', happyBonus({ text: '嗯', reply: '好的。' }), 0)
+    check('只说好话 = 2', happyBonus({ text: '你今天好可爱', reply: '嗯。' }), 2)
+    check('只说好话 + 一个信号 = 3', happyBonus({ text: '你今天好可爱', reply: '好呀～' }), 3)
+    check('纯信号两点 = 2', happyBonus({ text: '嗯', reply: '好呀～', segments: 2 }), 2)
+    check('信号再多也封顶', happyBonus({ text: '你今天好可爱', reply: longReply, segments: 3, avgReplyLen: 10 }), HAPPY_BONUS_MAX)
+    check('加成不为负', happyBonus({ text: '', reply: '' }) >= 0, true)
+
+    /* 平均回复长度：只数她的、只数纯文本 */
+    check('平均长度只数她的回复', averageReplyLength([
+      { role: 'user', content: '你好' },
+      { role: 'assistant', content: '哈哈哈哈' },
+      { role: 'assistant', content: '嘻嘻' },
+    ]), 3)
+    check('平均长度没有历史时回落 0', averageReplyLength([{ role: 'user', content: '你好' }]), 0)
 
     /* 惹她生气的判定：只认「针对她」的冒犯 */
     check('骂她算惹生气', isUpsetting('讨厌你'), true)
@@ -2721,54 +3183,279 @@ try {
     /*
      * 上限：到顶后继续互动不再涨，避免等级卡在最后一档还以为在涨。
      *
-     * 注意**要跨多天**：现在每日额度是 60 点（全来源合计），
-     * 同一天里怎么加都上不去 —— 这正是额度的作用。
-     * 早先这条写成「一天连加 400 次」，加了额度之后自然失败。
+     * 注意**要跨多天、而且必须走聊天来源**：桌宠来源每天只有
+     * `PET_AFFINITY_DAILY_CAP` 点额度，同一天里怎么点都上不去；
+     * 而聊天的额度是 `Infinity`（用户要求取消总上限），这才是
+     * 「能刷到顶」的那条路。
      */
     for (let day = 0; day < 10; day++) {
       const d = new Date(2026, 8, 21 + day, 14, 0)
       /* 第 4 个参数是「时间」——不传的话每天都是同一天，测不出跨天重置 */
-      for (let i = 0; i < 20; i++) await service.addAffinity(10, {}, null, d)
+      for (let i = 0; i < 20; i++) await service.addAffinity(10, { kind: 'chat' }, null, d)
     }
     check('亲密度封顶', (await service.affinity()).points, AFFINITY_MAX_POINTS)
     check('封顶后 isMax', (await service.affinity()).isMax, true)
     await service.resetAffinity()
     check('重置归零', (await service.affinity()).points, 0)
-    check('重置清空当日额度', (await service.affinity()).gainToday ?? 0, 0)
+    check('重置清空当日得分', (await service.affinity()).gainToday ?? 0, 0)
   }
 
-  /* ---------- 16b. 聊天记亲密度 ---------- */
+  /* ---------- 16b. 亲密度：来源额度隔离 + 解锁奖励 + meta ---------- */
   {
-    await service.resetAffinity()
-    /*
-     * 对话是提升亲密度最主要的途径，必须真的落库。
-     * 用假接口时会失败，所以只验证「记账」这一步本身。
-     */
-    const before = (await service.affinity()).points
-    const chatSession = await service.ensureChatSession()
-    await service.addChatMessage(chatSession.id, 'user', '在吗')
-    await service.addAffinity(AFFINITY_GAIN.chatMessage, { kind: 'chat' })
-    check('聊天加分生效', (await service.affinity()).points, before + AFFINITY_GAIN.chatMessage)
-    check('聊天计入当日额度', (await service.affinity()).gainToday, AFFINITY_GAIN.chatMessage)
+    const sid = (await service.ensureChatSession()).id
 
-    /*
-     * 额度用完后再聊不加分 —— 且**点击也不行**。
-     * 这是这次改动的重点：原来只封聊天，导致一直点立绘能无限刷。
-     */
-    await service.addAffinity(AFFINITY_DAILY_CAP * 10, { kind: 'chat' })
-    const capped = (await service.affinity()).points
-    check('当日额度封顶', (await service.affinity()).gainToday, AFFINITY_DAILY_CAP)
+    /* ---------- ① 狂点桌宠到上限 → 聊天仍然照涨 ---------- */
+    await service.resetAffinity()
+    const chatSession = sid
+    await service.addChatMessage(chatSession, 'user', '在吗')
+    for (let i = 0; i < 30; i++) {
+      await service.addAffinity(AFFINITY_GAIN.click, { source: AFFINITY_SOURCE.PET })
+    }
+    check('桌宠额度封顶', (await service.affinity()).petToday, PET_AFFINITY_DAILY_CAP)
+    const petCappedPoints = (await service.affinity()).points
+    check('桌宠点数 = 当日额度', petCappedPoints, PET_AFFINITY_DAILY_CAP)
+    await service.addAffinity(AFFINITY_GAIN.click, { source: AFFINITY_SOURCE.PET })
+    check('桌宠额度用尽后点击不加分', (await service.affinity()).points, petCappedPoints)
     await service.addAffinity(AFFINITY_GAIN.chatMessage, { kind: 'chat' })
-    check('额度用尽后聊天不加分', (await service.affinity()).points, capped)
-    await service.addAffinity(AFFINITY_GAIN.click)
-    check('额度用尽后点击也不加分', (await service.affinity()).points, capped)
+    check('桌宠额度用尽后聊天照涨', (await service.affinity()).points, petCappedPoints + AFFINITY_GAIN.chatMessage)
+    check('聊天不占桌宠额度', (await service.affinity()).petToday, PET_AFFINITY_DAILY_CAP)
+    check('聊天有自己的桶', (await service.affinity()).gainBySource[AFFINITY_SOURCE.CHAT], AFFINITY_GAIN.chatMessage)
+
+    /* ---------- ② 反之：狂聊之后桌宠额度一点没被吃掉 ---------- */
+    await service.resetAffinity()
+    await service.addAffinity(100, { kind: 'chat' })
+    check('聊天加分不受每日上限约束', (await service.affinity()).points, 100)
+    check('聊天不吃桌宠额度', (await service.affinity()).petToday, 0)
+    await service.addAffinity(AFFINITY_GAIN.click, { source: AFFINITY_SOURCE.PET })
+    check('狂聊之后点她照样加分', (await service.affinity()).points, 100 + AFFINITY_GAIN.click)
+    check('点击进的是桌宠桶', (await service.affinity()).petToday, AFFINITY_GAIN.click)
+
+    /* ---------- ③ 每日见面一天只给一次（反复「启动」不会重复加） ---------- */
+    await service.resetAffinity()
+    await service.addAffinity(AFFINITY_GAIN.daily, { source: AFFINITY_SOURCE.DAILY })
+    const afterDaily = (await service.affinity()).points
+    check('每日见面加分', afterDaily, AFFINITY_GAIN.daily)
+    await service.addAffinity(AFFINITY_GAIN.daily, { source: AFFINITY_SOURCE.DAILY })
+    check('每日见面一天只给一次', (await service.affinity()).points, afterDaily)
+
+    /* ---------- ④ 解锁奖励：独立来源、不占任何额度 ---------- */
+    await service.resetAffinity()
+    await service.addAffinity(AFFINITY_GAIN.photoUnlock, { source: AFFINITY_SOURCE.UNLOCK })
+    check('解锁奖励加分', (await service.affinity()).points, AFFINITY_GAIN.photoUnlock)
+    check('解锁奖励不占桌宠额度', (await service.affinity()).petToday, 0)
+    check('解锁奖励进 unlock 桶', (await service.affinity()).gainBySource[AFFINITY_SOURCE.UNLOCK], AFFINITY_GAIN.photoUnlock)
+
+    /* ---------- ⑤ 每日流失：真实服务链路上也扣，且同一天只扣一次 ---------- */
+    /*
+     * 断言取**调用返回值**，不取 `service.affinity()`：读路径现在带
+     * 「读时结算」，而它用的是**真实今天** —— 这里模拟的是 9/21~9/23，
+     * 用真实今天再读一次会把这几天之外的日子又结一遍，断言就测歪了。
+     * `addAffinity` 返回的快照是按传入的 `now` 算的，正好是这里要的口径。
+     */
+    await service.resetAffinity()
+    const d1 = await service.addAffinity(60, { kind: 'chat' }, sid, new Date(2026, 8, 21, 14, 0))
+    check('第一天只加不扣', d1.points, 60)
+    /* 第二天没来、第三天回来：9/22 空白天 -10 + 9/23 当天 -5 */
+    const d2 = await service.addAffinity(AFFINITY_GAIN.chatMessage, { kind: 'chat' }, sid, new Date(2026, 8, 23, 14, 0))
+    check('空一天后回来扣 15 再涨 1', d2.points, 60 - 15 + AFFINITY_GAIN.chatMessage)
+    const d3 = await service.addAffinity(AFFINITY_GAIN.chatRound, { kind: 'chat' }, sid, new Date(2026, 8, 23, 15, 0))
+    check('同一天再聊一轮只涨不扣', d3.points, 60 - 15 + AFFINITY_GAIN.chatMessage + AFFINITY_GAIN.chatRound)
 
     /* meta 要下发规则，否则设置页只能写死文案 */
     const meta = await service.meta()
-    check('meta 带亲密度等级表', meta.affinity.levels.length, affinityLevel(0).level ? 5 : 0)
-    check('meta 带每日额度', meta.affinity.dailyCap, AFFINITY_DAILY_CAP)
+    check('meta 带亲密度等级表', meta.affinity.levels.length, AFFINITY_LEVELS.length)
+    check('meta 带桌宠每日额度', meta.affinity.petDailyCap, PET_AFFINITY_DAILY_CAP)
+    /* 全来源总上限已经取消，meta 里不许再留那个字段（留了前端就会照着画分母） */
+    check('meta 不再下发全来源总上限', 'dailyCap' in meta.affinity, false)
+    check('meta 带流失规则', meta.affinity.decay.DAILY_DRAIN, AFFINITY_DECAY.DAILY_DRAIN)
+    check('meta 带无互动惩罚', meta.affinity.decay.IDLE_PENALTY, AFFINITY_DECAY.IDLE_PENALTY)
     check('meta 带得分规则', meta.affinity.gain.chatRound, AFFINITY_GAIN.chatRound)
+    check('meta 带解锁奖励', meta.affinity.gain.photoUnlock, AFFINITY_GAIN.photoUnlock)
     await service.resetAffinity()
+    check('重置清空桌宠额度', (await service.affinity()).petToday, 0)
+    check('重置清空当日得分', (await service.affinity()).gainToday ?? 0, 0)
+  }
+
+  /* ---------- 16d. 亲密度：读时结算（打开面板/应用就把账结掉） ---------- */
+  {
+    /*
+     * 需求：用户长期没开应用，回来**打开**的那一刻就该看到真实档位，
+     * 而不是「离开时的旧值 → 发了第一句话才一下掉下去」。
+     * 入口在 `service.getAffinity`（`getState` / `affinity` /
+     * `sessionAffinity` / `affinityLevel` 全从它走），渲染层不需要知道这件事。
+     *
+     * 这一节要证的四件事：**结算值正确** / **同一天只扣一次** /
+     * **无待结算一个字节都不写** / **读不算互动**。
+     *
+     * 写库计数用一层包装 store 数 `setMeta`（只数亲密度那几把键，
+     * 免得把节假日缓存之类算进来）—— 不改生产代码加埋点。
+     */
+    const rsDir = mkdtempSync(join(tmpdir(), 'desk-readsettle-'))
+    const rsRaw = openStore(join(rsDir, 'rs.db'))
+    let affinityWrites = 0
+    const rsStore = {
+      ...rsRaw,
+      setMeta: (key, value) => {
+        if (String(key).includes('affinity')) affinityWrites++
+        return rsRaw.setMeta(key, value)
+      },
+    }
+    const rs = createService(rsStore)
+    const rsSid = (await rs.ensureChatSession()).id
+
+    /* 用**真实今天**当锚点：读路径结算的就是今天，写死过去日期会当场对不上 */
+    const anchor = new Date()
+    anchor.setHours(10, 0, 0, 0)
+    const daysAgo = (n) => {
+      const d = new Date(anchor)
+      d.setDate(d.getDate() - n)
+      return d
+    }
+    /** 种一份「N 天前活跃过、点数 points」的记录（走正常写入路径） */
+    async function seedAway(points, n) {
+      await rs.resetAffinity(rsSid)
+      await rs.addAffinity(points, { kind: 'chat' }, rsSid, daysAgo(n))
+    }
+    const daysAfter = (base, n) => {
+      const d = new Date(base)
+      d.setDate(d.getDate() + n)
+      return d
+    }
+    const recordOf = async () => (await rsRaw.getMeta(`affinity:${rsSid}`)) ?? {}
+
+    /* ---------- ① 核心验收：两条路径净扣必须相等（都是 10N−5） ---------- */
+    /*
+     * 用户明确要求：「挂 N 天 → 直接聊一句」与「挂 N 天 → 先开面板 → 再聊一句」
+     * 净扣**必须相等**。改动前会差 5 点，等于**每天先开一下面板再聊天的人
+     * 比不开面板的人每天多扣 5 点** —— 看她一眼要收费，方向不对。
+     *
+     * 之所以现在相等：读时结算只结到**昨天**（`settleToday: false`），
+     * 今天留给「那次互动」按活跃日（-5）结。两条路径于是都是
+     * `(N−1)×10 + 5 = 10N−5`。
+     */
+    const bothPaths = []
+    for (const n of [1, 3, 7, 14, 30]) {
+      /* 路径 A：回来直接聊一句 */
+      await seedAway(AFFINITY_MAX_POINTS, n)
+      const direct = await rs.addAffinity(AFFINITY_GAIN.chatMessage, { kind: 'chat' }, rsSid, anchor)
+
+      /* 路径 B：回来先开面板（读时结算），再聊同一句 */
+      await seedAway(AFFINITY_MAX_POINTS, n)
+      const readOnly = await rs.getState(anchor, rsSid)
+      const afterRead = await rs.addAffinity(AFFINITY_GAIN.chatMessage, { kind: 'chat' }, rsSid, anchor)
+
+      bothPaths.push({
+        n,
+        direct: direct.points,
+        readOnly: readOnly.affinity.points,
+        readThenChat: afterRead.points,
+        expect: AFFINITY_MAX_POINTS - (10 * n - 5) + AFFINITY_GAIN.chatMessage,
+      })
+    }
+    check('两条路径净扣相等（先开面板不额外扣分）', bothPaths.map((r) => r.readThenChat === r.direct), [true, true, true, true, true])
+    check('两条路径都等于 10N−5', bothPaths.map((r) => r.direct), bothPaths.map((r) => r.expect))
+    /* 只读不聊只结到昨天，所以少结今天那 5 点（今天留着等结论） */
+    check('只开面板（没聊）时今天不结', bothPaths.map((r) => r.readOnly), [300, 280, 240, 170, 10])
+    check('只开面板后档位跟着掉', bothPaths.map((r) => affinityLevel(r.readOnly).level.name), ['灵魂伴侣', '恋人', '形影不离', '默契搭档', '有点眼熟'])
+
+    /* ---------- ② 幂等：同一天读 10 次只扣一次 ---------- */
+    await seedAway(AFFINITY_MAX_POINTS, 7)
+    const writesBeforeFirst = affinityWrites
+    const firstRead = await rs.getState(anchor, rsSid)
+    const writesAfterFirst = affinityWrites
+    check('读时结算：第一次读扣到位', firstRead.affinity.points, AFFINITY_MAX_POINTS - 60)
+    check('读时结算：有待结算时写了一次库', writesAfterFirst - writesBeforeFirst, 1)
+
+    const repeatPoints = []
+    for (let i = 0; i < 10; i++) repeatPoints.push((await rs.getState(anchor, rsSid)).affinity.points)
+    const writesAfterTen = affinityWrites
+    check('幂等：同一天读 10 次点数只有第一次变', new Set(repeatPoints).size, 1)
+    check('幂等：同一天读 10 次的第一次就已经是结算后的值', repeatPoints[0], AFFINITY_MAX_POINTS - 60)
+    /* 关键：这 10 次读**一次库都没写** */
+    check('无待结算：再读 10 次零写库', writesAfterTen - writesAfterFirst, 0)
+
+    /* 顺带覆盖另外三个读数入口 —— 它们都从 getAffinity 走，同样零写 */
+    const writesBeforeOther = affinityWrites
+    await rs.affinity()
+    await rs.sessionAffinity(rsSid)
+    await rs.affinityLevel()
+    check('无待结算：affinity/sessionAffinity/affinityLevel 也零写', affinityWrites - writesBeforeOther, 0)
+
+    /* ---------- ③ 读不是互动：不推进 lastActive ---------- */
+    await seedAway(200, 3)
+    const lastActiveBefore = (await recordOf()).lastActive
+    const afterRead = await rs.getState(anchor, rsSid)
+    /* 3 天前活跃过 → 只结过去那 2 个整天（各 10）= -20；今天留着 */
+    check('读时结算：点数扣了', afterRead.affinity.points, 200 - 20)
+    check('读时结算：不推进 lastActive', (await recordOf()).lastActive, lastActiveBefore)
+    check('读时结算：已结天数推到昨天', (await recordOf()).decaySettledDays, 2)
+
+    /* 读了之后再真的聊一句：那次结算才是互动日，且今天按活跃日只扣 5 */
+    const todayKey = toDateKey(anchor)
+    const afterChat = await rs.addAffinity(AFFINITY_GAIN.chatMessage, { kind: 'chat' }, rsSid, anchor)
+    check('读完之后聊一句：今天按活跃日结（-5），不重复扣', afterChat.points, 200 - 20 - AFFINITY_DECAY.DAILY_DRAIN + AFFINITY_GAIN.chatMessage)
+    check('读完之后聊一句：lastActive 推进到今天', (await recordOf()).lastActive, todayKey)
+    check('读完之后聊一句：decaySettledDays 归零', (await recordOf()).decaySettledDays, 0)
+
+    /* ---------- ④ 跨天补账：今天只读没聊 → 明天按空白天补上 ---------- */
+    await seedAway(200, 3)
+    await rs.getState(anchor, rsSid) /* 今天只读 */
+    const todayReadPoints = (await recordOf()).points
+    const tomorrow = daysAfter(anchor, 1)
+    const tomorrowSnap = await rs.getState(tomorrow, rsSid)
+    check('跨天补账：今天只读没聊，明天补上这一笔（-10）', todayReadPoints - tomorrowSnap.affinity.points, 2 * AFFINITY_DECAY.DAILY_DRAIN)
+    check('跨天补账：补账后同样幂等', (await recordOf()).decaySettledDays, 3)
+    await rs.getState(tomorrow, rsSid)
+    check('跨天补账：明天连读两次也不重复扣', (await recordOf()).points, tomorrowSnap.affinity.points)
+
+    /* ---------- ⑤ 连续不互动最终归零（结论不能变） ---------- */
+    /*
+     * 读时结算只结到昨天，所以「挂 30 天、今天读一次」剩的是**今天那 10 点**
+     * （今天还没结）。第二天再读，今天就成了过去的整天 → 补上 → 0。
+     * 结论仍是「一个月不理她 = 归零」，只是归零发生在今天过完之后。
+     */
+    await seedAway(AFFINITY_MAX_POINTS, 30)
+    const day30 = await rs.getState(anchor, rsSid)
+    check('30 天不理她：读一次就掉到最低档', affinityLevel(day30.affinity.points).level.name, '有点眼熟')
+    const day31 = await rs.getState(daysAfter(anchor, 1), rsSid)
+    check('30 天不理她：第二天补上最后一笔 → 0', day31.affinity.points, 0)
+    /* 一直每天读下去也不会变成负数 */
+    const day32 = await rs.getState(daysAfter(anchor, 2), rsSid)
+    check('连续不互动不会扣成负数', day32.affinity.points, 0)
+
+    /* ---------- ⑥ 读时结算掉到最低档，也不收回已解锁内容 ---------- */
+    /*
+     * 「每日自然流失」上线后档位会频繁下降，读时结算**又多了一条掉档路径**
+     * （打开面板就掉），所以这条必须再验一次。
+     */
+    await rsStore.setMeta(`unlockedOutfits:${rsSid}`, [DEFAULT_OUTFIT, 'swimsuit'])
+    await rsStore.setMeta(`triggeredPhotos:${rsSid}`, ['g08'])
+    await rsStore.setMeta(`photoMemories:${rsSid}`, { g08: { at: 1758000000000, line: '刚洗完澡', title: '刚洗完澡' } })
+
+    await seedAway(AFFINITY_MAX_POINTS, 30)
+    const droppedByRead = await rs.getState(anchor, rsSid)
+    check(
+      '读时结算：掉到最低档',
+      [affinityLevel(droppedByRead.affinity.points).level.name, droppedByRead.affinity.points < AFFINITY_LEVELS[1].min],
+      ['有点眼熟', true],
+    )
+    const galleryAfterRead = await rs.gallery(rsSid)
+    check('读时结算不收回服饰', galleryAfterRead.outfit.unlocked, [DEFAULT_OUTFIT, 'swimsuit'])
+    check('读时结算不收回生活照', galleryAfterRead.photo.unlocked, ['g08'])
+    check('读时结算后解锁记忆仍在', galleryAfterRead.photo.items.find((it) => it.slug === 'g08')?.at != null, true)
+    check(
+      '读时结算后最低档仍能穿已解锁的泳装',
+      idleCandidatesFor('stranger', galleryAfterRead.outfit.unlocked).includes('outfit:swimsuit'),
+      true,
+    )
+
+    /* ---------- ⑤ 结算后档位变化要能被 UI 看到（快照就是新档位） ---------- */
+    await seedAway(300, 7)
+    const snap = await rs.getState(anchor, rsSid)
+    check('读时结算后 affinity 快照是新档位', affinityLevel(snap.affinity.points).level.name, '形影不离')
+    check('读时结算后快照仍带旧有的全部字段', ['points', 'lastDay', 'streakDays', 'gainToday', 'petToday', 'petCap', 'max', 'isMax', 'sessionId'].every((k) => k in snap.affinity), true)
+
+    await rs.close()
   }
 
   /* ---------- 16c. 补卡 ---------- */
@@ -3096,7 +3783,7 @@ try {
    */
   {
     const p0 = 0
-    const pFriend = AFFINITY_LEVELS[2].min + 5 // 45 → 「好朋友」
+    const pFriend = AFFINITY_LEVELS[2].min + 5 // 105 → 「好朋友」
 
     /* ① 生成层：档位名必须来自 AFFINITY_LEVELS，不能另起一套 */
     const rel = affinityContextFor(pFriend, {
@@ -3134,14 +3821,14 @@ try {
     check('人设正文不含运行时档位数字', CHAT_PERSONAS[0].prompt.includes('亲密度 45'), false)
 
     /*
-     * 五档行为表要跟 AFFINITY_LEVELS 对齐。
+     * 七档行为表要跟 AFFINITY_LEVELS 对齐。
      *
      * 报错信息里列出差异，是为了让人一眼看出「是哪一档漂了」——
      * 这条最常见的坏法是档位表被静默改名/改阈值，两端各说一套。
      */
     const personaText = CHAT_PERSONAS[0].prompt
     const missingTier = AFFINITY_LEVELS.filter((l) => !personaText.includes(l.name))
-    check('人设五档名与 AFFINITY_LEVELS 一致', missingTier.map((l) => l.name), [])
+    check('人设档位名与 AFFINITY_LEVELS 一致', missingTier.map((l) => l.name), [])
     /* 阈值也照抄一遍：档位名对但数字漂了同样会让行为错位 */
     for (const l of AFFINITY_LEVELS) {
       check(`人设档位表带阈值 ${l.min}`, personaText.includes(`${l.name}（亲密度 ${l.min}）`), true)
@@ -3226,16 +3913,38 @@ try {
     const tierOf = (sys) => /你们现在是「([^」]+)」/.exec(sys)?.[1] ?? ''
     const sA = await abSvc.createChatSession('A')
     const sB = await abSvc.createChatSession('B')
-    /* A 刷到「好朋友」档（跨天加，绕开每日额度） */
-    for (let d = 0; d < 3; d++) await abSvc.addAffinity(30, {}, sA.id, new Date(2026, 8, 21 + d, 10, 0))
-    check('A 会话亲密度已到好朋友档', (await abSvc.sessionAffinity(sA.id)).points >= 40, true)
+    /*
+     * A 刷到第 3 档（跨天加，走聊天来源 —— 聊天不封顶，绕开桌宠的每日额度）。
+     *
+     * 两个坑都踩过：
+     *   ① 天数/点数不能写死 —— 旧写法「3 天 × 30 点 = 90」在那个
+     *      「40 点就是好朋友」的 5 档时代是对的，扩到 7 档后就红了；
+     *   ② 日期必须**锚在真实今天往回数**，不能写死 2026-09-21 ——
+     *      现在每天都有自然流失，写死的过去日期一走到 `sendChat`
+     *      （它用真实时间）就会被一次性扣掉几十点，档位断言莫名其妙地红。
+     */
+    const anchor = new Date()
+    anchor.setHours(10, 0, 0, 0)
+    const targetTier = AFFINITY_LEVELS[2]
+    for (let back = 3; back >= 0; back--) {
+      const day = new Date(anchor)
+      day.setDate(day.getDate() - back)
+      /* 每天 30 点、当天只扣 5 点自然流失（前一天互动过，不算空白天） */
+      await abSvc.addAffinity(30, { kind: 'chat' }, sA.id, day)
+    }
+    const aPoints = (await abSvc.sessionAffinity(sA.id)).points
+    check(
+      'A 会话亲密度落在第 3 档区间',
+      aPoints >= targetTier.min && aPoints < AFFINITY_LEVELS[3].min,
+      true,
+    )
     check('B 会话仍是全新', (await abSvc.sessionAffinity(sB.id)).points, 0)
 
     /* 先把 B 变成「最近更新的会话」，再聊 A —— 回落口径会在这里指错人 */
     await abSvc.addChatMessage(sB.id, 'user', '占位')
     abSystems.length = 0
     await abSvc.sendChat({ sessionId: sA.id, text: '在吗' })
-    check('聊 A 注入的是 A 的档位', tierOf(abSystems.at(-1)), AFFINITY_LEVELS[2].name)
+    check('聊 A 注入的是 A 的档位', tierOf(abSystems.at(-1)), targetTier.name)
 
     await abSvc.addChatMessage(sA.id, 'user', '占位')
     abSystems.length = 0

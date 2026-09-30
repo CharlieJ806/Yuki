@@ -32,6 +32,11 @@ const scale = computed(() => {
   return Number.isFinite(s) && s > 0 ? s : 1
 })
 const affinity = computed(() => affinityView(state.affinity?.points ?? 0, state.settings?.godMode))
+/* 桌宠互动的当日额度用完了 —— 只是不能再靠摸头涨，聊天不受影响 */
+const petCapped = computed(() => {
+  const cap = Number(state.affinity?.petCap) || 0
+  return cap > 0 && (state.affinity?.petToday ?? 0) >= cap
+})
 
 /* ---------- 换装展示 ---------- */
 
@@ -118,10 +123,9 @@ const outfitLabel = computed(() => {
         <template v-if="state.affinity?.streakDays > 1"> · 连续 {{ state.affinity.streakDays }} 天</template>
       </p>
       <p class="ma-note">
-        今日得分 {{ state.affinity?.gainToday ?? 0 }}/{{ state.meta.affinity?.dailyCap ?? 60 }}
-        <template v-if="state.affinity?.gainToday >= (state.meta.affinity?.dailyCap ?? 60) && !affinity.isMax">
-          · 明天继续
-        </template>
+        今日已涨 {{ state.affinity?.gainToday ?? 0 }} 点 · 桌宠互动
+        {{ state.affinity?.petToday ?? 0 }}/{{ state.affinity?.petCap ?? 0 }}
+        <template v-if="petCapped && !affinity.isMax">（今天的摸头额度用完啦，聊天不受限）</template>
       </p>
     </div>
 

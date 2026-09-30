@@ -28,8 +28,13 @@ const DIST = join(ROOT, 'dist-mobile')
  * interactions.js 在清单里：手机端的换装/亲密度/挂机台词都依赖它
  * （此前的注释称「刻意不打包 interactions.js」是过期描述，与清单相反——
  * 手机端后来接上了亲密度与换装，模块已加回）。
+ *
+ * `tierLines.js` 是 interactions.js 的**内部依赖**（恋人/灵魂伴侣的专属台词池），
+ * 它不在 mobile/ 里被直接 import，但漏了它 `vendor/interactions.js`
+ * 会在浏览器里 404 —— 而构建脚本**只检查这张清单里的文件是否存在**，
+ * 不解析 import，所以漏掉时构建照样「成功」。加 shared 模块的连锁依赖时记得回来。
  */
-const MODULES = ['content.js', 'moyu.js', 'interactions.js', 'outfitStories.js', 'photoStories.js', 'photoMessage.js', 'chatBackground.js', 'tapLines.js', 'chatter.js', 'dayInfo.js', 'holidays.js', 'gallery.js']
+const MODULES = ['content.js', 'moyu.js', 'tierLines.js', 'interactions.js', 'outfitStories.js', 'photoStories.js', 'photoMessage.js', 'chatBackground.js', 'tapLines.js', 'chatter.js', 'dayInfo.js', 'holidays.js', 'gallery.js']
 
 /* 需要一起打包进产物的手机端文件 */
 const APP_FILES = [

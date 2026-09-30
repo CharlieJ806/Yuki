@@ -24,6 +24,7 @@ import {
 } from '../src/shared/content.js'
 import { createService } from '../src/main/service.js'
 import { openStore } from '../src/main/store.js'
+import { AFFINITY_LEVELS } from '../src/shared/interactions.js'
 
 let failures = 0
 let checks = 0
@@ -225,7 +226,7 @@ await withServer(
  * 万一预算算错把时间块挤掉，模型照样收不到。
  *
  * 同一趟里顺带验证**关系块**（亲密度档位）也真的上了网络 ——
- * 人设里写着五档各自的行为，但「现在在哪一档」是运行时才知道的：
+ * 人设里写着七档各自的行为，但「现在在哪一档」是运行时才知道的：
  * 这条断了，人设里那张档位表就永远是死的（见 moyu.js 的 affinityContextFor）。
  */
 await withServer(
@@ -265,15 +266,20 @@ await withServer(
     res.end()
   },
   async (baseUrl) => {
+    /*
+     * 档位取「第三档 + 5 点」而不是写死 45：扩档/改阈值时写死的点数
+     * 会静默落到别的档，这条断言就变成在测另一件事了。
+     */
+    const midPoints = AFFINITY_LEVELS[2].min + 5
     const r = await streamChat({
       settings: { ...settings, chatBaseUrl: baseUrl },
-      /* 固定成 9:10，正是用户报问题的时间点；亲密度固定 45 → 落在「好朋友」档 */
+      /* 固定成 9:10，正是用户报问题的时间点 */
       runtime: {
         now: new Date(2026, 8, 21, 9, 10),
         workStart: '09:00',
         workEnd: '18:00',
         isRestDay: false,
-        affinityPoints: 45,
+        affinityPoints: midPoints,
       },
       messages: [
         { role: 'user', content: '在干嘛' },
@@ -292,17 +298,19 @@ await withServer(
     check('时间块长度可控', got.clockLen > 0 && got.clockLen < 1200, true)
     /*
      * 人设 + 易变块的总量也要有上限，防止人设被无限追加。
-     * 阈值随功能增长上调过两次：一次是多段回复指令 + 时间感的详细清单，
-     * 一次是**三部分人设 + 五档行为表**（用户明确要求「每档她会做什么」写细）。
+     * 阈值随功能增长上调过三次：一次是多段回复指令 + 时间感的详细清单，
+     * 一次是**三部分人设 + 七档行为表**（用户明确要求「每档她会做什么」写细），
+     * 最近一次是**档位从 5 档扩到 7 档**（新增「恋人 / 灵魂伴侣」两档，
+     * 每档四个维度都要写 —— 实测 system 从 4940 涨到 5511）。
      * 都是有意的，不是意外膨胀；真超了应该回头审「这条指令值不值这个 token」，
      * 而不是默默放宽。
      */
-    check('system 总长可控', got.sysLen < 5200, true)
+    check('system 总长可控', got.sysLen < 5800, true)
 
     /* 关系块：必须在末尾、必须带上当前档位 */
     check('发出去的 system 带关系块', got.hasRelation, true)
     check('关系块在时间块之后（都在人设后）', got.relationAtEnd, true)
-    check('关系块档位取自亲密度 45', got.relationTier, '好朋友')
+    check('关系块档位取自注入的亲密度', got.relationTier, AFFINITY_LEVELS[2].name)
   },
 )
 

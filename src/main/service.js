@@ -36,13 +36,19 @@ import {
   AFFINITY_GAIN,
   AFFINITY_LEVELS,
   AFFINITY_MAX_POINTS,
-  AFFINITY_DAILY_CAP,
+  AFFINITY_SOURCE,
+  PET_AFFINITY_DAILY_CAP,
   AFFINITY_DECAY,
   CHATTER_SYSTEM_PROMPT,
   TOPIC_SYSTEM_PROMPT,
   DEFAULT_OUTFIT,
   OUTFIT_SLUGS,
   affinityGain,
+  affinityReadSettle,
+  affinityTodayTotal,
+  affinityUsedToday,
+  averageReplyLength,
+  happyBonus,
   settleAffinity,
   isUpsetting,
   affinityLevel,
@@ -147,7 +153,7 @@ export function createService(store, deps = {}) {
    * 把「现在几点、今天休不休息、他的作息」一起交给对话层，
    * 让它拼进 system 提示词 —— 不喂这些，模型就会在早上九点说去吃午饭。
    *
-   * `affinityPoints` / `godMode` 也在这里带上：人设里写着五档各自的行为，
+   * `affinityPoints` / `godMode` 也在这里带上：人设里写着七档各自的行为，
    * 但**模型不知道自己在哪一档**，得由这一层把当前档位喂进去
    * （见 moyu.js 的 affinityContextFor）。缺了它，人设里的档位表就是死的。
    *
@@ -280,59 +286,126 @@ export function createService(store, deps = {}) {
       chatToday: Math.max(0, Number(data.chatToday) || 0),
       gainDay: data.gainDay ?? null,
       gainToday: Math.max(0, Number(data.gainToday) || 0),
+      /*
+       * 分来源的当日额度桶（`{ pet, chat, daily, unlock }`）。
+       *
+       * 这里是**唯一**要保证形状的地方：旧记录没有这个字段，
+       * 补成空对象，`affinityGain` 就会按「该来源今天还没用过」算。
+       * 不能拿旧记录里的 `gainToday` 顶替 —— 那是所有来源的合计。
+       */
+      gainBySource: data.gainBySource && typeof data.gainBySource === 'object' ? data.gainBySource : {},
       lastActive: data.lastActive ?? null,
       decaySettledDays: Number(data.decaySettledDays) || 0,
+      dailyDay: data.dailyDay ?? null,
     }
   }
 
-  async function getAffinity(now = new Date(), sessionId) {
-    const data = await readAffinity(sessionId)
+  /**
+   * 「读时结算」—— 把这段没见面的账在**读的时候**结掉。
+   *
+   * ## 为什么放在读路径
+   *
+   * `settleAffinity` 只在有互动时被调用，于是「30 天不理她」期间库里那份
+   * 点数是冻结的 —— 用户打开面板看到旧值，发第一句话才一下掉到最低档。
+   * 观感是**惩罚他回来**。结在「打开的那一刻」，回来的第一眼就是真实值。
+   *
+   * ## 为什么是 `getAffinity` 这一层
+   *
+   * `getAffinity` 是**所有对外亲密度读数的唯一收口**：
+   * `getState()` / `affinity()` / `sessionAffinity()` / `affinityLevel()`
+   * 全从它走，而 `getState` 是每次广播、每次轮询、每个窗口都会调的热路径。
+   * 渲染层因此完全不需要知道「要不要结算」这件事。
+   *
+   * ## 为什么可以放在热路径上
+   *
+   * 无待结算时 `affinityReadSettle` 返回 `null`，这里**直接返回、不写库** ——
+   * 代价只是一次本来就要做的读 + 一次纯计算。有待结算时写一次，
+   * `decaySettledDays` 推进到今天，同一天内后续再读多少次都是纯读。
+   *
+   * ## 不推进 `lastActive`
+   *
+   * `active: false` —— 打开面板**不是互动**，不能把今天洗成互动日。
+   * 用户随后真的聊一句，那次 `addAffinity`（`active` 默认 true）才是互动日。
+   *
+   * @returns {Promise<{data:object, settled:boolean, lost:number}>}
+   */
+  async function settleAffinityOnRead(sid, now) {
+    const cur = await readAffinity(sid)
     const today = toDateKey(now)
-    return {
-      points: data.points,
-      lastDay: data.lastDay,
-      streakDays: data.streakDays,
-      /*
-       * 当日已用额度。
-       *
-       * 这里要**同时兼容新旧字段**：`gainDay/gainToday` 是现在用的，
-       * `chatDay/chatToday` 是「只封聊天」时代的旧字段。
-       * 只读新字段的话，升级当天的额度会凭空多出来一截
-       * （那天早先的聊天没被计入新计数器）。
-       */
-      gainToday:
-        (data.gainDay === today ? data.gainToday : data.chatDay === today ? data.chatToday : 0) || 0,
-      max: AFFINITY_MAX_POINTS,
-      isMax: data.points >= AFFINITY_MAX_POINTS,
-      /** 前端要按会话显示，带上 id 才知道这份是谁的 */
-      sessionId: sessionId === undefined ? await currentSessionId() : sessionId,
-    }
+    const settled = affinityReadSettle(cur, today)
+    /* 无待结算 —— 纯读，一个字节都不写 */
+    if (!settled) return { data: cur, settled: false, lost: 0 }
+    const next = { ...cur, ...settled }
+    await writeScoped('affinity', next, sid)
+    return { data: next, settled: true, lost: settled.lost }
   }
+
+  /** 把一条已结算的记录排成渲染层要看的形状（形状与改动前完全一致） */
+  const affinitySnapshotOf = (data, today, sid) => ({
+    points: data.points,
+    lastDay: data.lastDay,
+    streakDays: data.streakDays,
+    /*
+     * 当日已得分（**全部来源合计，只用于展示**）。
+     *
+     * 取消每日总上限之后它不再是额度，UI 也不能拿它跟某个
+     * 上限相除 —— 界面上要显示上限的地方一律用 `petToday/petCap`。
+     */
+    gainToday: affinityTodayTotalFor(data, today),
+    gainBySource: data.gainDay === today ? data.gainBySource : {},
+    /* 桌宠交互的当日额度 —— 唯一还存在的上限 */
+    petToday: affinityUsedToday(data, today, AFFINITY_SOURCE.PET),
+    petCap: PET_AFFINITY_DAILY_CAP,
+    max: AFFINITY_MAX_POINTS,
+    isMax: data.points >= AFFINITY_MAX_POINTS,
+    /** 前端要按会话显示，带上 id 才知道这份是谁的 */
+    sessionId: sid,
+  })
+
+  async function getAffinity(now = new Date(), sessionId) {
+    /* 会话 id 只解析一次：`currentSessionId()` 要查一次库，别在下面再查一遍 */
+    const sid = sessionId === undefined ? await currentSessionId() : sessionId
+    const today = toDateKey(now)
+    const { data, lost } = await settleAffinityOnRead(sid, now)
+    /*
+     * 真的扣了分才广播 —— 这条路径上「无待结算」是绝大多数调用，
+     * 每次都广播等于给所有窗口白刷一遍。扣了才推，UI 才能立刻看到掉档。
+     *
+     * 这里**不会递归**：`onChange` 的订阅者只做 broadcast / 重建托盘。
+     */
+    if (lost > 0) emit('affinity', affinitySnapshotOf(data, today, sid))
+    return affinitySnapshotOf(data, today, sid)
+  }
+
+  /** 当日合计（旧记录没有分桶，用旧的 `gainToday` 兜底）—— 逻辑在 shared */
+  const affinityTodayTotalFor = (data, today) => affinityTodayTotal(data, today)
 
   /**
    * 记亲密度。
    *
    * @param {number} delta 想加的点数
    * @param {Date} now
-   * @param {{ kind?: 'chat'|'interaction', silent?: boolean, sessionId?: string }} [opts]
-   *   得分受当日总额度（`AFFINITY_DAILY_CAP`）约束，
-   *   避免一口气聊几十条就把关系刷满。
+   * @param {{ kind?: 'chat'|'interaction', source?: string, upsetting?: boolean, silent?: boolean, sessionId?: string }} [opts]
+   *   `delta` 受**该来源**的每日额度约束（只有桌宠交互有额度，
+   *   见 `AFFINITY_DAILY_CAP_BY_SOURCE`）；`source` 不传时按 `kind` 推。
    */
   async function addAffinity(delta, now = new Date(), opts = {}) {
     /* 会话 id 也接受从 opts 传（内部调用点较多），但显式参数优先 */
     const sid = opts.sessionId ?? (await currentSessionId())
     const cur = await readAffinity(sid)
     const today = toDateKey(now)
+    const source = opts.source ?? (opts.kind === 'chat' ? AFFINITY_SOURCE.CHAT : AFFINITY_SOURCE.PET)
 
     /*
-     * 加、扣、每日额度、久未互动衰减**全走 shared 的 settleAffinity** ——
-     * 与手机端同一套规则。两端各写一遍时改规则容易漏一处，
+     * 加、扣、每日额度、每日自然流失、无互动惩罚**全走 shared 的 settleAffinity**
+     * —— 与手机端同一套规则。两端各写一遍时改规则容易漏一处，
      * 表现为「电脑上掉了 3 点、手机上只掉 1 点」，用户没法理解。
      */
     const settled = settleAffinity(cur, {
       today,
       delta,
       upsetting: opts.upsetting === true,
+      source,
     })
     const gain = settled.gained
 
@@ -717,7 +790,7 @@ export function createService(store, deps = {}) {
      * 空记录要带上**全部**在用字段。
      * 之前只写了 `chatDay/chatToday`（旧名），漏了新的
      * `gainDay/gainToday` —— 重置后读额度会得到 undefined，
-     * 表现为「重置完当天还能再加满 60 点」。
+     * 表现为「重置完当天还能再加满额度」。
      */
     const blank = {
       points: 0,
@@ -725,8 +798,12 @@ export function createService(store, deps = {}) {
       streakDays: 0,
       gainDay: null,
       gainToday: 0,
+      /* 分来源额度桶（只有 pet 有上限）—— 漏了它重置后会读成「用过多少」不确定 */
+      gainBySource: {},
       lastActive: null,
       decaySettledDays: 0,
+      /* 每日见面记账日 —— 漏了它重置后还能再领一次当天的见面分 */
+      dailyDay: null,
     }
     await writeScoped('affinity', blank, sid)
     await store.setMeta('affinity', null)
@@ -1476,7 +1553,8 @@ export function createService(store, deps = {}) {
 
       /*
        * 聊天记亲密度 —— 对话是处关系的主要途径，比摸头值钱。
-       * 受当日总额度约束（见 AFFINITY_DAILY_CAP），所以这里只报「想加多少」。
+       * 聊天**不受每日额度约束**（用户要求取消总上限，只留桌宠交互的），
+       * 所以这里只报「想加多少」。
        *
        * 同时判断这轮是否**惹她生气了**：说重话要扣分，
        * 否则「说错话」除了回复语气之外没有任何代价。
@@ -1484,7 +1562,13 @@ export function createService(store, deps = {}) {
       const affinityAfterMessage = await addAffinity(
         AFFINITY_GAIN.chatMessage,
         new Date(),
-        { kind: 'chat', silent: true, sessionId: sid, upsetting: isUpsetting(text) },
+        {
+          kind: 'chat',
+          source: AFFINITY_SOURCE.CHAT,
+          silent: true,
+          sessionId: sid,
+          upsetting: isUpsetting(text),
+        },
       )
       emit('affinity', affinityAfterMessage)
 
@@ -1499,6 +1583,13 @@ export function createService(store, deps = {}) {
       const history = (await store.recentMessages(sid, cfg.cfg.maxHistory))
         .filter((m) => m.role === 'user' || m.role === 'assistant')
         .map((m) => ({ role: m.role, content: m.content }))
+      /*
+       * 她**平时**回多长 —— 「这轮回复变长」是「开心」的信号之一
+       * （见 shared/interactions.js 的 happyReplySignals）。
+       * 必须在把这一轮回复落库之前算：否则新回复会把自己算进平均里，
+       * 「变长」这个相对判据就被自己稀释掉了。
+       */
+      const avgReplyLen = averageReplyLength(history)
 
       const controller = new AbortController()
       activeRequests.set(requestId, controller)
@@ -1566,18 +1657,34 @@ export function createService(store, deps = {}) {
          */
         emit('unread', { sessionId: sid, count: await unreadCount(sid) })
         /*
+         * 「开心」加成（0~3 点）—— 在这轮结算之前先算出来。
+         *
+         * 放 if 外面是为了让下面那段「受 upsetting 约束」的结构保持平直：
+         * smoke 有一条源码级守卫，靠 `[^}]*` 卡住「chatRound 必须在
+         * `if (!isUpsetting(...))` 的同一个块里」，块里多一层对象字面量
+         * 就会把那条正则截断、守卫失效。
+         */
+        const happyGain = isUpsetting(text) ? 0 : happyBonus({ text: clean, reply: result.content, avgReplyLen, segments: parts.length })
+
+        /*
          * 一轮问答真正聊完，额外记一笔 —— 光发消息不算，得聊完。
          *
-         * **惹她生气那轮不给这一笔**：上面按 `upsetting` 扣了分、并把
-         * 当次加分清零，若这里再按「聊完」记 +3，就把扣的分加回来了 ——
-         * 实测净变化是 `-2 + 3 = +1`，**骂她反而涨点**。
+         * **这一笔里含「开心加成」**（见 shared 的 `happyBonus`）：
+         * 用户要求「聊天时让她感到开心则会获得好感度」，所以
+         * 「聊完一轮」的基础分上再叠加 0~3 点 ——
+         * 词表命中、或她这轮回复变长/带撒娇语气/分条发，都算。
+         *
+         * **惹她生气那轮整笔不给**：上面按 `upsetting` 扣了分、并把
+         * 当次加分清零，若这里再按「聊完」记分，就把扣的分加回来了 ——
+         * **骂她反而涨点**。
          *
          * `settleAffinity` 里那句「生气当次的加分直接清零」本身没错，
          * 但一轮被拆成两次调用，抵消就发生在两次调用**之间**了。
          * 判定必须是同一轮同一个 `upsetting`，所以这里也要看它。
          */
         if (!isUpsetting(text)) {
-          emit('affinity', await addAffinity(AFFINITY_GAIN.chatRound, new Date(), { kind: 'chat', silent: true, sessionId: sid }))
+          const roundGain = AFFINITY_GAIN.chatRound + happyGain
+          emit('affinity', await addAffinity(roundGain, new Date(), { kind: 'chat', source: AFFINITY_SOURCE.CHAT, silent: true, sessionId: sid }))
         }
 
         /*
@@ -1603,6 +1710,22 @@ export function createService(store, deps = {}) {
            */
           await appendUnlockPhoto(sid, unlocked)
           emit('gallery-unlock', unlocked)
+          /*
+           * 解锁本身给一笔奖励（用户要求「解锁事件会有奖励好感度」）。
+           * 走独立来源 `unlock`：**不占**聊天额度也不占桌宠额度，
+           * 而且**不封顶** —— 解锁是低频事件，不需要防刷。
+           * 失败不影响已经解锁这个事实，所以单独 try。
+           */
+          try {
+            emit('affinity', await addAffinity(AFFINITY_GAIN.photoUnlock, new Date(), {
+              kind: 'unlock',
+              source: AFFINITY_SOURCE.UNLOCK,
+              silent: true,
+              sessionId: sid,
+            }))
+          } catch {
+            /* 奖励记不上不该影响解锁 */
+          }
         }
 
         emit('chat-done', { sessionId: sid, requestId, ok: true, message: msg, unlocked })
@@ -1644,9 +1767,13 @@ export function createService(store, deps = {}) {
         levels: AFFINITY_LEVELS,
         max: AFFINITY_MAX_POINTS,
         gain: AFFINITY_GAIN,
-        /* 每日额度：所有来源合计（不再是「只封聊天」） */
-        dailyCap: AFFINITY_DAILY_CAP,
-        /* 衰减规则：前端要拿它说明「多久不理她会掉分」 */
+        /*
+         * 每日额度**只有桌宠交互有**（用户要求取消总上限）。
+         * 字段名带着 pet 是为了让前端一眼看出它管的是谁 ——
+         * 早先叫 `dailyCap`（那时是全来源合计），留着会被误用成总上限。
+         */
+        petDailyCap: PET_AFFINITY_DAILY_CAP,
+        /* 衰减规则：前端要拿它说明「每天自然流失多少、空白天额外扣多少」 */
         decay: AFFINITY_DECAY,
       },
       version: '0.1.0',

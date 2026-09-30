@@ -153,7 +153,14 @@ export function createGalleryRunner(opts) {
     }
 
     /* ② 关键词预筛（零成本）—— 不命中就到此为止，不花 token */
-    const candidates = spec.keywordCandidates(recentText, unlocked)
+    /*
+     * **亲密度必须传进去**：关键词预筛里就带着门槛判定
+     * （`if (p < outfitMinPoints(slug)) continue`），漏传时 `points`
+     * 默认 0，于是**门槛大于 0 的那些装扮/照片永远进不了候选** ——
+     * 表现是「聊到了关键词也永远不解锁」，而且毫无报错。
+     * 条件解锁那一步一直是传的，这里以前漏了。
+     */
+    const candidates = spec.keywordCandidates(recentText, unlocked, await points())
     if (!candidates.length) return null
 
     /* ③ 模型判断（唯一花钱的一步，且只为候选） */

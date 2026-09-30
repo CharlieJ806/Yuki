@@ -235,14 +235,15 @@ export async function countMessages(sessionId) {
 /**
  * 亲密度状态。
  *
- * 桌面端有完整实现（`AFFINITY_GAIN` / 日上限 / 5 档等级），
+ * 桌面端有完整实现（`AFFINITY_GAIN` / 分来源的日额度 / 7 档等级），
  * 手机端此前**只有一句注释说「用已聊条数当代理」，从没展示给用户** ——
  * 于是手机上完全看不到关系进展，图鉴的「条件解锁」也失去参照。
  *
- * 这里存的是和桌面端**同一份结构**（points / lastDay / gainDay / gainToday；
- * chatDay/chatToday 是「只封聊天」时代的旧字段，老数据靠 settleAffinity 兼容读取），
- * 判定直接复用 `@shared/interactions.js` 的 affinityLevel / affinityGain，
- * 两端规则不会漂移。
+ * 这里存的是和桌面端**同一份结构**（points / lastDay / gainDay /
+ * gainBySource 分来源额度桶 / lastActive / decaySettledDays / dailyDay；
+ * chatDay/chatToday 是「只封聊天」时代的旧字段，老数据靠 settleAffinity
+ * 兼容读取），判定直接复用 `@shared/interactions.js` 的
+ * affinityLevel / settleAffinity，两端规则不会漂移。
  */
 export async function getAffinity() {
   return (
@@ -251,6 +252,10 @@ export async function getAffinity() {
       lastDay: null,
       gainDay: null,
       gainToday: 0,
+      gainBySource: {},
+      lastActive: null,
+      decaySettledDays: 0,
+      dailyDay: null,
     }
   )
 }

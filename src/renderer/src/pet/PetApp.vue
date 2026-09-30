@@ -20,6 +20,7 @@ import {
   EMOTE_FOR,
   TIRED_POSES,
   AFFINITY_GAIN,
+  AFFINITY_SOURCE,
   OUTFIT_SLUGS,
   PET_EXPRESSIONS,
   /* affinityView 是本地口径（比 affinityLevel 多一层 godMode 判定），保留 */
@@ -201,10 +202,15 @@ function say(text, emoteKey = null, holdMs = 3200) {
   speechTimer = window.setTimeout(() => (speech.value = ''), holdMs)
 }
 
-/** 互动时给个视觉反馈 + 记亲密度 */
+/**
+ * 互动时给个视觉反馈 + 记亲密度。
+ *
+ * 来源显式传 `pet`：这是**唯一有每日额度**的来源
+ * （聊天 / 每日见面 / 解锁奖励都不封顶）。
+ */
 function bump(kind, points = 1) {
   react()
-  if (state.settings.petAffinity) addAffinity(points).catch(() => {})
+  if (state.settings.petAffinity) addAffinity(points, { source: AFFINITY_SOURCE.PET }).catch(() => {})
 }
 
 const affinity = computed(() => affinityView(state.affinity?.points ?? 0, state.settings?.godMode))
@@ -224,13 +230,16 @@ function lineFor(key) {
 /*
  * 每日见面分：只要这天桌宠起来过一次就记 1 点，
  * 让「连续互动天数」不至于因为没动手摸而断掉。
+ *
+ * 来源传 `daily`（**一天只算一次**，由 `settleAffinity` 的 `dailyDay`
+ * 记账保证 —— 这个标记在每次启动时都会重置，光靠它挡不住反复重启）。
  */
 let dailyBonusDone = false
 
 function grantDailyAffinity() {
   if (dailyBonusDone || !state.settings.petAffinity) return
   dailyBonusDone = true
-  addAffinity(AFFINITY_GAIN.daily).catch(() => {})
+  addAffinity(AFFINITY_GAIN.daily, { source: AFFINITY_SOURCE.DAILY }).catch(() => {})
 }
 
 /* ---------- 鼠标交互 ---------- */
