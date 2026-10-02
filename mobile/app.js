@@ -13,6 +13,11 @@ import {
   /* 别名导入 —— 下面用本地 saveSettings 包一层（见其定义） */
   saveSettings as saveSettingsRaw,
   allPersonas,
+  /* 人设操作（与桌面端 service.js 同语义；内置不可改，复制出副本再编辑） */
+  createPersona,
+  duplicatePersona,
+  updatePersona,
+  deletePersona,
   configStatus,
   sendMessage,
   toDateKey,
@@ -1188,6 +1193,17 @@ async function openPetPage() {
   /* 打开时立刻刷一次 —— 等 30 秒的 ticker 才更新会看到旧图 */
   await refreshPetStrip()
   await refreshAffinity()
+  /*
+   * 「每日见面」+1 —— 与桌面端桌宠窗挂载时记的那笔一致
+   * （PetApp.vue 的 `addAffinity(AFFINITY_GAIN.daily, { source: DAILY })`）。
+   *
+   * `settleAffinity` 用 `dailyDay` 记账，同一天重复调用只算一次，
+   * 所以反复开关这一页不会刷分。手机端此前完全没有这一笔，
+   * 于是每天比桌面端少 1 点，长期看得出差距。
+   */
+  bumpAffinity('daily')
+    .then(refreshAffinity)
+    .catch(() => {})
   refreshCheckin().catch(() => {})
   applyPetBackground(Number(settings.petBackground) || 0)
   /*
@@ -2133,16 +2149,9 @@ async function openSettings() {
   refreshBgPoolInfo()
   el.testResult.textContent = ''
 
-  const personas = await allPersonas()
-  const sel = $('f-persona')
-  sel.innerHTML = ''
-  for (const p of personas) {
-    const o = document.createElement('option')
-    o.value = p.id
-    o.textContent = p.label + (p.custom ? '（自定义）' : '')
-    sel.appendChild(o)
-  }
-  sel.value = settings.chatPersona
+  await loadPersonaOptions()
+  /* 每次打开面板都把编辑器收起来（closePersonaEditor 顺带清掉上次的提示） */
+  closePersonaEditor()
 
   const usage = await db.usageBytes()
   el.usage.textContent = usage == null ? '' : `本机已用约 ${(usage / 1024 / 1024).toFixed(1)} MB`
@@ -2150,6 +2159,178 @@ async function openSettings() {
 const closeSettings = () => {
   el.settings.hidden = true
   if (el.drawer.hidden) el.scrim.hidden = true
+}
+
+/* ---------- 人设编辑 ---------- */
+
+/*
+ * 手机端此前**完全没有**这套东西：设置页只有一个下拉框，用户能看见
+ * 「角色设定」却改不了它 —— 内置的三份之间切换而已，而且存储层连
+ * updatePersona 都没有（只有 list / create / delete，且 create/delete 无人调用）。
+ *
+ * 现在按桌面端设置页（SettingsView.vue）的规矩补齐：
+ *   - 内置人设不可改，点「复制」另存一份**可编辑的副本**；
+ *   - 只对自定义人设显示「编辑 / 删除」；
+ *   - 失败一律落一句人话到面板上，不静默（桌面端那处踩过「点了没反应」）。
+ */
+
+/** 当前下拉框里列出的全部人设（loadPersonaOptions 填充，供同步判断用） */
+let personaList = []
+/** 正在编辑的草稿 { id, label, prompt }；null = 编辑器关闭 */
+let editingPersona = null
+
+/** 面板上的人设操作提示（isErr 时标红，且不自动清除） */
+function personaMsg(text, isErr = false) {
+  const node = $('persona-msg')
+  if (!node) return
+  node.textContent = text ?? ''
+  node.classList.toggle('err', Boolean(isErr))
+}
+
+function currentPersona() {
+  const id = $('f-persona')?.value
+  return personaList.find((p) => p.id === id) ?? null
+}
+
+/**
+ * 填充下拉框，并把选中值修回一个**列表里真实存在**的 id。
+ *
+ * 为什么非修不可：`chatPersona` 可能指向一条已不存在的人设（导入备份、
+ * 或旧数据里的自定义 id）。此时给 `<select>.value` 赋一个没有对应
+ * option 的值，它会显示成**空白**；用户再点「保存」，写回去的是 ''，
+ * 而 saveSettings 会跳过空串（见 chat.js 的注释）—— 于是表现成
+ * 「选了也没用」，且永远修不回来。
+ * 桌面端有同一处兜底（SettingsView.vue 的 ensurePersonaSelection）。
+ */
+async function loadPersonaOptions() {
+  personaList = await allPersonas()
+  const sel = $('f-persona')
+  if (!sel) return
+  sel.innerHTML = ''
+  for (const p of personaList) {
+    const o = document.createElement('option')
+    o.value = p.id
+    o.textContent = p.label + (p.custom ? '（自定义）' : '')
+    sel.appendChild(o)
+  }
+  if (!personaList.some((p) => p.id === settings.chatPersona) && personaList[0]) {
+    settings = await saveSettings({ chatPersona: personaList[0].id })
+  }
+  sel.value = settings.chatPersona
+  syncPersonaButtons()
+}
+
+/** 「编辑 / 删除」只对自定义人设显示 —— 内置那份按设计不可改 */
+function syncPersonaButtons() {
+  const p = currentPersona()
+  const custom = Boolean(p?.custom)
+  const edit = $('btn-persona-edit')
+  const del = $('btn-persona-delete')
+  if (edit) edit.hidden = !custom
+  if (del) del.hidden = !custom
+}
+
+function startEditPersona(p) {
+  editingPersona = { id: p.id, label: p.label ?? '', prompt: p.prompt ?? '' }
+  const label = $('f-persona-label')
+  const prompt = $('f-persona-prompt')
+  if (label) label.value = editingPersona.label
+  if (prompt) prompt.value = editingPersona.prompt
+  const box = $('persona-editor')
+  if (box) box.hidden = false
+  updatePersonaCount()
+  personaMsg('')
+}
+
+function closePersonaEditor() {
+  editingPersona = null
+  const box = $('persona-editor')
+  if (box) box.hidden = true
+  personaMsg('')
+}
+
+function updatePersonaCount() {
+  const n = $('f-persona-prompt')?.value.length ?? 0
+  const node = $('persona-editor-count')
+  if (node) node.textContent = `当前 ${n} 字`
+}
+
+/** 选中某份人设并落库（顺带刷聊天页顶部那个名字） */
+async function selectPersona(id) {
+  const sel = $('f-persona')
+  if (sel) sel.value = id
+  settings = await saveSettings({ chatPersona: id })
+  syncPersonaButtons()
+  await refreshStatus()
+}
+
+async function onPersonaNew() {
+  try {
+    const created = await createPersona({ label: '新人设', prompt: '' })
+    if (!created) return personaMsg('新建失败：没能创建人设', true)
+    await loadPersonaOptions()
+    await selectPersona(created.id)
+    startEditPersona(created)
+    personaMsg('已新建，改完记得点保存')
+  } catch (err) {
+    personaMsg(`新建失败：${err?.message ?? err}`, true)
+  }
+}
+
+/**
+ * 复制当前选中的人设。
+ *
+ * 这是改**内置人设**的唯一途径：直接改内置会让「Yuki 是谁」变成
+ * 用户本地的一个变量，两端的人设内容就再也对不上了。
+ */
+async function onPersonaDuplicate() {
+  try {
+    const src = $('f-persona')?.value
+    const created = await duplicatePersona(src)
+    if (!created) return personaMsg('复制失败：选中的那份人设不存在了，请重新打开面板', true)
+    await loadPersonaOptions()
+    await selectPersona(created.id)
+    startEditPersona(created)
+    personaMsg('已复制一份，可自由修改')
+  } catch (err) {
+    personaMsg(`复制失败：${err?.message ?? err}`, true)
+  }
+}
+
+async function onPersonaSave() {
+  const p = editingPersona
+  if (!p) return
+  try {
+    const updated = await updatePersona(p.id, {
+      label: $('f-persona-label')?.value ?? '',
+      prompt: $('f-persona-prompt')?.value ?? '',
+    })
+    if (!updated) return personaMsg('保存失败：这份人设不存在了（可能已被删除）', true)
+    await loadPersonaOptions()
+    closePersonaEditor()
+    await refreshStatus()
+    personaMsg('已保存')
+  } catch (err) {
+    personaMsg(`保存失败：${err?.message ?? err}`, true)
+  }
+}
+
+async function onPersonaDelete() {
+  const p = currentPersona()
+  if (!p?.custom) return
+  if (!confirm(`删除人设「${p.label}」？`)) return
+  try {
+    const wasActive = settings.chatPersona === p.id
+    await deletePersona(p.id)
+    /* deletePersona 已把「正在用的那份」回落成默认，这里重读一遍设置 */
+    settings = await loadSettings()
+    await loadPersonaOptions()
+    if (editingPersona?.id === p.id) closePersonaEditor()
+    await refreshStatus()
+    personaMsg(wasActive ? '已删除，并切回了内置人设' : '已删除')
+  } catch (err) {
+    personaMsg(`删除失败：${err?.message ?? err}`, true)
+  }
 }
 
 /**
@@ -2553,6 +2734,24 @@ function bind() {
    */
   /* 开关状态立刻反映到间隔的显隐上（不等到保存） */
   $('f-proactive')?.addEventListener('change', syncProactiveMinVisibility)
+
+  /*
+   * 人设编辑：复制 / 新建 / 编辑 / 保存 / 取消 / 删除。
+   * 都用 on() 包一层 —— 单个元素缺失不拖垮其它绑定（见 on 的注释）。
+   */
+  on('btn-persona-new', 'click', onPersonaNew)
+  on('btn-persona-duplicate', 'click', onPersonaDuplicate)
+  on('btn-persona-save', 'click', onPersonaSave)
+  on('btn-persona-delete', 'click', onPersonaDelete)
+  on('btn-persona-cancel', 'click', closePersonaEditor)
+  on('btn-persona-edit', 'click', () => {
+    const p = currentPersona()
+    if (p?.custom) startEditPersona(p)
+  })
+  /* 选中项一换，「编辑 / 删除」的显隐要跟着变（内置人设不显示它们） */
+  $('f-persona')?.addEventListener('change', syncPersonaButtons)
+  /* 提示词字数实时显示（人设长短直接影响 token 成本） */
+  $('f-persona-prompt')?.addEventListener('input', updatePersonaCount)
 
   const bgMode = $('f-bgMode')
   if (bgMode) {

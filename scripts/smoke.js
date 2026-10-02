@@ -3859,11 +3859,43 @@ try {
      * 而手机上看起来一切正常（她只是永远演最低档）。
      */
     const mobileChat = readFileSync(join(ROOT, 'mobile', 'chat.js'), 'utf8')
-    check('手机端 import 了 affinityContextFor', mobileChat.includes('affinityContextFor'), true)
-    check('手机端真的调用了它', /affinityContextFor\(/.test(mobileChat), true)
+    /*
+     * 判据必须是「手机端走的是**共用实现**」，而不是「手机端自己拼了一段」。
+     *
+     * 早先这几条锁的是 `/\[clock, relation\]/` 这种字面量 —— 那等于给
+     * 手写副本上锁：它只保证副本还在，不保证副本和桌面端一致，
+     * 而真正要防的是「桌面改了、手机漏了」。实现现在只有一份
+     * （src/shared/prompt.js），所以直接要求手机端 import 并调用它。
+     */
+    check('手机端 import 了共用易变块 volatileContextFor', mobileChat.includes('volatileContextFor'), true)
+    check('手机端真的调用了它', /volatileContextFor\(/.test(mobileChat), true)
+    check('手机端不再自己拼易变块', /\[clock, relation\]/.test(mobileChat), false)
     check('手机端读了亲密度', /await db\.getAffinity\(\)/.test(mobileChat), true)
-    check('手机端用 affinityView 取档位', /affinityView\(/.test(mobileChat), true)
-    check('手机端也把关系块拼在末尾', /\[clock, relation\]/.test(mobileChat), true)
+    check('关系块走共用实现（不是自带 affinityView）', /affinityView\(/.test(mobileChat), false)
+    check('手机端把档位传给了共用实现', /affinityPoints:/.test(mobileChat), true)
+    /* 节假日表：不带它的话「调休补班的周末」两端会算出相反的休息日 */
+    check('手机端带上了节假日表', mobileChat.includes('builtinHolidayTable'), true)
+
+    /*
+     * 挂机台词 / 主动找话题那条路径也要带时间和档位 ——
+     * 桌面端的 completeOnce 一直是这么做的，手机端此前只发裸提示词，
+     * 于是「同一份人设、两端两个性格」在主动搭话时尤其明显。
+     */
+    check('手机端 completeOnce 注入易变块', /composeSystemPrompt\(system, volatileContextFor\(/.test(mobileChat), true)
+    /* 历史预算：手机端此前只在注入参考图时才裁，且预算写死 48000/1200 */
+    check('手机端按 maxChars 裁剪历史', /trimByChars\(normalized, cfg\.maxChars/.test(mobileChat), true)
+
+    /*
+     * 人设编辑能力 —— 手机端此前只有 list/create/delete，**没有 update**，
+     * 所以「改人设」在手机上是根本做不到的（用户报的就是这个）。
+     */
+    const mobileStorage = readFileSync(join(ROOT, 'mobile', 'storage.js'), 'utf8')
+    check('手机端存储层能改人设', /export async function updatePersona\(/.test(mobileStorage), true)
+    const mobileApp = readFileSync(join(ROOT, 'mobile', 'app.js'), 'utf8')
+    check('手机端设置页接了人设保存', /updatePersona\(p\.id/.test(mobileApp), true)
+    check('手机端设置页接了人设复制', /duplicatePersona\(src\)/.test(mobileApp), true)
+    /* 每日见面分：桌面端在桌宠窗挂载时给，手机端此前完全没有这一笔 */
+    check('手机端有每日见面分', /bumpAffinity\('daily'\)/.test(mobileApp), true)
   }
 
   /*

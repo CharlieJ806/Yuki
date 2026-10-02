@@ -12,8 +12,6 @@
 import {
   CHAT_PERSONAS,
   DEFAULT_SETTINGS,
-  timeContextFor,
-  affinityContextFor,
   toDateKey,
   isRestDay,
 } from '../src/shared/moyu.js'
@@ -22,19 +20,28 @@ import {
   validateImageDataUrl,
   checkImagesForModel,
   normalizeForRequest,
-  contentCost,
   modelSupportsImages,
   withSelfPortrait,
   buildRouteOptions,
   splitReplySegments,
+  trimByChars,
 } from '../src/shared/content.js'
+/*
+ * 易变块（时间块 + 关系块）与 system 组装**走桌面端同一份实现**。
+ *
+ * 早先这里是自己拼的（把时间块与关系块 filter 掉空值后用空行 join），
+ * 因为手机端 import 不到
+ * `src/main/chat.js`（那是主进程代码）。现在实现搬到了 `src/shared/prompt.js`，
+ * 两端共用一条路径 —— 改一次两边同时生效，不会再出现「桌面改了、手机漏了」。
+ */
+import { composeSystemPrompt, volatileContextFor } from '../src/shared/prompt.js'
+/* 手机端没有桌面那套联网节假日（纯静态 PWA），用内置常量表补上同一口径 */
+import { builtinHolidayTable } from '../src/shared/holidays.js'
 import { createGalleryRunner } from '../src/shared/gallery.js'
 import {
   AFFINITY_GAIN,
-  AFFINITY_SOURCE,
   affinityLevel,
   affinityReadSettle,
-  affinityView,
   averageReplyLength,
   happyBonus,
   settleAffinity,
@@ -89,20 +96,68 @@ export async function allPersonas() {
   ]
 }
 
+/* ---------- 人设操作（内置 + 自定义） ---------- */
+
+/*
+ * 桌面端这一段住在 `src/main/service.js`（listPersonas / createPersona /
+ * duplicatePersona / updatePersona / deletePersona），手机端此前**整段缺失**：
+ * 设置页只有一个下拉框，存储层连 updatePersona 都没有 ——
+ * 用户能看见「角色设定」却改不了它，只能在内置的三份之间切换。
+ *
+ * 这里按桌面端的语义补齐（含「删掉正在用的那份要回落默认」）。
+ * 内置人设照桌面端的规矩**不可改**：想改就「复制」出一份副本再编辑，
+ * 副本是自定义记录，随便改都不影响内置那份。
+ */
+
+/** 新建一份空白自定义人设（与桌面端一样，先建默认名，再由用户改） */
+export async function createPersona({ label = '新人设', prompt = '' } = {}) {
+  return db.createPersona({ label, prompt })
+}
+
+/**
+ * 复制一份现有（内置或自定义）人设作为新的自定义人设。
+ *
+ * 这是改内置人设的**唯一途径** —— 直接改内置会让「Yuki 是谁」变成
+ * 用户本地的一个变量，两端人设内容就再也对不上了。
+ *
+ * @returns {Promise<object|null>} 源不存在时返回 null（调用方要给出可见提示）
+ */
+export async function duplicatePersona(sourceId) {
+  const all = await allPersonas()
+  const src = all.find((p) => p.id === sourceId)
+  if (!src) return null
+  return db.createPersona({ label: `${src.label} 副本`.slice(0, 40), prompt: src.prompt })
+}
+
+/** 改一份自定义人设（空名称不覆盖原名等语义在 storage.updatePersona 里） */
+export async function updatePersona(id, patch) {
+  return db.updatePersona(id, patch)
+}
+
+/**
+ * 删一份自定义人设。
+ *
+ * 删掉的正好是**正在用**的那份时回落到第一个内置人设 ——
+ * 否则 `chatPersona` 会指向一条已软删的记录：下拉框空白、
+ * 聊天标题顶着旧名字，而用户完全不知道发生了什么。
+ * （桌面端还会清掉各会话的逐会话副本；手机端的人设是全局一份，无需那一步。）
+ */
+export async function deletePersona(id) {
+  await db.deletePersona(id)
+  const cur = await loadSettings()
+  if (cur.chatPersona === id) await saveSettings({ chatPersona: CHAT_PERSONAS[0].id })
+  return { ok: true }
+}
+
 /** 解析出当前请求要用的配置（含人设 prompt） */
 export async function resolveConfig(settings, now = new Date()) {
   const personas = await allPersonas()
   const persona =
     personas.find((p) => p.id === settings.chatPersona) ?? CHAT_PERSONAS[0]
 
-  const clock = timeContextFor(now, {
-    workStart: settings.workStart,
-    workEnd: settings.workEnd,
-    isRestDay: isRestDay(settings, now, null),
-  })
-
   /*
-   * 关系块 —— 与桌面端**同一份实现**（`affinityContextFor` + `affinityView`）。
+   * 关系块 —— 与桌面端**同一份实现**（shared/prompt.js 的 volatileContextFor，
+   * 内部用 affinityView + affinityContextFor）。
    *
    * 手机端的亲密度是全局键 `affinity`（没有会话概念，见 desktop 端
    * service.js 的命名空间注释），所以直接读库里的 points 就行。
@@ -117,22 +172,26 @@ export async function resolveConfig(settings, now = new Date()) {
    */
   const affinity = await affinityNow()
   const points = Math.max(0, Number(affinity?.points) || 0)
-  const view = affinityView(points, settings.godMode === true)
-  const relation = affinityContextFor(points, {
-    name: view.level?.name,
-    next: view.next,
-    isMax: view.isMax,
-    godMode: view.godMode === true,
-  })
 
   /*
-   * 顺序：人设在前、易变块在后 —— 为了命中前缀缓存（见桌面端 composeSystemPrompt）。
+   * 顺序：人设在前、易变块在后 —— 为了命中前缀缓存（见 composeSystemPrompt）。
    * 时间块每分钟变，放在末尾才不会把前面 1500+ 字的人设缓存击穿。
    * 关系块同理，且必须跟在人设之后（写进人设正文里会每轮击穿缓存）。
+   *
+   * `isRestDay` 必须带**节假日表**：只按周末算的话，调休补班的周末
+   * （表里 isMakeup）和放假的工作日（表里 isHoliday）会和桌面端
+   * 得出相反的结论 —— 她在手机上说你今天休息、在电脑上说你今天上班。
+   * 手机端用不了桌面那套联网方案，所以读 shared/holidays.js 的内置表。
    */
+  const volatile = volatileContextFor(settings, {
+    now,
+    isRestDay: isRestDay(settings, now, builtinHolidayTable(now.getFullYear())),
+    affinityPoints: points,
+    godMode: settings.godMode === true,
+  })
+
   const baseUrl = String(settings.chatBaseUrl || '').trim().replace(/\/+$/, '')
   const apiKey = String(settings.chatApiKey || '').trim()
-  const volatile = [clock, relation].filter(Boolean).join('\n\n')
 
   return {
     baseUrl,
@@ -140,13 +199,27 @@ export async function resolveConfig(settings, now = new Date()) {
     model: String(settings.chatModel || '').trim() || 'deepseek-chat',
     /* 路由偏好透传（仅 OpenRouter 认；与桌面端共用同一份实现） */
     routeOptions: buildRouteOptions(baseUrl, settings),
-    temperature: Number(settings.chatTemperature) || 1,
-    maxHistory: Number(settings.chatMaxHistory) || 100,
-    maxChars: Number(settings.chatMaxChars) || 48000,
-    systemPrompt: volatile ? `${persona.prompt}\n\n${volatile}` : persona.prompt,
+    /*
+     * 钳制口径与桌面端 `resolveChatConfig` 保持一致。
+     *
+     * 特别是温度：这里原来写的是 `Number(...) || 1`，于是**用户把温度调到 0
+     * （要最确定的回答）会被当成「没设置」而变成 1** —— 0 是合法值。
+     * 默认值也必须是 DEFAULT_SETTINGS 的 1.3，不能各写一个数。
+     */
+    temperature: clampNumber(settings.chatTemperature, 0, 2, DEFAULT_SETTINGS.chatTemperature),
+    maxHistory: clampNumber(settings.chatMaxHistory, 2, 400, 100),
+    maxChars: clampNumber(settings.chatMaxChars, 2000, 400000, 48000),
+    systemPrompt: composeSystemPrompt(persona.prompt, volatile),
     personaId: persona.id,
     needsApiKey: !/^https?:\/\/(127\.0\.0\.1|localhost|\[::1\])/i.test(baseUrl),
   }
+}
+
+/** 数值钳制（与桌面端 chat.js 的 clampNumber 同口径） */
+function clampNumber(value, min, max, fallback) {
+  const n = Number(value)
+  if (!Number.isFinite(n)) return fallback
+  return Math.min(max, Math.max(min, n))
 }
 
 /** 配置是否可用 */
@@ -256,7 +329,24 @@ export async function sendMessage({
    * 否则新回复会把自己算进平均里，把判据稀释掉。
    */
   const avgReplyLen = averageReplyLength(history)
-  const payload = [{ role: 'system', content: cfg.systemPrompt }, ...withPortraitIfAny(history, selfPortrait, cfg.model)]
+  /*
+   * 先规范化（图片只留最后一条 user、老图降级成文字占位），再按预算裁剪 ——
+   * 顺序不能反：裁剪是按成本算的，而规范化会改变每条消息的内容形态。
+   *
+   * **这里必须裁**：早先手机端只在「注入参考图」那条分支里裁过一次，
+   * 而且预算写死成 48000/1200 —— 结果用户在设置里改的 chatMaxChars
+   * 在手机端等于没生效（桌面端一直是裁的）。人设越长这个问题越明显。
+   */
+  const normalized = normalizeForRequest(history)
+  const trimmed = trimByChars(normalized, cfg.maxChars, cfg.systemPrompt.length)
+  /*
+   * 参考图必须在裁剪**之后**注入，否则它会被当成最早的历史丢掉 ——
+   * 而被丢掉就等于白花钱还没效果。
+   * 只在模型支持视觉时注入：纯文本模型收到图会直接 400。
+   */
+  const withPortrait =
+    selfPortrait && modelSupportsImages(cfg.model) ? withSelfPortrait(trimmed, selfPortrait) : trimmed
+  const payload = [{ role: 'system', content: cfg.systemPrompt }, ...withPortrait]
 
   const headers = { 'Content-Type': 'application/json' }
   if (cfg.apiKey) headers.Authorization = `Bearer ${cfg.apiKey}`
@@ -441,9 +531,25 @@ export async function bumpAffinity(kind = 'chatMessage', now = new Date(), { ups
     source: sourceOfGain(kind),
   })
 
+  /*
+   * 连续互动天数 —— 与桌面端 `addAffinity` 同一口径：
+   * 昨天来过就 +1，断档（或首次）则从 1 重新开始。
+   *
+   * 手机端此前**从不维护这个字段**，而桌面端一直在写 ——
+   * 同一个人在两端的记录长得不一样，是备份互通/同步时的隐形地雷。
+   * 它不影响扣分规则，纯粹是「数据形状要一致」。
+   */
+  let streakDays = Number(cur.streakDays) || 0
+  if (cur.lastDay !== today) {
+    const y = new Date(now)
+    y.setDate(y.getDate() - 1)
+    streakDays = cur.lastDay === toDateKey(y) ? streakDays + 1 : 1
+  }
+
   return db.setAffinity({
     ...cur,
     ...next,
+    streakDays,
     /* `lastDay` 是旧字段（摸鱼统计在用），保留推进 */
     lastDay: today,
   })
@@ -481,27 +587,12 @@ export async function currentAffinity() {
   return { ...a, ...affinityLevel(a.points ?? 0) }
 }
 
-/** 参考图只在模型支持视觉时注入（否则纯文本模型会 400） */
-function withPortraitIfAny(messages, selfPortrait, model) {
-  const normalized = normalizeForRequest(messages)
-  if (!selfPortrait || !modelSupportsImages(model)) return normalized
-  /* 裁剪后再注入，保证参考图不会被当成最早历史丢掉 */
-  const trimmed = trim(normalized, 48000, 1200)
-  return withSelfPortrait(trimmed, selfPortrait)
-}
-
-function trim(messages, maxChars, reserve) {
-  const budget = Math.max(0, maxChars - reserve)
-  let total = 0
-  const kept = []
-  for (let i = messages.length - 1; i >= 0; i--) {
-    const len = contentCost(messages[i]?.content)
-    if (kept.length > 0 && total + len > budget) break
-    total += len
-    kept.push(messages[i])
-  }
-  return kept.reverse()
-}
+/*
+ * `withPortraitIfAny` / `trim` 已删除：
+ * 裁剪改用 shared 的 `trimByChars`（与桌面端同一份），参考图的注入顺序
+ * 就地写在 sendMessage 里 —— 原来那份的毛病是「预算写死 48000/1200」
+ * 且「不注入参考图就完全不裁」。
+ */
 
 /** 多段回复的相邻间隔（毫秒）—— 与桌面端 service.js 保持一致 */
 const REPLY_SEGMENT_GAP_MS = 1200
@@ -581,11 +672,48 @@ async function currentSessionId() {
   return list.length ? list[0].id : (await db.createSession()).id
 }
 
-/** 一次性（非流式）短生成 —— 用于故事判断这类「只要一个短回答」的场景 */
-export async function completeOnce({ settings, system, messages, maxTokens = 100 }) {
+/**
+ * 一次性（非流式）短生成 —— 用于挂机台词、主动找话题、图鉴判定这类
+ * 「只要一个短回答」的场景。
+ *
+ * ## 为什么这里也要注入易变块
+ *
+ * `system` 是**专用提示词**（CHATTER_SYSTEM_PROMPT / TOPIC_SYSTEM_PROMPT /
+ * 判定提示词），不是人设 —— 但它同样需要「现在几点、处在哪一档」：
+ *
+ *   - 不带时间块：她会在清晨冒一句「吃午饭了吗」；
+ *   - 不带关系块：一个刚认识的人也会说出「今天也想和你多待一会儿」，
+ *     而「主动程度」正是档位差异最明显的地方（最低档几乎不主动找他）。
+ *
+ * 桌面端的 `completeOnce` 一直是这么做的（同一个 `volatileContextFor`），
+ * 手机端此前只发了裸提示词，于是「同一份人设、两端两个性格」在**主动搭话**
+ * 这条路径上尤其明显。现在两端走同一条路。
+ *
+ * @param {object} opts
+ * @param {object} opts.settings
+ * @param {string} opts.system   专用提示词（覆盖人设，用于约束输出格式）
+ * @param {Array}  opts.messages 对话上下文
+ * @param {number} [opts.maxTokens]
+ * @param {object} [opts.runtime] now / isRestDay / affinityPoints / godMode；
+ *   缺 affinityPoints / isRestDay 时由本函数自己取（见下），调用方不必逐个伺候
+ */
+export async function completeOnce({ settings, system, messages, maxTokens = 100, runtime = {} }) {
   const st = await configStatus(settings)
   if (!st.ready) throw new Error(st.reason)
   const cfg = st.cfg
+
+  /*
+   * 调用方没给运行时上下文就自己补：
+   * 少一个字段就少一个提示块，而「静默少一块」是最难发现的那种不一致，
+   * 所以这里宁可按「真实档位 + 真实节假日」补齐，也不默认成最低档。
+   */
+  const rt = { now: new Date(), ...runtime }
+  if (rt.affinityPoints === undefined) rt.affinityPoints = (await affinityNow())?.points ?? 0
+  if (rt.isRestDay === undefined) rt.isRestDay = isRestDay(settings, rt.now, builtinHolidayTable(rt.now.getFullYear()))
+  if (rt.godMode === undefined) rt.godMode = settings.godMode === true
+
+  const systemPrompt = composeSystemPrompt(system, volatileContextFor(settings, rt))
+
   const res = await fetch(`${cfg.baseUrl}/chat/completions`, {
     method: 'POST',
     headers: {
@@ -594,7 +722,11 @@ export async function completeOnce({ settings, system, messages, maxTokens = 100
     },
     body: JSON.stringify({
       model: cfg.model,
-      messages: [{ role: 'system', content: system }, ...messages],
+      /* 预算口径与流式那条路一致：system 也占额度 */
+      messages: [
+        { role: 'system', content: systemPrompt },
+        ...trimByChars(messages, cfg.maxChars, systemPrompt.length),
+      ],
       max_tokens: maxTokens,
       temperature: 0.8,
       stream: false,

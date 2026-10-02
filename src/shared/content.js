@@ -392,3 +392,36 @@ export function buildRouteOptions(baseUrl = '', settings = {}) {
   /* 一个都没设就不塞空对象，保持请求体干净 */
   return Object.keys(provider).length ? { provider } : null
 }
+
+/**
+ * 按字符预算从最早的开始裁剪上下文，保留最近的对话。
+ *
+ * 放在 shared 而不是 `src/main/chat.js`：两端都要用（桌面主进程 / 手机浏览器），
+ * 而且它只依赖本文件的 `contentCost`，是个纯函数。
+ * 手机端早先自己写了一份，并且**只在注入参考图时才调用**——
+ * 结果是「用户在设置里改的 chatMaxChars 在手机端完全不生效」：
+ * 长对话会一路把上下文顶到超出预算，而桌面端是裁过的。
+ *
+ * 契约：
+ *   - 至少保留最后一条（用户当前输入），避免裁空了没法回答；
+ *   - `reserveChars` 用来把 system 提示词也算进预算 ——
+ *     人设越长，留给历史的额度越小，否则「人设 + 历史」总量仍会超。
+ *
+ * @param {Array}  messages [{role, content}]
+ * @param {number} maxChars 总预算（字符）
+ * @param {number} [reserveChars] 要预留出去的量（通常是 system 提示词长度）
+ */
+export function trimByChars(messages, maxChars, reserveChars = 0) {
+  if (!Array.isArray(messages) || messages.length === 0) return []
+  const budget = Math.max(0, maxChars - Math.max(0, reserveChars))
+  let total = 0
+  const kept = []
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const len = contentCost(messages[i]?.content)
+    /* 至少留一条：即使单条就超预算也要给模型一个输入 */
+    if (kept.length > 0 && total + len > budget) break
+    total += len
+    kept.push(messages[i])
+  }
+  return kept.reverse()
+}

@@ -167,10 +167,41 @@
         <small>同一模型多家 provider 时怎么挑</small>
       </label>
     </div>
-    <label class="field">
+    <!--
+      角色设定。
+      内置人设**不可改**，但可以「复制」出一份可编辑的副本 ——
+      与桌面端设置页同一套规矩（见 SettingsView.vue 的人设编辑段）。
+      此前手机端只有下面那个下拉框：用户能看见「角色设定」却改不了它，
+      只能在内置的三份之间切换（存储层当时连 updatePersona 都没有）。
+      这里用 div 而不是 label 包：label 里的按钮点击会被当成「激活控件」。
+    -->
+    <div class="field">
       <span>角色设定</span>
       <select id="f-persona"></select>
-    </label>
+      <div class="row persona-actions">
+        <button class="btn small" id="btn-persona-duplicate" type="button" title="复制当前人设另存为可编辑的副本">复制</button>
+        <button class="btn small" id="btn-persona-new" type="button" title="新建空白人设">新建</button>
+        <button class="btn small" id="btn-persona-edit" type="button" hidden>编辑</button>
+        <button class="btn small danger" id="btn-persona-delete" type="button" hidden>删除</button>
+      </div>
+      <small>内置人设不可改；点「复制」会另存一份可编辑的副本，随便改里面的提示词</small>
+      <!-- 操作结果提示：失败不自动清除（静默失败是最难查的那种问题） -->
+      <p class="persona-msg" id="persona-msg"></p>
+      <!-- 人设编辑器：点「复制 / 新建 / 编辑」后出现 -->
+      <div class="persona-editor" id="persona-editor" hidden>
+        <input id="f-persona-label" type="text" maxlength="40" placeholder="人设名称" autocapitalize="off" />
+        <textarea
+          id="f-persona-prompt"
+          rows="8"
+          placeholder="在这里写人设提示词，例如：&#10;你叫 XX，是一个……&#10;&#10;【性格】&#10;【说话方式】&#10;【绝对不要】"
+        ></textarea>
+        <div class="row">
+          <button class="btn small" id="btn-persona-cancel" type="button">取消</button>
+          <button class="btn small primary" id="btn-persona-save" type="button">保存</button>
+        </div>
+        <small id="persona-editor-count"></small>
+      </div>
+    </div>
     <!-- 角色设定图：高中 / 大学两个阶段，和人设里的描述对应 -->
     <div class="field">
       <span>角色设定图</span>

@@ -34,7 +34,7 @@ const DIST = join(ROOT, 'dist-mobile')
  * 会在浏览器里 404 —— 而构建脚本**只检查这张清单里的文件是否存在**，
  * 不解析 import，所以漏掉时构建照样「成功」。加 shared 模块的连锁依赖时记得回来。
  */
-const MODULES = ['content.js', 'moyu.js', 'tierLines.js', 'interactions.js', 'outfitStories.js', 'photoStories.js', 'photoMessage.js', 'chatBackground.js', 'tapLines.js', 'chatter.js', 'dayInfo.js', 'holidays.js', 'gallery.js']
+const MODULES = ['content.js', 'moyu.js', 'tierLines.js', 'interactions.js', 'prompt.js', 'outfitStories.js', 'photoStories.js', 'photoMessage.js', 'chatBackground.js', 'tapLines.js', 'chatter.js', 'dayInfo.js', 'holidays.js', 'gallery.js']
 
 /* 需要一起打包进产物的手机端文件 */
 const APP_FILES = [

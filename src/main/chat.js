@@ -4,91 +4,26 @@
  * 用 Node 内置 fetch，不引第三方 SDK；AbortController 支持中途停止。
  * 不依赖 electron，可被脚本直接调用做测试。
  */
-import { CHAT_PERSONAS, timeContextFor, affinityContextFor } from '../shared/moyu.js'
-import { normalizeForRequest, contentCost, modelSupportsImages, withSelfPortrait, buildRouteOptions } from '../shared/content.js'
-import { affinityView } from '../shared/interactions.js'
+import { CHAT_PERSONAS } from '../shared/moyu.js'
+import { normalizeForRequest, modelSupportsImages, withSelfPortrait, buildRouteOptions, trimByChars } from '../shared/content.js'
+import { composeSystemPrompt, volatileContextFor } from '../shared/prompt.js'
 import { httpTransport } from '../shared/bridge/transport.js'
 
-/**
- * 组装 system 提示词：**稳定内容在前，易变内容在后**。
+/*
+ * `composeSystemPrompt` / `volatileContextFor` 的**实现已上移到
+ * `src/shared/prompt.js`**：手机端（纯浏览器 PWA）import 不到 src/main，
+ * 只能把同样的逻辑抄一遍，两端因此会漂移。
  *
- * 这是为了命中 DeepSeek 的前缀缓存（命中价 $0.003/M vs 未命中 $0.15/M，差 50 倍）。
- * 前缀缓存是「从头逐字匹配」的 —— 开头一变，后面全部重算。
- *
- * 所以顺序必须是：
- *   [人设 / 固定提示词][易变块：时间块 + 关系块]
- *                     ↑ 时间块每分钟变、关系块每轮可能变，
- *                       但它们都在最后，不影响前面命中缓存
- *
- * 之前是反过来（时间块在最前），后果是 1560 字的人设**每轮都按未命中价重算**，
- * 实测这部分的费用是命中价的 50 倍。
- *
- * 易变块之间**顺序无所谓**（都在人设之后，前缀命中只看到人设结束为止），
- * 这里固定成「时间块 → 关系块」：时间块是每轮都变的，关系块只在档位
- * 变化时才变，把变得最勤的放最后，命中区间能多覆盖一点。
- *
- * @param {string} stable   稳定部分（人设 / 专用提示词）
- * @param {string} volatile 易变部分（时间块、关系块）；为空时只返回 stable
+ * 这里保留 re-export，只为不破坏既有调用方（scripts/、其它 main 模块）。
  */
-export function composeSystemPrompt(stable, volatile = '') {
-  const a = String(stable ?? '')
-  const b = String(volatile ?? '')
-  if (!b) return a
-  if (!a) return b
-  return `${a}\n\n${b}`
-}
+export { composeSystemPrompt, volatileContextFor }
 
-/**
- * 拼出本次请求的**易变块**（人设之后那一段）。
- *
- * 时间块 + 关系块都在这里，两端（桌面 / 手机）共用同一个函数，
- * 免得「两端各写一遍、改一处漏一处」——手机端 mobile/chat.js 直接调它。
- *
- * @param {object} runtime  运行时上下文
- * @param {number} [runtime.affinityPoints] 当前会话的亲密度点数
- * @param {boolean}[runtime.godMode]        上帝模式（读时覆盖成最高档）
- * @param {Date}   [runtime.now]
- * @param {boolean}[runtime.isRestDay]
- * @param {boolean}[runtime.withClock]       false = 不注入时间块（自检/测试用）
- * @param {boolean}[runtime.withAffinity]    false = 不注入关系块（自检/测试用）
+/*
+ * `trimByChars` 同理，实现移到 `src/shared/content.js`（只依赖 contentCost，
+ * 是纯函数）。手机端现在也用它，不再自己写一份「只在注入参考图时才裁」的版本。
  */
-export function volatileContextFor(settings, runtime = {}) {
-  const blocks = []
+export { trimByChars }
 
-  const clock =
-    runtime.withClock === false
-      ? ''
-      : timeContextFor(runtime.now ?? new Date(), {
-          workStart: settings.workStart,
-          workEnd: settings.workEnd,
-          isRestDay: runtime.isRestDay,
-        })
-  if (clock) blocks.push(clock)
-
-  /*
-   * 关系块：把「她现在处在哪一档」告诉模型。
-   *
-   * 人设里那张档位表是**静态**的 —— 不注入当前档位，模型不知道自己在哪一格，
-   * 只会按最高档（或随机一档）演。所以这一行是档位表生效的前提。
-   *
-   * `runtime.affinityPoints` 未传时按 0 算（等价于最低档）。
-   * 不这么做的话，「忘了传 points」会静默变成「没有任何档位提示」，
-   * 人设里的档位表又变成摆设 —— 宁可默认成最低档这种可观察的错。
-   */
-  if (runtime.withAffinity !== false) {
-    const points = Math.max(0, Number(runtime.affinityPoints) || 0)
-    const view = affinityView(points, runtime.godMode === true)
-    const affinity = affinityContextFor(points, {
-      name: view.level?.name,
-      next: view.next,
-      isMax: view.isMax,
-      godMode: view.godMode === true,
-    })
-    if (affinity) blocks.push(affinity)
-  }
-
-  return blocks.join('\n\n')
-}
 
 /** 把设置解析成一次请求所需的参数。
  *
@@ -148,28 +83,10 @@ export function resolveChatConfig(settings, customPersonas = [], runtime = {}) {
  * 但它的 token 成本又实打实存在（官方：每张最多 1024 token），
  * 所以既不能按真实长度算，也不能当零成本 —— 用一个固定占位。
  */
-/**
- * 按字符预算从最早的开始裁剪上下文，保留最近的对话。
- * 至少保留最后一条（用户当前输入），避免裁空了没法回答。
- *
- * 注意：预算要覆盖「历史 + system 提示词」的总量，否则人设越写越长时，
- * 实际请求会超出预算（人设 800 字 + 历史 3000 字 = 3800，仍然超）。
+/*
+ * 按字符预算裁剪历史的 `trimByChars` 已移到 `src/shared/content.js`
+ * （见文件顶部的 re-export 说明）——手机端现在用的是同一份实现。
  */
-export function trimByChars(messages, maxChars, reserveChars = 0) {
-  if (!Array.isArray(messages) || messages.length === 0) return []
-  const budget = Math.max(0, maxChars - Math.max(0, reserveChars))
-  let total = 0
-  const kept = []
-  for (let i = messages.length - 1; i >= 0; i--) {
-    const len = contentCost(messages[i]?.content)
-    /* 至少留一条：即使单条就超预算也要给模型一个输入 */
-    if (kept.length > 0 && total + len > budget) break
-    total += len
-    kept.push(messages[i])
-  }
-  return kept.reverse()
-}
-
 function clampNumber(value, min, max, fallback) {
   const n = Number(value)
   if (!Number.isFinite(n)) return fallback

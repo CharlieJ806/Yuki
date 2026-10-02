@@ -245,19 +245,38 @@ export async function countMessages(sessionId) {
  * 兼容读取），判定直接复用 `@shared/interactions.js` 的
  * affinityLevel / settleAffinity，两端规则不会漂移。
  */
+/**
+ * 亲密度记录的完整字段与默认值 —— 新记录与老记录都按它补齐。
+ * 字段名与桌面端 `readAffinity` 一一对应，不能只加不改名（值直接进存储）。
+ */
+const AFFINITY_DEFAULT = {
+  points: 0,
+  lastDay: null,
+  /** 连续互动天数（今天来过就 +1，断档重新从 1 起） */
+  streakDays: 0,
+  gainDay: null,
+  gainToday: 0,
+  gainBySource: {},
+  lastActive: null,
+  decaySettledDays: 0,
+  dailyDay: null,
+}
+
 export async function getAffinity() {
-  return (
-    (await getMeta('affinity', null)) ?? {
-      points: 0,
-      lastDay: null,
-      gainDay: null,
-      gainToday: 0,
-      gainBySource: {},
-      lastActive: null,
-      decaySettledDays: 0,
-      dailyDay: null,
-    }
-  )
+  const saved = (await getMeta('affinity', null)) ?? {}
+  /*
+   * 与桌面端 `readAffinity` 同一口径：**字段全量补齐 + 只对数值做钳制**。
+   *
+   * 早先是「有记录就原样返回」，于是老记录缺哪个字段就缺哪个 ——
+   * 桌面端一直补 `streakDays`（连续互动天数），手机端从来不写它，
+   * 两端同一份数据却长得不一样（备份互通、将来做同步都要为这层差异写特例）。
+   */
+  return {
+    ...AFFINITY_DEFAULT,
+    ...saved,
+    points: Math.max(0, Number(saved.points) || 0),
+    streakDays: Number(saved.streakDays) || 0,
+  }
 }
 
 export async function setAffinity(next) {
@@ -274,29 +293,88 @@ export async function totalMessages() {
 
 /* ---------- 自定义人设 ---------- */
 
+/*
+ * 与桌面端 `src/main/store.js` 的 personas 段**同口径**：
+ * 软删除（deletedAt）、sortOrder 排序、label 截断 40 字、
+ * 「空名称不覆盖原名」（见 updatePersona）。
+ *
+ * 手机端此前只有 list / create / delete，**没有 update** ——
+ * 所以「改人设」在手机上是根本做不到的（存储层就没有这个能力）。
+ */
+
 export async function listPersonas() {
   const db = await openDb()
   const rows = await req(db.transaction('personas').objectStore('personas').getAll())
-  return rows.filter((p) => !p.deletedAt).sort((a, b) => (a.createdAt || 0) - (b.createdAt || 0))
+  return rows
+    .filter((p) => !p.deletedAt)
+    /* 排序与桌面端一致：sortOrder 优先，旧记录没有该字段时退回创建时间 */
+    .sort((a, b) => (a.sortOrder ?? 0) - (b.sortOrder ?? 0) || (a.createdAt || 0) - (b.createdAt || 0))
 }
 
-export async function createPersona({ label, prompt }) {
+export async function getPersona(id) {
+  const db = await openDb()
+  const p = await req(db.transaction('personas').objectStore('personas').get(id))
+  return p && !p.deletedAt ? p : null
+}
+
+export async function createPersona({ id, label, prompt }) {
+  const db = await openDb()
+  /*
+   * sortOrder 取当前最大值 +1（与桌面端相同）。
+   * 早先这里不写 sortOrder，列表只能按创建时间排 —— 一旦将来加了拖拽
+   * 排序或同步合并，两端的顺序就会不一致。
+   */
+  const rows = await req(db.transaction('personas').objectStore('personas').getAll())
+  const maxOrder = rows.reduce((m, p) => Math.max(m, Number(p.sortOrder) || 0), 0)
+  const now_ = Date.now()
   const p = {
-    id: `custom-${uid().slice(0, 8)}`,
+    id: id || `custom-${uid().slice(0, 8)}`,
     label: String(label ?? '').trim().slice(0, 40) || '自定义人设',
     prompt: String(prompt ?? ''),
-    createdAt: Date.now(),
+    sortOrder: maxOrder + 1,
+    createdAt: now_,
+    updatedAt: now_,
   }
-  const db = await openDb()
   await req(db.transaction('personas', 'readwrite').objectStore('personas').put(p))
   return p
+}
+
+/**
+ * 修改一份自定义人设。
+ *
+ * 语义逐条对齐桌面端 `store.updatePersona`：
+ *   - 记录不存在（或已软删）→ 返回 null，调用方据此给出可见的失败提示；
+ *   - `patch.label === ''`（用户清空名称）→ **保留原名**，不能让名称变成空白；
+ *   - 只传 prompt 时 label 原样不动（用 `!== undefined` 判定，不是真值判定）。
+ *
+ * @returns {Promise<object|null>}
+ */
+export async function updatePersona(id, patch) {
+  const db = await openDb()
+  /* 读与写分两个事务：IndexedDB 的事务在 await 之后会失活，不能复用（同 deletePersona） */
+  const existing = await req(db.transaction('personas').objectStore('personas').get(id))
+  if (!existing || existing.deletedAt) return null
+  const next = {
+    ...existing,
+    label:
+      patch?.label !== undefined ? String(patch.label).trim().slice(0, 40) || existing.label : existing.label,
+    prompt: patch?.prompt !== undefined ? String(patch.prompt) : existing.prompt,
+    updatedAt: Date.now(),
+  }
+  await req(db.transaction('personas', 'readwrite').objectStore('personas').put(next))
+  return next
 }
 
 export async function deletePersona(id) {
   const db = await openDb()
   const p = await req(db.transaction('personas').objectStore('personas').get(id))
   if (!p) return false
-  await req(db.transaction('personas', 'readwrite').objectStore('personas').put({ ...p, deletedAt: Date.now() }))
+  await req(
+    db
+      .transaction('personas', 'readwrite')
+      .objectStore('personas')
+      .put({ ...p, deletedAt: Date.now(), updatedAt: Date.now() }),
+  )
   return true
 }
 

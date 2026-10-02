@@ -178,3 +178,38 @@ export function holidayCountdownText(from = new Date()) {
   if (next.days === 1) return `明天是${next.name}`
   return `离${next.name} ${next.days} 天`
 }
+
+/**
+ * 内置表 → `isRestDay(settings, date, holidayTable)` 要的形状。
+ *
+ * ## 为什么需要它
+ *
+ * 桌面端的表是**联网**拉的（`src/main/holiday.js`，形状
+ * `{'MM-DD': {isHoliday, isMakeup}}`），本文件这份是内置常量、形状是紧凑元组。
+ * 手机端是纯静态 PWA，用不了联网那套，但它同样需要一张**同形状**的表 ——
+ * 否则两端对「今天休不休息」的判断会分叉：
+ *
+ *   - 调休补班的周末：桌面说上班，手机说休息
+ *   - 放假的周三（如国庆）：桌面说休息，手机说上班
+ *
+ * `isRestDay` 的结果直接决定 system 里那个时间块（「今天上班 / 今天休息」），
+ * 所以分叉之后，同一份人设两端会说出不一样的话 —— 正是要消灭的那类不一致。
+ *
+ * 本表与桌面端**同源**（timor.tech），转换后两端结论一致；
+ * 表没覆盖到的年份返回 `null`，`isRestDay` 会自动退回「只看周末」，
+ * 不会抛错（代价见本文件开头的「每年要手动更新一次」）。
+ *
+ * @param {number|string} year
+ * @returns {Record<string, {isHoliday:boolean, isMakeup:boolean}>|null}
+ */
+export function builtinHolidayTable(year) {
+  const rows = HOLIDAY_TABLE[String(year)]
+  if (!rows) return null
+  const out = {}
+  for (const [monthDay, row] of Object.entries(rows)) {
+    const isHoliday = row[0] === true
+    /* 形状与 src/main/holiday.js 的产物严格一致：只这两个字段 */
+    out[monthDay] = { isHoliday, isMakeup: !isHoliday }
+  }
+  return out
+}
