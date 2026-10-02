@@ -3188,13 +3188,24 @@ try {
      * 而聊天的额度是 `Infinity`（用户要求取消总上限），这才是
      * 「能刷到顶」的那条路。
      */
+    let capped = null
     for (let day = 0; day < 10; day++) {
       const d = new Date(2026, 8, 21 + day, 14, 0)
       /* 第 4 个参数是「时间」——不传的话每天都是同一天，测不出跨天重置 */
-      for (let i = 0; i < 20; i++) await service.addAffinity(10, { kind: 'chat' }, null, d)
+      for (let i = 0; i < 20; i++) capped = await service.addAffinity(10, { kind: 'chat' }, null, d)
     }
-    check('亲密度封顶', (await service.affinity()).points, AFFINITY_MAX_POINTS)
-    check('封顶后 isMax', (await service.affinity()).isMax, true)
+    /*
+     * 断言取**最后一次 `addAffinity` 的返回值**，不取 `service.affinity()` ——
+     * 理由与下面 ⑤ 那段完全相同（见「每日流失」那里的注释）：
+     * 读路径带「读时结算」，用的是**真实今天**，而这里模拟的是 9/21~9/30。
+     *
+     * 真实日期一旦走过 9/30，再读一次就会把这之后的日子按流失结掉
+     * （实测 2026-10-02 读到 290 而不是 300，`isMax` 也跟着变 false），
+     * 于是这两条断言「到点就红」—— 与产品逻辑无关，是测试的时间依赖。
+     * `addAffinity` 返回的快照是按传入的 `now` 算的，正好是这里要的口径。
+     */
+    check('亲密度封顶', capped.points, AFFINITY_MAX_POINTS)
+    check('封顶后 isMax', capped.isMax, true)
     await service.resetAffinity()
     check('重置归零', (await service.affinity()).points, 0)
     check('重置清空当日得分', (await service.affinity()).gainToday ?? 0, 0)
